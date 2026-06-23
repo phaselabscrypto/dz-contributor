@@ -1,0 +1,10 @@
+# ── Supply-chain hardening ─────────────────────────────────────────
+# Reject packages published less than 7 days ago. Gives the community
+# and npm security time to catch compromised releases before they
+# land in our lockfile.
+# Value is in minutes: 7 days × 24 h × 60 min = 10080
+minimumReleaseAge: 10080
+
+# Not a monorepo — single root package.
+packages:
+  - "."

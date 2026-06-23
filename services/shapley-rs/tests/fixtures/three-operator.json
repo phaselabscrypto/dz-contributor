@@ -1,0 +1,32 @@
+{
+  "private_links": [
+    { "device1": "NYC1", "device2": "LON1", "latency": 35.0, "bandwidth": 100.0, "uptime": 0.99, "shared": null },
+    { "device1": "LON1", "device2": "FRA1", "latency": 8.0,  "bandwidth": 100.0, "uptime": 0.99, "shared": null },
+    { "device1": "FRA1", "device2": "TKY1", "latency": 105.0, "bandwidth": 10.0, "uptime": 0.97, "shared": null },
+    { "device1": "NYC1", "device2": "TKY1", "latency": 130.0, "bandwidth": 10.0, "uptime": 0.95, "shared": null },
+    { "device1": "LON1", "device2": "AMS1", "latency": 6.0,  "bandwidth": 10.0, "uptime": 0.99, "shared": null }
+  ],
+  "devices": [
+    { "device": "NYC1", "edge": 1, "operator": "Alpha"   },
+    { "device": "LON1", "edge": 1, "operator": "Alpha"   },
+    { "device": "FRA1", "edge": 1, "operator": "Beta"    },
+    { "device": "TKY1", "edge": 1, "operator": "Beta"    },
+    { "device": "AMS1", "edge": 1, "operator": "Gamma"   }
+  ],
+  "public_links": [
+    { "city1": "NYC", "city2": "LON", "latency": 70.0  },
+    { "city1": "LON", "city2": "FRA", "latency": 18.0  },
+    { "city1": "LON", "city2": "AMS", "latency": 14.0  },
+    { "city1": "FRA", "city2": "TKY", "latency": 220.0 },
+    { "city1": "NYC", "city2": "TKY", "latency": 250.0 }
+  ],
+  "demands": [
+    { "start": "NYC", "end": "FRA", "receivers": 4, "traffic": 2.0, "priority": 1.0, "type": 1, "multicast": false },
+    { "start": "NYC", "end": "TKY", "receivers": 2, "traffic": 2.0, "priority": 1.0, "type": 1, "multicast": false },
+    { "start": "LON", "end": "TKY", "receivers": 1, "traffic": 2.0, "priority": 1.0, "type": 1, "multicast": false },
+    { "start": "LON", "end": "AMS", "receivers": 3, "traffic": 1.0, "priority": 2.0, "type": 2, "multicast": true  }
+  ],
+  "operator_uptime": 0.98,
+  "contiguity_bonus": 5.0,
+  "demand_multiplier": 1.0
+}

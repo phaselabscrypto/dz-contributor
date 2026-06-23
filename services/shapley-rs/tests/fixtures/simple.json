@@ -1,0 +1,28 @@
+{
+  "private_links": [
+    { "device1": "SIN1", "device2": "FRA1", "latency": 50.0, "bandwidth": 10.0, "uptime": 1.0, "shared": null },
+    { "device1": "FRA1", "device2": "AMS1", "latency": 3.0,  "bandwidth": 10.0, "uptime": 1.0, "shared": null },
+    { "device1": "FRA1", "device2": "LON1", "latency": 5.0,  "bandwidth": 10.0, "uptime": 1.0, "shared": null }
+  ],
+  "devices": [
+    { "device": "SIN1", "edge": 1, "operator": "Alpha" },
+    { "device": "FRA1", "edge": 1, "operator": "Alpha" },
+    { "device": "AMS1", "edge": 1, "operator": "Beta"  },
+    { "device": "LON1", "edge": 1, "operator": "Beta"  }
+  ],
+  "public_links": [
+    { "city1": "SIN", "city2": "FRA", "latency": 100.0 },
+    { "city1": "SIN", "city2": "AMS", "latency": 102.0 },
+    { "city1": "FRA", "city2": "LON", "latency": 7.0   },
+    { "city1": "FRA", "city2": "AMS", "latency": 5.0   }
+  ],
+  "demands": [
+    { "start": "SIN", "end": "AMS", "receivers": 1, "traffic": 1.0, "priority": 1.0, "type": 1, "multicast": true  },
+    { "start": "SIN", "end": "LON", "receivers": 5, "traffic": 1.0, "priority": 2.0, "type": 1, "multicast": true  },
+    { "start": "AMS", "end": "LON", "receivers": 2, "traffic": 3.0, "priority": 1.0, "type": 2, "multicast": false },
+    { "start": "AMS", "end": "FRA", "receivers": 1, "traffic": 3.0, "priority": 1.0, "type": 2, "multicast": false }
+  ],
+  "operator_uptime": 0.98,
+  "contiguity_bonus": 5.0,
+  "demand_multiplier": 1.0
+}

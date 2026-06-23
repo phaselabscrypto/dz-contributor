@@ -1,0 +1,48 @@
+# Dev-only compose for local async (/jobs/*) testing — brings up Redis.
+#
+# Why Redis-only (and not the full stack): the service's working-tree Cargo.toml
+# uses a PATH dependency on the sibling repo `../../../network-shapley-rs` (where
+# the in-progress crate work lives — it is NOT in the committed pinned git rev).
+# A service-scoped Docker build context can't see that sibling, and host `cargo`
+# resolves it natively with fast incremental rebuilds. So: compose runs Redis,
+# you run the `api` + `worker` roles on the host.
+#
+# Usage (from services/shapley-rs):
+#   docker compose up -d                      # start Redis (detached)
+#   # terminal 1 — API (enqueues + serves poll/cancel):
+#   PORT=8099 REDIS_URL=redis://:devpass@127.0.0.1:6390 cargo run -- api
+#   # terminal 2 — worker (drains the stream; REQUIRED or jobs stay "running"):
+#   PORT=8098 REDIS_URL=redis://:devpass@127.0.0.1:6390 cargo run -- worker
+#
+#   # then drive the lifecycle:
+#   JOB=$(curl -fsS -X POST localhost:8099/jobs/simulate \
+#     -H 'content-type: application/json' --data @sim.json \
+#     | sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p')
+#   curl -fsS localhost:8099/jobs/$JOB           # poll: running → done
+#   curl -fsS -X DELETE localhost:8099/jobs/$JOB # cancel (only bites a sampling job)
+#
+# Inspect: redis-cli -p 6390 -a devpass keys 'shapley:whatif:*'
+# Teardown: docker compose down
+#
+# NOTE: dev-only plaintext password; the production Redis uses the same auth mode
+# (in-memory, --requirepass, no persistence). For a pure-container full-stack repro,
+# see the README "Local async testing" section.
+services:
+  redis:
+    image: docker.io/redis:7.4.1-alpine
+    container_name: shapley-redis-dev
+    command:
+      - redis-server
+      - --requirepass
+      - devpass
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    ports:
+      - "6390:6379" # 6390 on host to avoid clashing with a local Redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "devpass", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

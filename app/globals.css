@@ -1,0 +1,467 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/*
+  DZ CONTRIBUTOR Rewards — design tokens
+  Dark-first. Single theme. Square corners (--radius: 0px).
+  Palette: cream #F3EED9, gold #FCE184, blue #80D0FF, near-black #0F0E0C.
+*/
+
+:root {
+  --background: #0f0e0c;
+  --foreground: #f3eed9;
+
+  --surface: color-mix(in srgb, var(--foreground) 5%, transparent);
+  --surface-2: color-mix(in srgb, var(--foreground) 8%, transparent);
+  --surface-3: color-mix(in srgb, var(--foreground) 12%, transparent);
+
+  --border: color-mix(in srgb, var(--foreground) 16%, transparent);
+  --border-strong: color-mix(in srgb, var(--foreground) 20%, transparent);
+
+  --muted: color-mix(in srgb, var(--foreground) 5%, transparent);
+  --muted-foreground: color-mix(in srgb, var(--foreground) 65%, transparent);
+
+  --primary: #fce184;
+  --primary-foreground: #0f0e0c;
+
+  --accent: #fce184;
+  --accent-foreground: #0f0e0c;
+
+  --positive: #80d0ff;
+  --negative: #ff7a7a;
+  --warning: #fce184;
+  --info: #80d0ff;
+
+  --ring: rgba(252, 225, 132, 0.5);
+
+  /* Popover / dropdown menu surface — must be fully opaque so portaled
+     menus (radix Select, etc.) don't composite with whatever's behind
+     them. Slightly lighter than --background for visible elevation. */
+  --popover: #1a1714;
+  --popover-foreground: var(--foreground);
+
+  --radius: 0px;
+
+  /* Font stacks */
+  --font-sans: var(--font-outfit), ui-sans-serif, system-ui, sans-serif;
+  --font-mono:
+    var(--font-kode-mono), ui-monospace, "JetBrains Mono", Menlo, monospace;
+  --font-display:
+    var(--font-audiowide), var(--font-outfit), system-ui, sans-serif;
+  --font-wordmark:
+    var(--font-audiowide), var(--font-outfit), system-ui, sans-serif;
+}
+
+/*
+  Light theme — inverts the dark palette.
+  Activated by setting <html data-theme="light"> via the ThemeToggle.
+
+  Critical: surfaces and borders always tint against --foreground (the
+  ink color) over --background (the paper color). Inverting that
+  produces ink-over-ink (invisible). All cream-tinted aliases below
+  reference --foreground for the same reason, so they auto-flip.
+*/
+[data-theme="light"] {
+  --background: #f4eedb;
+  --foreground: #1a1714;
+
+  --surface: color-mix(in srgb, var(--foreground) 4%, transparent);
+  --surface-2: color-mix(in srgb, var(--foreground) 7%, transparent);
+  --surface-3: color-mix(in srgb, var(--foreground) 11%, transparent);
+
+  --border: color-mix(in srgb, var(--foreground) 18%, transparent);
+  --border-strong: color-mix(in srgb, var(--foreground) 28%, transparent);
+
+  --muted: color-mix(in srgb, var(--foreground) 4%, transparent);
+  --muted-foreground: color-mix(in srgb, var(--foreground) 65%, transparent);
+
+  --primary: #8a6d10;
+  --primary-foreground: #fff8df;
+
+  --accent: #8a6d10;
+  --accent-foreground: #fff8df;
+
+  --positive: #1f6fb5;
+  --negative: #b03434;
+  --warning: #8a6d10;
+  --info: #1f6fb5;
+
+  --ring: rgba(138, 109, 16, 0.5);
+
+  /* Light-mode popover — slightly darker than --background for elevation. */
+  --popover: #ede4c5;
+  --popover-foreground: var(--foreground);
+}
+
+/* Map tokens to Tailwind v4 @theme inline so utility classes pick them up */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-ring: var(--ring);
+
+  --radius-sm: var(--radius);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius);
+  --radius-xl: var(--radius);
+  --radius-2xl: var(--radius);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
+  --font-wordmark: var(--font-wordmark);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+  }
+  /* Numerals always tabular for tables and metric blocks */
+  table,
+  .tabular-nums,
+  [data-numeric] {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+    font-family: var(--font-mono);
+  }
+  h1,
+  h2,
+  h3,
+  .display,
+  [data-display] {
+    font-family: var(--font-display);
+    font-weight: 400;
+    letter-spacing: 0.01em;
+  }
+  h1 {
+    letter-spacing: 0.02em;
+  }
+  code,
+  kbd,
+  pre,
+  samp,
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+  /* Native <select> option backgrounds default to transparent on most
+     browsers, which renders unreadably on our dark theme. Force the
+     dropdown surface to match our popover token. */
+  select {
+    background-color: var(--background);
+    color: var(--foreground);
+  }
+  select option {
+    background-color: var(--popover);
+    color: var(--popover-foreground);
+  }
+}
+
+@utility tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Legacy Phase class aliases for component compatibility */
+/* Text color aliases */
+@layer utilities {
+  .text-cream {
+    @apply text-foreground;
+  }
+  /*
+    Cream text aliases.
+
+    The numeric suffix is a LEGACY visual-emphasis level. WCAG AA
+    requires 4.5:1 contrast for normal text against the background.
+    On our cream-over-near-black palette that translates to a minimum
+    ~50% effective opacity. The tiers below previously failed AA:
+      text-cream-20 → ~1.85:1 ❌
+      text-cream-30 → ~2.8:1  ❌
+      text-cream-40 → ~3.97:1 ❌
+    Bumped to the safe band (50-58%) while preserving relative
+    hierarchy so muted text still reads as less prominent.
+
+    Background and border variants (`.bg-cream-NN`, `.border-cream-NN`)
+    are unaffected — only text colors need the contrast floor. The
+    .text-cream-5/8/10/15 entries are kept at their legacy values
+    because they have zero callers as text colors (border/bg only).
+  */
+  .text-cream-5 {
+    color: color-mix(in srgb, var(--foreground) 5%, transparent);
+  }
+  .text-cream-8 {
+    color: color-mix(in srgb, var(--foreground) 8%, transparent);
+  }
+  .text-cream-10 {
+    color: color-mix(in srgb, var(--foreground) 10%, transparent);
+  }
+  .text-cream-15 {
+    color: color-mix(in srgb, var(--foreground) 15%, transparent);
+  }
+  /*
+    Dark theme floors. Cream on near-black is reasonably forgiving —
+    50% gets us 4.75:1 and 54% gets us 5.36:1 (both pass AA).
+  */
+  .text-cream-20 {
+    /* Bumped 20% → 50% for WCAG AA (dark theme: 4.75:1). */
+    color: color-mix(in srgb, var(--foreground) 50%, transparent);
+  }
+  .text-cream-30 {
+    /* Bumped 30% → 54% for WCAG AA (dark theme: 5.36:1). */
+    color: color-mix(in srgb, var(--foreground) 54%, transparent);
+  }
+  .text-cream-40 {
+    /* Bumped 40% → 58% for WCAG AA (dark theme: 6.02:1). */
+    color: color-mix(in srgb, var(--foreground) 58%, transparent);
+  }
+  .text-cream-50 {
+    color: color-mix(in srgb, var(--foreground) 60%, transparent);
+  }
+  .text-cream-60 {
+    color: color-mix(in srgb, var(--foreground) 65%, transparent);
+  }
+  .text-cream-80 {
+    color: color-mix(in srgb, var(--foreground) 80%, transparent);
+  }
+
+  /*
+    Light theme floors. Ink on cream needs a higher floor — 65% is the
+    minimum that clears AA against the cream paper background. Bump
+    every text-cream-NN tier to at least 65% so muted labels stay
+    readable when the user flips to the light palette.
+  */
+  [data-theme="light"] .text-cream-20,
+  [data-theme="light"] .text-cream-30,
+  [data-theme="light"] .text-cream-40,
+  [data-theme="light"] .text-cream-50 {
+    color: color-mix(in srgb, var(--foreground) 65%, transparent);
+  }
+  [data-theme="light"] .text-cream-60 {
+    color: color-mix(in srgb, var(--foreground) 70%, transparent);
+  }
+
+  /* Background color aliases.
+     `.bg-cream` / `.text-dark` form the "filled action" pair used on
+     CTAs like Calculate Impact and the LiveMap toggle. They mean
+     "bright fill, contrasting text" — they must invert WITH the theme,
+     not be locked to the cream-on-dark dark-mode reading. */
+  .bg-dark {
+    @apply bg-background;
+  }
+  .bg-dark\/80 {
+    background-color: color-mix(in srgb, var(--background) 80%, transparent);
+  }
+  .text-dark {
+    color: var(--background);
+  }
+  .bg-cream-3 {
+    @apply bg-surface;
+  }
+  .bg-cream-5 {
+    @apply bg-surface;
+  }
+  .bg-cream-8 {
+    @apply bg-surface-2;
+  }
+  .bg-cream-10 {
+    @apply bg-surface-2;
+  }
+  .bg-cream-15 {
+    @apply bg-surface-3;
+  }
+  .bg-cream-30 {
+    @apply bg-surface-3;
+  }
+  .bg-cream-80 {
+    @apply bg-surface-3;
+  }
+  .bg-cream {
+    background-color: var(--foreground);
+  }
+  .bg-cream-80\/hover,
+  .hover\:bg-cream-80:hover {
+    background-color: color-mix(in srgb, var(--foreground) 80%, transparent);
+  }
+
+  /* Border color aliases */
+  .border-cream-5 {
+    border-color: color-mix(in srgb, var(--foreground) 5%, transparent);
+  }
+  .border-cream-8 {
+    @apply border-border;
+  }
+  .border-cream-10 {
+    @apply border-border;
+  }
+  .border-cream-15 {
+    @apply border-border-strong;
+  }
+  .border-cream-20 {
+    @apply border-border-strong;
+  }
+  .border-cream-30 {
+    @apply border-border-strong;
+  }
+
+  /* Status colors (Phase palette) */
+  .bg-green {
+    background-color: #80d0ff;
+  }
+  .bg-green\/5 {
+    background-color: rgba(128, 208, 255, 0.05);
+  }
+  .bg-green\/10 {
+    background-color: rgba(128, 208, 255, 0.1);
+  }
+  .text-green {
+    color: #80d0ff;
+  }
+
+  /* Font family aliases */
+  .font-body {
+    @apply font-sans;
+  }
+}
+
+/*
+  Status-banner overrides for LIGHT theme.
+
+  Tailwind's amber-300 / emerald-300 / red-300 are calibrated for dark
+  backgrounds and fall under 2:1 contrast on cream paper. Bump to the
+  700/800 tiers in light mode so warnings/errors are actually readable.
+  Tinted backgrounds also get a touch more opacity so the colored fill
+  reads against cream.
+
+  Verified contrast on cream-paper #f4eedb:
+    amber-800  6.11:1  ✅
+    emerald-700 4.73:1 ✅
+    red-700    5.58:1  ✅
+*/
+[data-theme="light"] {
+  .text-amber-200,
+  .text-amber-300,
+  .text-amber-400 {
+    color: #92400e; /* amber-800 */
+  }
+  .text-emerald-200,
+  .text-emerald-300,
+  .text-emerald-400 {
+    color: #047857; /* emerald-700 */
+  }
+  .text-red-300,
+  .text-red-400 {
+    color: #b91c1c; /* red-700 */
+  }
+  .bg-amber-500\/5 {
+    background-color: rgba(180, 83, 9, 0.08);
+  }
+  .bg-amber-500\/10 {
+    background-color: rgba(180, 83, 9, 0.14);
+  }
+  .bg-emerald-500\/5 {
+    background-color: rgba(4, 120, 87, 0.08);
+  }
+  .bg-emerald-500\/10 {
+    background-color: rgba(4, 120, 87, 0.14);
+  }
+  .bg-red-500\/5 {
+    background-color: rgba(185, 28, 28, 0.08);
+  }
+  .bg-red-500\/10 {
+    background-color: rgba(185, 28, 28, 0.14);
+  }
+  .hover\:bg-amber-500\/10:hover {
+    background-color: rgba(180, 83, 9, 0.14);
+  }
+  .hover\:bg-amber-500\/20:hover {
+    background-color: rgba(180, 83, 9, 0.22);
+  }
+  .hover\:bg-emerald-500\/10:hover {
+    background-color: rgba(4, 120, 87, 0.14);
+  }
+  .hover\:bg-emerald-500\/20:hover {
+    background-color: rgba(4, 120, 87, 0.22);
+  }
+  .hover\:bg-red-500\/5:hover {
+    background-color: rgba(185, 28, 28, 0.08);
+  }
+  .hover\:bg-red-500\/10:hover {
+    background-color: rgba(185, 28, 28, 0.14);
+  }
+  .hover\:bg-red-500\/20:hover {
+    background-color: rgba(185, 28, 28, 0.22);
+  }
+  .hover\:text-amber-200:hover {
+    color: #78350f; /* amber-900 — slightly darker on hover */
+  }
+  .hover\:text-emerald-200:hover {
+    color: #065f46; /* emerald-800 */
+  }
+  .hover\:text-red-200:hover {
+    color: #991b1b; /* red-800 */
+  }
+  .border-amber-500\/20 {
+    border-color: rgba(180, 83, 9, 0.45);
+  }
+  .border-amber-500\/30 {
+    border-color: rgba(180, 83, 9, 0.55);
+  }
+  .border-emerald-500\/20 {
+    border-color: rgba(4, 120, 87, 0.45);
+  }
+  .border-emerald-500\/30 {
+    border-color: rgba(4, 120, 87, 0.55);
+  }
+  .border-red-500\/20 {
+    border-color: rgba(185, 28, 28, 0.45);
+  }
+  .border-red-500\/30 {
+    border-color: rgba(185, 28, 28, 0.55);
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}
+
+/* Shapley progress bar shimmer */
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}

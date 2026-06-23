@@ -1,0 +1,1393 @@
+"use client";
+
+import { useState, useMemo, useRef, useEffect } from "react";
+import type { ParsedSnapshot } from "@/lib/types/contributor";
+import type { FeeHistory } from "@/lib/types/fees";
+import type { SimulateResponse } from "@/lib/types/shapley";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import {
+  getContributorDisplayName,
+  getContributorColor,
+  CONTRIBUTOR_SHARE,
+  EPOCHS_PER_MONTH,
+  EPOCHS_PER_YEAR,
+} from "@/lib/constants/config";
+import dynamic from "next/dynamic";
+import { findCoverageGaps } from "@/lib/utils/demand";
+import { ShapleyJobModal, type JobState } from "./shapley-job-modal";
+
+// Defer the map's d3-projection chain to first paint. The simulator
+// is a deep funnel; users land on the contributor picker first and
+// don't need the map's ~150KB until they're choosing cities.
+const SimulatorMap = dynamic(
+  () => import("./simulator-map").then((m) => m.SimulatorMap),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="border border-cream-8 bg-cream-3 aspect-[16/7] flex items-center justify-center text-xs font-mono uppercase tracking-[0.14em] text-cream-40">
+        Loading map…
+      </div>
+    ),
+  },
+);
+import {
+  formatSolFromSol,
+  formatUsd,
+} from "@/lib/utils/format";
+import {
+  AlertTriangle,
+  ArrowRight,
+  ArrowUpRight,
+  ArrowDownRight,
+  Minus,
+  X,
+  Plus,
+} from "lucide-react";
+
+const NEW_CONTRIBUTOR_VALUE = "__new__";
+
+// ── Async-job polling policy ────────────────────────────────────────────────
+// A what-if job runs in the worker independently of this browser tab, so a
+// transient poll failure (a network blip, the brief job-not-yet-visible 404
+// right after enqueue, a route/API hiccup during a rolling restart) must NOT
+// abandon a job that's still computing. We keep polling through failures and
+// only surface an error after this many CONSECUTIVE failures (~seconds of lost
+// contact at the 1s cadence) — or the instant the job reports a terminal state.
+const POLL_INTERVAL_MS = 1000;
+const MAX_CONSECUTIVE_POLL_FAILURES = 20;
+
+// Cancellation is idempotent end-to-end, so retry the request a few times to be
+// sure it reaches the server even through a transient client-side blip — a
+// single fire-and-forget cancel can otherwise silently fail and leave the
+// worker burning a 16-core slot on a job the user explicitly cancelled.
+const CANCEL_MAX_ATTEMPTS = 3;
+const CANCEL_RETRY_DELAY_MS = 400;
+
+/** Cancel a background job, retried so a transient blip can't drop it. */
+async function requestCancel(jobId: string): Promise<void> {
+  for (let attempt = 1; attempt <= CANCEL_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const res = await fetch(`/api/shapley/jobs/${jobId}`, { method: "DELETE" });
+      if (res.ok) return; // 200 = cancel landed; non-ok (502) → retry
+    } catch {
+      /* network blip — retry */
+    }
+    if (attempt < CANCEL_MAX_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, CANCEL_RETRY_DELAY_MS * attempt));
+    }
+  }
+  console.warn(
+    `[simulate] cancel for job ${jobId} not confirmed after ${CANCEL_MAX_ATTEMPTS} attempts`
+  );
+}
+
+interface SimulateTabProps {
+  snapshot: ParsedSnapshot;
+  feeHistory: FeeHistory | undefined;
+  /**
+   * Error from the fee-history fetch. When present, the simulator
+   * renders an explicit banner instead of silently dropping the
+   * projected-revenue figures (no-silent-fallbacks rule, issue #19).
+   */
+  feeHistoryError?: Error | null;
+  selectedEpoch: number | null;
+  /** Initial contributor code (e.g., from URL state). */
+  initialContributorCode?: string;
+  /** Called whenever the user changes the active contributor — wire to URL state for shareable links. */
+  onContributorChange?: (code: string) => void;
+  /** Called when the epoch changes — wire to URL state. Currently a passthrough; the page owns epoch UI. */
+  onEpochChange?: (epoch: number) => void;
+}
+
+/**
+ * Round a 0-1 ratio to a percentage with `decimals` digits, returning the number.
+ * e.g. roundPct(0.062149, 2) = 6.21
+ */
+function roundPct(ratio: number, decimals = 2): number {
+  const factor = 10 ** decimals;
+  return Math.round(ratio * 100 * factor) / factor;
+}
+
+/**
+ * Format a pre-rounded percentage number as a string.
+ */
+function fmtPct(pct: number, decimals = 2): string {
+  return pct.toFixed(decimals) + "%";
+}
+
+export function SimulateTab({
+  snapshot,
+  feeHistory,
+  feeHistoryError,
+  selectedEpoch,
+  initialContributorCode = "",
+  onContributorChange,
+}: SimulateTabProps) {
+  const [contributorCode, setContributorCode] = useState<string>(initialContributorCode);
+  const [removedLinks, setRemovedLinks] = useState<Set<string>>(new Set());
+  const [addedLinks, setAddedLinks] = useState<
+    Array<{ cityA: string; cityZ: string; bandwidthGbps: number; latencyMs: number }>
+  >([]);
+  const [newCityA, setNewCityA] = useState("");
+  const [newCityZ, setNewCityZ] = useState("");
+  const [newBandwidth, setNewBandwidth] = useState<number>(10);
+  const [newLatency, setNewLatency] = useState<number>(10);
+  const [demandOverrides, setDemandOverrides] = useState<Record<string, number>>({});
+  const [showDemandEditor, setShowDemandEditor] = useState(false);
+  const [simResult, setSimResult] = useState<SimulateResponse | null>(null);
+  const [simLoading, setSimLoading] = useState(false);
+  const [simError, setSimError] = useState<string | null>(null);
+  // Async-job UI: progress % (0–100) + the current phase ("baseline" |
+  // "modified"), since the bar is per-phase 0–100 and resets at the handoff.
+  const [simPercent, setSimPercent] = useState(0);
+  const [simPhase, setSimPhase] = useState<string | null>(null);
+  // True while polls are transiently failing but we're still retrying (the job
+  // is presumed alive in the worker) — surfaced as a soft "reconnecting" hint.
+  const [simReconnecting, setSimReconnecting] = useState(false);
+  const jobIdRef = useRef<string | null>(null);
+  const cancelledRef = useRef(false);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const [showJobModal, setShowJobModal] = useState(false);
+  const [jobState, setJobState] = useState<JobState>("confirming");
+
+  // Scroll to results when they arrive
+  useEffect(() => {
+    if (simResult && resultsRef.current) {
+      resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [simResult]);
+
+  const isNewContributor = contributorCode === NEW_CONTRIBUTOR_VALUE;
+  const contributor = isNewContributor
+    ? null
+    : snapshot.contributors.find((c) => c.code === contributorCode);
+
+  const sortedContributors = useMemo(
+    () =>
+      [...snapshot.contributors]
+        .filter((c) => c.linkCount > 0)
+        .sort((a, b) => b.linkCount - a.linkCount),
+    [snapshot]
+  );
+
+  const activeCities = useMemo(
+    () =>
+      snapshot.cityDemands
+        .filter((d) => d.totalSlots > 0)
+        .sort((a, b) => b.demandScore - a.demandScore),
+    [snapshot]
+  );
+
+  const coverageGaps = useMemo(
+    () => findCoverageGaps(snapshot.cityDemands, 5),
+    [snapshot]
+  );
+
+  const demandThresholds = useMemo(() => {
+    const scores = activeCities
+      .map((d) => d.demandScore)
+      .filter((s) => s < 999 && s > 0)
+      .sort((a, b) => a - b);
+    if (scores.length === 0) return { high: 0.5, moderate: 0.1 };
+    const p75 = scores[Math.floor(scores.length * 0.75)];
+    const p25 = scores[Math.floor(scores.length * 0.25)];
+    return { high: p75, moderate: p25 };
+  }, [activeCities]);
+
+  const demandLabel = (score: number) => {
+    if (score >= 999) return { text: "Unserved", cls: "text-green" };
+    if (score > demandThresholds.high) return { text: "High demand", cls: "text-green" };
+    if (score > demandThresholds.moderate) return { text: "Moderate", cls: "text-amber" };
+    if (score === 0) return { text: "No demand", cls: "text-cream-20" };
+    return { text: "Well covered", cls: "text-cream-30" };
+  };
+
+  const demandOverrideCount = Object.keys(demandOverrides).length;
+  const hasChanges = isNewContributor
+    ? addedLinks.length > 0 || demandOverrideCount > 0
+    : removedLinks.size > 0 ||
+      addedLinks.length > 0 ||
+      demandOverrideCount > 0;
+  // Average per-epoch fee revenue in SOL. The contributor pool is the 45%
+  // slice of this (CONTRIBUTOR_SHARE). Fall back to 0 if missing — never to
+  // a lamports value, which would inflate by 1e9×.
+  const avgFeeSol = feeHistory?.averageFeeSol ?? 0;
+  const solUsd = feeHistory?.solUsdPrice ?? 0;
+
+  const handleContributorChange = (code: string) => {
+    setContributorCode(code);
+    setRemovedLinks(new Set());
+    setAddedLinks([]);
+    setSimResult(null);
+    setSimError(null);
+    setNewCityA("");
+    setNewCityZ("");
+    setDemandOverrides({});
+    setShowDemandEditor(false);
+    onContributorChange?.(code);
+  };
+
+  const toggleLink = (pubkey: string) => {
+    setRemovedLinks((prev) => {
+      const next = new Set(prev);
+      if (next.has(pubkey)) {
+        next.delete(pubkey);
+      } else {
+        next.add(pubkey);
+      }
+      return next;
+    });
+    setSimResult(null);
+  };
+
+  const addLink = () => {
+    if (!newCityA || !newCityZ || newCityA === newCityZ) return;
+    setAddedLinks((prev) => [
+      ...prev,
+      {
+        cityA: newCityA,
+        cityZ: newCityZ,
+        bandwidthGbps: newBandwidth,
+        latencyMs: newLatency,
+      },
+    ]);
+    setNewCityA("");
+    setNewCityZ("");
+    setSimResult(null);
+  };
+
+  const removeAddedLink = (index: number) => {
+    setAddedLinks((prev) => prev.filter((_, i) => i !== index));
+    setSimResult(null);
+  };
+
+  const handleSimulate = async () => {
+    if (!selectedEpoch || !contributorCode) return;
+    setSimLoading(true);
+    setSimError(null);
+    setSimResult(null);
+    setSimPercent(0);
+    setSimReconnecting(false);
+    cancelledRef.current = false;
+    jobIdRef.current = null;
+    const apiCode = isNewContributor ? `new_contributor_sim` : contributorCode;
+    try {
+      // 1) Start the background job (returns immediately with a job id).
+      const startRes = await fetch("/api/shapley/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          epoch: selectedEpoch,
+          contributorCode: apiCode,
+          removeLinks: isNewContributor ? [] : Array.from(removedLinks),
+          addLinks: addedLinks,
+          demandOverrides,
+        }),
+      });
+      if (!startRes.ok) throw new Error(await startRes.text());
+      const { jobId } = (await startRes.json()) as { jobId: string };
+      jobIdRef.current = jobId;
+
+      // 2) Poll for progress until the job reaches a terminal state. A job
+      // lives in the worker independently of this tab, so transient poll
+      // failures must NOT abandon it: we count CONSECUTIVE failures and only
+      // give up after MAX_CONSECUTIVE_POLL_FAILURES, keeping the job reference
+      // throughout. A successful poll resets the counter; an explicit terminal
+      // state (done/failed/cancelled) ends polling immediately.
+      let consecutiveFailures = 0;
+      for (;;) {
+        if (cancelledRef.current) return;
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        if (cancelledRef.current) return;
+
+        try {
+          const pollRes = await fetch(
+            `/api/shapley/jobs/${jobId}?contributorCode=${encodeURIComponent(apiCode)}`
+          );
+          if (!pollRes.ok) {
+            throw new Error(`poll ${pollRes.status}: ${await pollRes.text()}`);
+          }
+          const data = await pollRes.json();
+
+          // Poll succeeded — clear any transient-failure state.
+          consecutiveFailures = 0;
+          if (!cancelledRef.current) setSimReconnecting(false);
+
+          if (typeof data?.progress?.percent === "number") {
+            setSimPercent(data.progress.percent);
+          }
+          if (typeof data?.progress?.phase === "string") {
+            setSimPhase(data.progress.phase);
+          }
+          if (data.state === "done") {
+            setSimPercent(100);
+            setSimPhase(null);
+            setSimReconnecting(false);
+            setSimResult({
+              epoch: selectedEpoch,
+              contributorCode: apiCode,
+              before: data.before,
+              after: data.after,
+              delta: data.delta,
+              allContributors: data.allContributors,
+            } as SimulateResponse);
+            setJobState("done");
+            return;
+          }
+          if (data.state === "failed") {
+            // Explicit terminal failure from the worker — surface immediately,
+            // NOT subject to the transient-retry budget.
+            setSimError(data.error || "Simulation failed");
+            setJobState("error");
+            setSimReconnecting(false);
+            return;
+          }
+          if (data.state === "cancelled") {
+            setShowJobModal(false);
+            setJobState("confirming");
+            setSimReconnecting(false);
+            return;
+          }
+        } catch (pollErr) {
+          // Transport-level failure (HTTP non-ok or network reject) — transient.
+          // Keep the job reference and keep polling until the budget is spent.
+          if (cancelledRef.current) return;
+          consecutiveFailures += 1;
+          console.warn(
+            `[simulate] poll ${consecutiveFailures}/${MAX_CONSECUTIVE_POLL_FAILURES} ` +
+              `failed for job ${jobId}; retrying`,
+            pollErr
+          );
+          if (consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
+            // We've abandoned this job — request cancellation so we don't leave
+            // a scarce 16-core worker computing a result nobody is tracking.
+            // Best-effort and idempotent (requestCancel retries): if the same
+            // path that broke polling is still down it may not land, in which
+            // case the worker finishes and caches the result as usual.
+            void requestCancel(jobId);
+            setSimError(
+              `Lost contact with the simulation after ${consecutiveFailures} ` +
+                `attempts; requested cancellation (job ${jobId}).`
+            );
+            setJobState("error");
+            setSimReconnecting(false);
+            return;
+          }
+          setSimReconnecting(true);
+        }
+      }
+    } catch (err) {
+      if (!cancelledRef.current) {
+        setSimError(err instanceof Error ? err.message : "Simulation failed");
+        setJobState("error");
+      }
+    } finally {
+      setSimLoading(false);
+    }
+  };
+
+  /** Called from the confirmation modal — transitions to running and kicks off the job. */
+  const handleConfirm = () => {
+    setJobState("running");
+    handleSimulate();
+  };
+
+  /** Cancel handler — called from the modal's Cancel button in any state. */
+  const handleModalCancel = () => {
+    if (jobState === "confirming" || jobState === "done" || jobState === "error") {
+      setShowJobModal(false);
+      setJobState("confirming");
+      if (jobState === "error") setSimError(null);
+      return;
+    }
+    // Running state — full cancel
+    cancelledRef.current = true;
+    setSimLoading(false);
+    setSimReconnecting(false);
+    setShowJobModal(false);
+    setJobState("confirming");
+    const id = jobIdRef.current;
+    if (id) {
+      // Retry in the background; the modal closes immediately for responsiveness.
+      void requestCancel(id);
+    }
+  };
+
+  const getCityName = (locationCode: string) => {
+    const city = snapshot.cityDemands.find((d) => d.locationCode === locationCode);
+    return city ? `${city.locationName}` : locationCode;
+  };
+
+  // --- Consistent rounding for results ---
+  // Round before & after from full precision, then derive delta from the rounded values.
+  // This ensures before + delta = after visually.
+  const results = useMemo(() => {
+    if (!simResult) return null;
+    const beforePct = roundPct(simResult.before.share);
+    const afterPct = roundPct(simResult.after.share);
+    const deltaPct = Math.round((afterPct - beforePct) * 100) / 100;
+
+    // Pool is the 45% contributor slice of per-epoch fee revenue (SOL).
+    // Operator's projected SOL = their Shapley share × pool.
+    const beforeSolEpoch =
+      simResult.before.share * avgFeeSol * CONTRIBUTOR_SHARE;
+    const afterSolEpoch =
+      simResult.after.share * avgFeeSol * CONTRIBUTOR_SHARE;
+    const deltaSolEpoch = afterSolEpoch - beforeSolEpoch;
+
+    return {
+      beforePct,
+      afterPct,
+      deltaPct,
+      beforeSolEpoch,
+      afterSolEpoch,
+      deltaSolEpoch,
+      beforeSolMonth: beforeSolEpoch * EPOCHS_PER_MONTH,
+      afterSolMonth: afterSolEpoch * EPOCHS_PER_MONTH,
+      beforeSolYear: beforeSolEpoch * EPOCHS_PER_YEAR,
+      afterSolYear: afterSolEpoch * EPOCHS_PER_YEAR,
+      // Optional USD pegs for context (used only if SOL/USD is loaded)
+      afterSolEpochUsd: solUsd > 0 ? afterSolEpoch * solUsd : null,
+      deltaSolEpochUsd: solUsd > 0 ? deltaSolEpoch * solUsd : null,
+      afterSolYearUsd: solUsd > 0 ? afterSolEpoch * EPOCHS_PER_YEAR * solUsd : null,
+    };
+  }, [simResult, avgFeeSol, solUsd]);
+
+  const showExistingLinks = contributor && !isNewContributor;
+  const showAddLinks = contributorCode !== "";
+
+  return (
+    <div className="space-y-6">
+      {/* Fee-history error banner — visible, never silent (issue #19) */}
+      {feeHistoryError && (
+        <div className="flex items-start gap-2 rounded-lg bg-red-500/10 border border-red-500/30 px-3 py-2 text-xs text-red-300">
+          <AlertTriangle className="size-3.5 shrink-0 mt-0.5" />
+          <span>
+            Couldn&apos;t load fee history: {feeHistoryError.message}. Shapley
+            share calculations still work, but projected SOL / epoch numbers
+            are hidden until the feed recovers — they would otherwise display
+            as $0 and silently misrepresent rewards.
+          </span>
+        </div>
+      )}
+      {/* Disclaimer */}
+      <div className="flex items-start gap-2 rounded-lg bg-amber/5 border border-amber/20 px-3 py-2 text-xs text-amber">
+        <AlertTriangle className="size-3.5 shrink-0 mt-0.5" />
+        <span>
+          Shapley projection sitting on top of the historical average epoch revenue
+          {feeHistory && feeHistory.epochs.length > 0
+            ? ` (Solana epochs ${feeHistory.earliestEpoch}–${feeHistory.latestEpoch})`
+            : ""}{". "}
+          Fees are denominated in SOL on-chain; we display SOL with a live USD
+          conversion from Jupiter. Directional — 2Z payouts are not currently active.
+        </span>
+      </div>
+
+      {/* Step 1: Contributor selector */}
+      <Card className="bg-cream-5 border-cream-8">
+        <CardHeader>
+          <CardTitle className="font-display text-sm tracking-wide text-cream">
+            Select your contributor
+          </CardTitle>
+          <CardDescription className="text-cream-40">
+            Choose an existing operator or simulate as a new contributor
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Select value={contributorCode} onValueChange={handleContributorChange}>
+            <SelectTrigger className="w-full sm:w-[320px]">
+              <SelectValue placeholder="Choose a contributor..." />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NEW_CONTRIBUTOR_VALUE}>
+                <span className="flex items-center gap-2">
+                  <Plus className="size-3 text-green" />
+                  <span className="text-green">New contributor</span>
+                </span>
+              </SelectItem>
+              {sortedContributors.map((c) => (
+                <SelectItem key={c.code} value={c.code}>
+                  <span className="flex items-center gap-2">
+                    <span
+                      className="size-2 rounded-full inline-block"
+                      style={{ backgroundColor: getContributorColor(c.code) }}
+                    />
+                    {getContributorDisplayName(c.code)}
+                    <span className="text-cream-30 ml-1">{c.linkCount} links</span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </CardContent>
+      </Card>
+
+      {/* Interactive map */}
+      {contributorCode && (
+        <Card className="bg-cream-5 border-cream-8">
+          <CardHeader>
+            <CardTitle className="font-display text-sm tracking-wide text-cream">
+              Network map
+            </CardTitle>
+            <CardDescription className="text-cream-40">
+              Click two cities to draft a new link, or click an existing dashed
+              line to flag it for removal. Bandwidth and RTT come from the
+              inputs below.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <SimulatorMap
+              snapshot={snapshot}
+              contributorCode={
+                isNewContributor ? null : contributorCode
+              }
+              removedLinkPubkeys={removedLinks}
+              addedLinks={addedLinks}
+              onPairSelect={(a, z) => {
+                setAddedLinks((prev) => [
+                  ...prev,
+                  {
+                    cityA: a,
+                    cityZ: z,
+                    bandwidthGbps: newBandwidth,
+                    latencyMs: newLatency,
+                  },
+                ]);
+                setSimResult(null);
+              }}
+              onLinkClick={(pubkey) => toggleLink(pubkey)}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Step 2: Current links with remove toggles (only for existing contributors) */}
+      {showExistingLinks && (
+        <Card className="bg-cream-5 border-cream-8">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="font-display text-sm tracking-wide text-cream">
+                Current links
+              </CardTitle>
+              <Badge variant="secondary" className="text-xs">
+                {contributor.linkCount - removedLinks.size} of {contributor.linkCount} active
+              </Badge>
+            </div>
+            <CardDescription className="text-cream-40">
+              Toggle off links to simulate removing them
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2 max-h-[300px] overflow-y-auto">
+              {contributor.links.map((link) => {
+                const isRemoved = removedLinks.has(link.pubkey);
+                return (
+                  <button
+                    key={link.pubkey}
+                    onClick={() => toggleLink(link.pubkey)}
+                    className={`w-full flex items-center gap-3 rounded-lg border px-3 py-2.5 text-sm text-left transition-all focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${
+                      isRemoved
+                        ? "border-red/20 bg-red/5 opacity-50"
+                        : "border-cream-8 bg-cream-3 hover:border-cream-15"
+                    }`}
+                  >
+                    <div
+                      className={`size-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
+                        isRemoved
+                          ? "border-red/40 bg-red/20"
+                          : "border-cream-15 bg-transparent"
+                      }`}
+                    >
+                      {isRemoved && <X className="size-3 text-red" />}
+                    </div>
+                    <span className={`flex-1 ${isRemoved ? "line-through text-cream-30" : "text-cream-60"}`}>
+                      {link.sideA.city || link.sideA.locationCode}
+                    </span>
+                    <ArrowRight className="size-3 text-cream-20 shrink-0" />
+                    <span className={`flex-1 ${isRemoved ? "line-through text-cream-30" : "text-cream-60"}`}>
+                      {link.sideZ.city || link.sideZ.locationCode}
+                    </span>
+                    <span className="text-xs text-cream-20 shrink-0">
+                      {link.bandwidthGbps}G
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Step 3a: Quick presets */}
+      {showAddLinks && (
+        <Card className="bg-cream-5 border-cream-8">
+          <CardHeader>
+            <CardTitle className="font-display text-sm tracking-wide text-cream">
+              Quick presets
+            </CardTitle>
+            <CardDescription className="text-cream-40">
+              One-click scenarios that populate the form below. You can edit
+              after applying.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap gap-2">
+              {/* 100G hot corridor */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeCities.length < 2) return;
+                  const a = activeCities[0];
+                  const b = activeCities[1];
+                  setAddedLinks((prev) => [
+                    ...prev,
+                    {
+                      cityA: a.locationCode,
+                      cityZ: b.locationCode,
+                      bandwidthGbps: 100,
+                      latencyMs: 10,
+                    },
+                  ]);
+                  setSimResult(null);
+                }}
+                disabled={activeCities.length < 2}
+                className="text-xs font-mono px-3 py-1.5 border border-cream-15 hover:border-cream-30 hover:bg-cream-8 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                + 100G hot corridor
+              </button>
+
+              {/* Strip <1G existing links */}
+              {!isNewContributor && contributor && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const subGigs = contributor.links
+                      .filter((l) => l.bandwidthGbps < 1)
+                      .map((l) => l.pubkey);
+                    if (subGigs.length === 0) return;
+                    setRemovedLinks((prev) => {
+                      const next = new Set(prev);
+                      for (const pk of subGigs) next.add(pk);
+                      return next;
+                    });
+                    setSimResult(null);
+                  }}
+                  disabled={
+                    contributor.links.filter((l) => l.bandwidthGbps < 1).length === 0
+                  }
+                  className="text-xs font-mono px-3 py-1.5 border border-cream-15 hover:border-cream-30 hover:bg-cream-8 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  − strip {"<"}1G links
+                </button>
+              )}
+
+              {/* Hub triangle (only useful for new contributors) */}
+              {isNewContributor && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeCities.length < 3) return;
+                    const [a, b, c] = activeCities;
+                    setAddedLinks((prev) => [
+                      ...prev,
+                      {
+                        cityA: a.locationCode,
+                        cityZ: b.locationCode,
+                        bandwidthGbps: 100,
+                        latencyMs: 10,
+                      },
+                      {
+                        cityA: b.locationCode,
+                        cityZ: c.locationCode,
+                        bandwidthGbps: 100,
+                        latencyMs: 10,
+                      },
+                      {
+                        cityA: a.locationCode,
+                        cityZ: c.locationCode,
+                        bandwidthGbps: 100,
+                        latencyMs: 10,
+                      },
+                    ]);
+                    setSimResult(null);
+                  }}
+                  disabled={activeCities.length < 3}
+                  className="text-xs font-mono px-3 py-1.5 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  + 3-city hub triangle
+                </button>
+              )}
+
+              {/* 2x demand on top metro */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeCities.length === 0) return;
+                  const top = activeCities[0];
+                  const baseline = top.validatorCount || 1;
+                  setDemandOverrides((prev) => ({
+                    ...prev,
+                    [top.locationCode]: baseline * 2,
+                  }));
+                  setShowDemandEditor(true);
+                  setSimResult(null);
+                }}
+                disabled={activeCities.length === 0}
+                className="text-xs font-mono px-3 py-1.5 border border-cream-15 hover:border-cream-30 hover:bg-cream-8 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                ↑ 2× top-metro demand
+              </button>
+
+              {/* Reset everything */}
+              <button
+                type="button"
+                onClick={() => {
+                  setAddedLinks([]);
+                  setRemovedLinks(new Set());
+                  setDemandOverrides({});
+                  setSimResult(null);
+                }}
+                disabled={!hasChanges}
+                className="text-xs font-mono px-3 py-1.5 border border-red-500/20 text-red-400 hover:bg-red-500/5 transition-colors disabled:opacity-30 disabled:cursor-not-allowed ml-auto"
+              >
+                ⌫ reset all
+              </button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Step 3: Add new links */}
+      {showAddLinks && (
+        <Card className="bg-cream-5 border-cream-8">
+          <CardHeader>
+            <CardTitle className="font-display text-sm tracking-wide text-cream">
+              {isNewContributor ? "Your links" : "Add new links"}
+            </CardTitle>
+            <CardDescription className="text-cream-40">
+              {isNewContributor
+                ? "Add the fiber routes you plan to contribute to the network"
+                : "Simulate adding new fiber routes to the network"}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Coverage gap suggestions */}
+            {coverageGaps.length > 0 && (
+              <div>
+                <p className="text-xs text-cream-30 mb-2">Suggested routes:</p>
+                <div className="flex flex-wrap gap-2">
+                  {coverageGaps.map((gap, i) => (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        setAddedLinks((prev) => [
+                          ...prev,
+                          {
+                            cityA: gap.cityA.locationCode,
+                            cityZ: gap.cityB.locationCode,
+                            bandwidthGbps: newBandwidth,
+                            latencyMs: newLatency,
+                          },
+                        ]);
+                        setSimResult(null);
+                      }}
+                      className="flex items-center gap-1.5 rounded-full border border-cream-8 hover:border-cream-20 px-2.5 py-1 text-xs text-cream-60 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                    >
+                      {gap.cityA.locationName}
+                      <ArrowRight className="size-2.5 text-cream-20" />
+                      {gap.cityB.locationName}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* City pair selectors */}
+            <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+              <div className="space-y-1.5 flex-1">
+                <label className="text-xs text-cream-40">Origin</label>
+                <Select value={newCityA} onValueChange={setNewCityA}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select city..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {activeCities.map((d) => {
+                      const dl = demandLabel(d.demandScore);
+                      return (
+                        <SelectItem key={d.locationCode} value={d.locationCode}>
+                          {d.locationName}, {d.country}
+                          <span className={`ml-2 text-xs ${dl.cls}`}>{dl.text}</span>
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectContent>
+                </Select>
+              </div>
+              <ArrowRight className="size-4 text-cream-30 mb-2 hidden sm:block shrink-0" />
+              <div className="space-y-1.5 flex-1">
+                <label className="text-xs text-cream-40">Destination</label>
+                <Select value={newCityZ} onValueChange={setNewCityZ}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select city..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {activeCities
+                      .filter((d) => d.locationCode !== newCityA)
+                      .map((d) => {
+                        const dl = demandLabel(d.demandScore);
+                        return (
+                          <SelectItem key={d.locationCode} value={d.locationCode}>
+                            {d.locationName}, {d.country}
+                            <span className={`ml-2 text-xs ${dl.cls}`}>{dl.text}</span>
+                          </SelectItem>
+                        );
+                      })}
+                  </SelectContent>
+                </Select>
+              </div>
+              <button
+                onClick={addLink}
+                disabled={!newCityA || !newCityZ || newCityA === newCityZ}
+                className="rounded-lg bg-cream-8 border border-cream-15 px-4 py-2 text-sm text-cream-60 hover:text-cream hover:bg-cream-10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              >
+                <Plus className="size-4 inline mr-1" />
+                Add
+              </button>
+            </div>
+
+            {/* Bandwidth + RTT */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs text-cream-40">Bandwidth</label>
+                <div
+                  role="radiogroup"
+                  aria-label="Bandwidth"
+                  className="inline-flex border border-cream-15 bg-surface w-full"
+                >
+                  {[1, 10, 100].map((g, i) => {
+                    const active = newBandwidth === g;
+                    return (
+                      <button
+                        key={g}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        onClick={() => setNewBandwidth(g)}
+                        className={`flex-1 px-3 py-2 text-xs font-mono tabular-nums transition-colors ${
+                          i > 0 ? "border-l border-cream-15" : ""
+                        } ${
+                          active
+                            ? "bg-cream text-dark"
+                            : "text-cream-60 hover:text-cream"
+                        }`}
+                      >
+                        {g}G
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="add-link-rtt"
+                  className="text-xs text-cream-40"
+                >
+                  RTT (ms)
+                </label>
+                <input
+                  id="add-link-rtt"
+                  type="number"
+                  inputMode="decimal"
+                  min={1}
+                  max={500}
+                  step={0.5}
+                  value={newLatency}
+                  onChange={(e) =>
+                    setNewLatency(
+                      Math.max(0, parseFloat(e.target.value) || 0),
+                    )
+                  }
+                  className="w-full border border-cream-15 bg-surface px-3 py-2 text-sm font-mono tabular-nums text-cream focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                />
+              </div>
+            </div>
+
+            {/* Added links list */}
+            {addedLinks.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs text-cream-30">
+                  {isNewContributor ? "Your planned links:" : "Links to add:"}
+                </p>
+                {addedLinks.map((link, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-3 rounded-lg border border-green/20 bg-green/5 px-3 py-2 text-sm"
+                  >
+                    <Plus className="size-3.5 text-green shrink-0" />
+                    <span className="text-cream-60">{getCityName(link.cityA)}</span>
+                    <ArrowRight className="size-3 text-cream-20 shrink-0" />
+                    <span className="text-cream-60">{getCityName(link.cityZ)}</span>
+                    <span className="ml-2 text-xs font-mono text-cream-30 tabular-nums">
+                      {link.bandwidthGbps}G · {link.latencyMs}ms
+                    </span>
+                    <button
+                      onClick={() => removeAddedLink(i)}
+                      aria-label="Remove link"
+                      className="ml-auto text-cream-30 hover:text-cream transition-colors rounded-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Step 4: Demand profile (optional) */}
+      {showAddLinks && (
+        <Card className="bg-cream-5 border-cream-8">
+          <CardHeader>
+            <button
+              type="button"
+              onClick={() => setShowDemandEditor((v) => !v)}
+              aria-expanded={showDemandEditor}
+              className="w-full flex items-center justify-between gap-2 text-left focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none rounded-sm"
+            >
+              <div>
+                <CardTitle className="font-display text-sm tracking-wide text-cream">
+                  Modify demand{" "}
+                  <span className="text-cream-30 text-xs font-mono">
+                    (optional)
+                  </span>
+                </CardTitle>
+                <CardDescription className="text-cream-40">
+                  Override validator counts per metro to see how reward share
+                  changes with different demand scenarios.
+                </CardDescription>
+              </div>
+              <span className="text-cream-30 text-xs font-mono shrink-0">
+                {demandOverrideCount > 0
+                  ? `${demandOverrideCount} override${demandOverrideCount > 1 ? "s" : ""}`
+                  : showDemandEditor
+                  ? "Hide"
+                  : "Edit"}
+              </span>
+            </button>
+          </CardHeader>
+          {showDemandEditor && (
+            <CardContent className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 text-xs uppercase tracking-[0.14em] text-cream-30 font-mono pb-1 border-b border-cream-8">
+                <div className="sm:col-span-6">Metro</div>
+                <div className="sm:col-span-3 text-right">Current</div>
+                <div className="sm:col-span-3 text-right">Modified</div>
+              </div>
+              <div className="max-h-[280px] overflow-y-auto divide-y divide-cream-8">
+                {activeCities.slice(0, 30).map((city) => {
+                  const current = city.validatorCount;
+                  const overrideValue = demandOverrides[city.locationCode];
+                  const inputValue =
+                    overrideValue !== undefined
+                      ? String(overrideValue)
+                      : "";
+                  return (
+                    <div
+                      key={city.locationCode}
+                      className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center py-2 text-sm"
+                    >
+                      <div className="sm:col-span-6 min-w-0">
+                        <div className="text-cream truncate">
+                          {city.locationName}
+                        </div>
+                        <div className="text-xs text-cream-30 font-mono truncate">
+                          {city.locationCode} · {city.country}
+                        </div>
+                      </div>
+                      <div className="sm:col-span-3 text-right text-cream-60 font-mono tabular-nums">
+                        {current}
+                      </div>
+                      <div className="sm:col-span-3 flex items-center justify-end gap-1.5">
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          min={0}
+                          value={inputValue}
+                          placeholder={String(current)}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            setDemandOverrides((prev) => {
+                              const next = { ...prev };
+                              if (raw === "") {
+                                delete next[city.locationCode];
+                              } else {
+                                const n = parseInt(raw, 10);
+                                if (!Number.isNaN(n) && n >= 0) {
+                                  next[city.locationCode] = n;
+                                }
+                              }
+                              return next;
+                            });
+                            setSimResult(null);
+                          }}
+                          className="w-20 border border-cream-15 bg-surface px-2 py-1 text-xs font-mono tabular-nums text-cream text-right focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                        />
+                        {overrideValue !== undefined && (
+                          <button
+                            type="button"
+                            aria-label={`Reset ${city.locationCode}`}
+                            onClick={() => {
+                              setDemandOverrides((prev) => {
+                                const next = { ...prev };
+                                delete next[city.locationCode];
+                                return next;
+                              });
+                              setSimResult(null);
+                            }}
+                            className="text-cream-30 hover:text-cream transition-colors"
+                          >
+                            <X className="size-3" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {demandOverrideCount > 0 && (
+                <div className="flex items-center justify-between pt-2 border-t border-cream-8">
+                  <span className="text-xs text-cream-40 font-mono">
+                    {demandOverrideCount} metro override
+                    {demandOverrideCount > 1 ? "s" : ""}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDemandOverrides({});
+                      setSimResult(null);
+                    }}
+                    className="text-xs text-cream-40 hover:text-cream font-mono transition-colors"
+                  >
+                    Clear all
+                  </button>
+                </div>
+              )}
+              <p className="text-xs text-cream-30 font-mono leading-relaxed">
+                Overrides scale traffic for all demand rows touching the
+                selected metro. Set to 0 to remove that metro&apos;s demand
+                entirely.
+              </p>
+            </CardContent>
+          )}
+        </Card>
+      )}
+
+      {/* Pre-flight diff preview — quick review of pending changes before
+           committing to an LP run. */}
+      {showAddLinks && hasChanges && !simResult && (
+        <Card className="bg-cream-5 border-cream-8">
+          <CardHeader className="pb-2">
+            <CardTitle className="font-display text-sm tracking-wide text-cream">
+              Review changes
+            </CardTitle>
+            <CardDescription className="text-cream-40">
+              Pending edit set vs the current network footprint.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2 text-xs">
+            {removedLinks.size > 0 && (
+              <div className="flex items-start gap-2">
+                <span className="text-red mt-0.5 font-mono shrink-0">
+                  −{removedLinks.size}
+                </span>
+                <span className="text-cream-60">
+                  link{removedLinks.size === 1 ? "" : "s"} removed
+                </span>
+              </div>
+            )}
+            {addedLinks.length > 0 && (
+              <div className="flex items-start gap-2">
+                <span className="text-green mt-0.5 font-mono shrink-0">
+                  +{addedLinks.length}
+                </span>
+                <span className="text-cream-60">
+                  link{addedLinks.length === 1 ? "" : "s"} added (
+                  {addedLinks.reduce((s, l) => s + l.bandwidthGbps, 0)}G total
+                  capacity, {Math.round(
+                    addedLinks.reduce((s, l) => s + l.latencyMs, 0) /
+                      addedLinks.length,
+                  )}
+                  ms avg RTT)
+                </span>
+              </div>
+            )}
+            {demandOverrideCount > 0 && (
+              <div className="flex items-start gap-2">
+                <span className="text-amber mt-0.5 font-mono shrink-0">
+                  Δ{demandOverrideCount}
+                </span>
+                <span className="text-cream-60">
+                  metro demand override
+                  {demandOverrideCount === 1 ? "" : "s"}
+                </span>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Step 5: Calculate button — sticky at the bottom of the viewport
+           when there are pending changes and results haven't been computed
+           against the current edit set. */}
+      {showAddLinks && (
+        <div
+          className={
+            hasChanges && !simResult
+              ? "sticky bottom-3 z-30"
+              : ""
+          }
+        >
+          <button
+            onClick={() => {
+              setShowJobModal(true);
+              setJobState("confirming");
+            }}
+            disabled={!hasChanges || simLoading}
+            className="w-full rounded-lg bg-cream text-dark font-display text-sm tracking-wide py-3 shadow-lg transition-all hover:bg-cream-80 disabled:opacity-30 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          >
+            {hasChanges ? (
+              <span className="flex items-center justify-center gap-2">
+                Calculate Impact
+                <span className="text-xs font-mono uppercase tracking-[0.14em] opacity-60">
+                  {removedLinks.size > 0 && `−${removedLinks.size} `}
+                  {addedLinks.length > 0 && `+${addedLinks.length} `}
+                  {demandOverrideCount > 0 && `Δ${demandOverrideCount}`}
+                </span>
+              </span>
+            ) : (
+              "Calculate Impact"
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* Shapley job confirmation + progress + results modal */}
+      <ShapleyJobModal
+        open={showJobModal}
+        onOpenChange={setShowJobModal}
+        onConfirm={handleConfirm}
+        onCancel={handleModalCancel}
+        state={jobState}
+        phase={simPhase}
+        percent={simPercent}
+        reconnecting={simReconnecting}
+        error={simError}
+        changeSummary={{
+          removed: removedLinks.size,
+          added: addedLinks.length,
+          demandOverrides: demandOverrideCount,
+        }}
+        results={results}
+        simResult={simResult}
+        isNewContributor={isNewContributor}
+        contributorCode={contributorCode}
+        avgFeeSol={avgFeeSol}
+        feeHistory={feeHistory}
+      />
+
+      {/* Error */}
+      {simError && (
+        <div className="rounded-lg bg-red/5 border border-red/20 px-3 py-2 text-xs text-red">
+          {simError}
+        </div>
+      )}
+
+      {/* Step 5: Results */}
+      {simResult && results && (
+        <Card ref={resultsRef} className="bg-cream-5 border-cream-8">
+          <CardHeader>
+            <CardTitle className="font-display text-sm tracking-wide text-cream">
+              Simulation results
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            {/* Before / Delta / After comparison */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* Before */}
+              <div className="rounded-xl bg-cream-3 border border-cream-8 p-4 text-center">
+                <p className="text-xs text-cream-40 mb-1">
+                  {isNewContributor ? "Before you join" : "Current share"}
+                </p>
+                <p className="text-2xl font-display text-cream">
+                  {fmtPct(results.beforePct)}
+                </p>
+                {avgFeeSol > 0 && (
+                  <p className="text-xs text-cream-30 mt-1 font-mono">
+                    ~{formatSolFromSol(results.beforeSolEpoch, 4)} SOL / epoch
+                  </p>
+                )}
+              </div>
+
+              {/* Delta — derived from rounded before/after so arithmetic is visually consistent */}
+              <div className="rounded-xl bg-cream-3 border border-cream-8 p-4 text-center flex flex-col items-center justify-center">
+                <p className="text-xs text-cream-40 mb-1">Change</p>
+                <div className="flex items-center gap-1">
+                  {results.deltaPct > 0.001 ? (
+                    <ArrowUpRight className="size-5 text-green" />
+                  ) : results.deltaPct < -0.001 ? (
+                    <ArrowDownRight className="size-5 text-red" />
+                  ) : (
+                    <Minus className="size-5 text-cream-30" />
+                  )}
+                  <span
+                    className={`text-2xl font-display ${
+                      results.deltaPct > 0.001
+                        ? "text-green"
+                        : results.deltaPct < -0.001
+                        ? "text-red"
+                        : "text-cream-30"
+                    }`}
+                  >
+                    {results.deltaPct > 0 ? "+" : ""}
+                    {fmtPct(results.deltaPct)}
+                  </span>
+                </div>
+                {avgFeeSol > 0 && (
+                  <p className="text-xs text-cream-30 mt-1 font-mono">
+                    {results.deltaSolEpoch >= 0 ? "+" : ""}
+                    {formatSolFromSol(results.deltaSolEpoch, 4)} SOL / epoch
+                  </p>
+                )}
+              </div>
+
+              {/* After */}
+              <div className="rounded-xl bg-cream-3 border border-cream-8 p-4 text-center">
+                <p className="text-xs text-cream-40 mb-1">Projected share</p>
+                <p className="text-2xl font-display text-cream">
+                  {fmtPct(results.afterPct)}
+                </p>
+                {avgFeeSol > 0 && (
+                  <>
+                    <p className="text-xs text-cream-30 mt-1 font-mono">
+                      ~{formatSolFromSol(results.afterSolEpoch, 4)} SOL / epoch
+                    </p>
+                    {results.afterSolEpochUsd != null && (
+                      <p className="text-xs text-cream-20 mt-0.5 font-mono">
+                        ≈ {formatUsd(results.afterSolEpochUsd, 2)}
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Monthly/Yearly projections */}
+            {avgFeeSol > 0 && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-xl bg-cream-3 border border-cream-8 p-4 text-center">
+                  <p className="text-xs text-cream-40 mb-1">Projected monthly</p>
+                  <p className="text-lg font-mono tabular-nums text-cream">
+                    {formatSolFromSol(results.afterSolMonth, 2)} SOL
+                  </p>
+                  {!isNewContributor && (
+                    <p className="text-xs text-cream-20 mt-0.5 font-mono">
+                      was {formatSolFromSol(results.beforeSolMonth, 2)} SOL
+                    </p>
+                  )}
+                </div>
+                <div className="rounded-xl bg-cream-3 border border-cream-8 p-4 text-center">
+                  <p className="text-xs text-cream-40 mb-1">Projected yearly</p>
+                  <p className="text-lg font-mono tabular-nums text-cream">
+                    {formatSolFromSol(results.afterSolYear, 2)} SOL
+                  </p>
+                  {results.afterSolYearUsd != null && (
+                    <p className="text-xs text-cream-20 mt-0.5 font-mono">
+                      ≈ {formatUsd(results.afterSolYearUsd, 0)}
+                    </p>
+                  )}
+                  {!isNewContributor && (
+                    <p className="text-xs text-cream-20 mt-0.5 font-mono">
+                      was {formatSolFromSol(results.beforeSolYear, 2)} SOL
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Impact on other contributors */}
+            <div>
+              <p className="text-xs text-cream-40 mb-2">Impact on all contributors</p>
+              <div className="space-y-1.5 max-h-[200px] overflow-y-auto">
+                {simResult.allContributors
+                  // Show any contributor with a non-zero share, including
+                  // NEGATIVE ones: under DZ's per-city method a net-drag operator
+                  // can have a negative raw Shapley share, and we surface it
+                  // rather than hide it (matches DZ; no clamping — issue #19).
+                  .filter((c) => c.beforeShare !== 0 || c.afterShare !== 0)
+                  .sort((a, b) => b.afterShare - a.afterShare)
+                  .map((c) => {
+                    const bPct = roundPct(c.beforeShare);
+                    const aPct = roundPct(c.afterShare);
+                    const dPct = Math.round((aPct - bPct) * 100) / 100;
+                    const apiCode = isNewContributor ? "new_contributor_sim" : contributorCode;
+                    const isTarget = c.code === apiCode;
+                    return (
+                      <div
+                        key={c.code}
+                        className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs ${
+                          isTarget ? "bg-cream-8" : ""
+                        }`}
+                      >
+                        <span
+                          className="size-2 rounded-full shrink-0"
+                          style={{ backgroundColor: getContributorColor(c.code) }}
+                        />
+                        <span className={`flex-1 ${isTarget ? "text-cream font-medium" : "text-cream-60"}`}>
+                          {c.code === "new_contributor_sim" ? "You (new)" : getContributorDisplayName(c.code)}
+                        </span>
+                        <span className="text-cream-40 tabular-nums">
+                          {fmtPct(bPct)}
+                        </span>
+                        <ArrowRight className="size-2.5 text-cream-20" />
+                        <span className="text-cream-60 tabular-nums">
+                          {fmtPct(aPct)}
+                        </span>
+                        <span
+                          className={`tabular-nums w-16 text-right ${
+                            dPct > 0.001
+                              ? "text-green"
+                              : dPct < -0.001
+                              ? "text-red"
+                              : "text-cream-20"
+                          }`}
+                        >
+                          {dPct > 0 ? "+" : ""}
+                          {fmtPct(dPct)}
+                        </span>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+
+            <p className="text-xs text-cream-20 text-center">
+              Based on Shapley value analysis with historical fee averages
+              {feeHistory && feeHistory.epochs.length > 0
+                ? ` (epochs ${feeHistory.earliestEpoch}–${feeHistory.latestEpoch})`
+                : ""}
+              .
+            </p>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,65 @@
+[package]
+name = "dz-shapley-service"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/phaselabscrypto/dz-contributor"
+
+[dependencies]
+# Canonical Shapley solver — Phase Labs fork with HiGHS LP solver.
+# Pinned to main with ComputeOptions API collapse (8 methods → 4).
+# For local crate iteration, temporarily swap to:
+#   network-shapley = { path = "../../../network-shapley-rs", features = ["serde"] }
+#
+# CONTRACT: compute_per_city must run cities SEQUENTIALLY (not cities.par_iter())
+# so the per-rayon-worker warm solver doesn't thrash back to fresh-build cost.
+# link_estimate is a single coalition loop, so it satisfies the same contract.
+network-shapley = { git = "https://github.com/phaselabscrypto/network-shapley-rs", rev = "db60fd3b2e62e223cde440f9b2805a337e4142c1", features = ["serde"] }
+
+# HTTP server
+axum = { version = "0.7", features = ["json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "timeout", "catch-panic"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+anyhow = "1"
+
+# Parallelism for leave-one-out link-estimate runs
+rayon = "1"
+
+# S3 cache persistence
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+
+# Serialization for cache
+bincode = "1"
+
+# Redis-backed async job store (state / progress / cancel; shared across replicas)
+# and, in Phase 2, the Streams work queue. `deadpool-redis` provides pooling;
+# its bundled `redis` only enables `aio`, NOT `streams` (it sets
+# default-features = false, so the redis default that includes `streams` is not
+# inherited). The Stream `AsyncCommands` (xadd / xread_options / xack /
+# xautoclaim_options / xpending / xgroup_create_mkstream) are gated behind the
+# `streams` feature, so we add a direct `redis` dep that turns it on. Both are
+# version 0.27 (matches deadpool-redis 0.18) — feature flags are additive, no
+# conflict. Use the `deadpool_redis::redis` re-export in code to avoid skew.
+deadpool-redis = "0.18"
+redis = { version = "0.27", features = ["aio", "streams"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
