@@ -14,7 +14,7 @@ repository = "https://github.com/phaselabscrypto/dz-contributor"
 # CONTRACT: compute_per_city must run cities SEQUENTIALLY (not cities.par_iter())
 # so the per-rayon-worker warm solver doesn't thrash back to fresh-build cost.
 # link_estimate is a single coalition loop, so it satisfies the same contract.
-network-shapley = { git = "https://github.com/phaselabscrypto/network-shapley-rs", rev = "db60fd3b2e62e223cde440f9b2805a337e4142c1", features = ["serde"] }
+network-shapley = { git = "https://github.com/phaselabscrypto/network-shapley-rs", rev = "d813bc0699f5cfefabeece12caa349335b1f13e4", features = ["serde"] }
 
 # HTTP server
 axum = { version = "0.7", features = ["json"] }
