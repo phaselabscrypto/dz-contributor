@@ -94,8 +94,10 @@ export async function fetchLiveTopology(): Promise<LiveTopology> {
   const metroByPk = new Map<string, RawMetro>();
   for (const m of raw.metros) metroByPk.set(m.pk, m);
   const deviceMetroCode = new Map<string, string>();
+  const deviceContributor = new Map<string, string>();
   for (const d of raw.devices) {
     deviceMetroCode.set(d.pk, metroByPk.get(d.metro_pk)?.code ?? "");
+    deviceContributor.set(d.pk, d.contributor_code);
   }
 
   const cmap = new Map<string, LiveContributor>();
@@ -107,6 +109,7 @@ export async function fetchLiveTopology(): Promise<LiveTopology> {
         pk: d.contributor_pk,
         deviceCount: 0,
         linkCount: 0,
+        focusLinkCount: 0,
         totalStakeSol: 0,
         validatorCount: 0,
         totalBandwidthBps: 0,
@@ -124,6 +127,19 @@ export async function fetchLiveTopology(): Promise<LiveTopology> {
     if (c) {
       c.linkCount++;
       c.totalBandwidthBps += l.bandwidth_bps || 0;
+    }
+    // Either-endpoint attribution: a link counts toward EVERY contributor with a
+    // device on it (deduped — a self-internal link counts once), mirroring the
+    // service's count_focus_links (OR ownership). This — not linkCount — is what
+    // the per-link breakdown turns into players, so it's what gates feasibility.
+    const endpoints = new Set<string>();
+    const a = deviceContributor.get(l.side_a_pk);
+    const z = deviceContributor.get(l.side_z_pk);
+    if (a) endpoints.add(a);
+    if (z) endpoints.add(z);
+    for (const code of endpoints) {
+      const ec = cmap.get(code);
+      if (ec) ec.focusLinkCount++;
     }
   }
 

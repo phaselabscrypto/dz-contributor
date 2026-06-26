@@ -15,6 +15,14 @@ export const FEE_CONSOLIDATED_URL =
 // let the S3 404 reject non-existent epochs.
 export const MIN_DZ_EPOCH = 48;
 
+// Max focus-owned links the per-link breakdown can solve. The breakdown is an
+// EXACT 2^players Shapley game (one player per focus link + an "Others"
+// pseudo-operator), so it's only tractable to ~20 players. Mirrors the Rust
+// service's `SWEEP_MAX_FOCUS_LINKS` and the DZ reference's own limit
+// (`network_linkestimate.py` asserts n_ops <= 20). Operators above this can't be
+// broken down link-by-link by either implementation — gate before requesting.
+export const MAX_BREAKDOWN_FOCUS_LINKS = 19;
+
 // Canonical Shapley solver service.
 //
 // `SHAPLEY_SERVICE_URL` should point at the Rust microservice in

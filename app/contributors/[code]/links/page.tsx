@@ -161,7 +161,7 @@ export default function ContributorLinksPage() {
     <>
       <PageHeader
         title={`${displayName} links`}
-        description={`Full link footprint for ${code} with per-link value-add tier and live utilization.`}
+        description={`Full link footprint for ${code} with per-link reward tier and live utilization.`}
       />
       <div className="flex-1 px-4 sm:px-6 py-4 sm:py-6 space-y-4">
         <div className="flex items-center justify-between gap-3">

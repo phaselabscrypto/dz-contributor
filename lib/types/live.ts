@@ -73,7 +73,14 @@ export interface LiveContributor {
   code: string;
   pk: string;
   deviceCount: number;
+  /** Links this contributor OWNS (recorded owner-of-record). Display-facing. */
   linkCount: number;
+  /** Links touching one of this contributor's devices on EITHER endpoint —
+   * owned plus the ones where they're the far end of a counterparty-owned link.
+   * This is what the per-link breakdown turns into players (== the service's
+   * `count_focus_links`), so it's the count that gates breakdown feasibility and
+   * can exceed `linkCount`. */
+  focusLinkCount: number;
   totalStakeSol: number;
   validatorCount: number;
   totalBandwidthBps: number;

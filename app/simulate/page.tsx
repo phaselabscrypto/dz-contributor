@@ -71,7 +71,7 @@ export default function SimulatePage() {
   return (
     <>
       <PageHeader
-        title="Simulate"
+        title="Forecast"
         description="Model contributor and link changes against the Shapley reward solver. Compare before/after share and projected 2Z rewards."
       />
       <div className="flex-1 px-4 sm:px-6 py-4 sm:py-6">

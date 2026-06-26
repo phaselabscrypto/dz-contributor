@@ -7,6 +7,18 @@ import type { LinkEstimateLink } from "@/lib/utils/shapley-remote";
 const POLL_INTERVAL_MS = 1000;
 const MAX_CONSECUTIVE_POLL_FAILURES = 20;
 
+/** Peel nested `{ "error": "… {\"error\":\"<msg>\"}" }` wrappers (the Next proxy
+ * and the Rust service each wrap the message) down to the innermost human text. */
+function cleanError(body: string): string {
+  let msg = body.slice(0, 600);
+  for (let i = 0; i < 3; i += 1) {
+    const m = msg.match(/"error"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (!m) break;
+    msg = m[1].replace(/\\(.)/g, "$1");
+  }
+  return msg.slice(0, 240);
+}
+
 /** A completed canonical link-estimate run for one (contributor, epoch). */
 export interface LinkEstimateData {
   epoch: number;
@@ -20,6 +32,9 @@ export interface LinkEstimateState {
   data: LinkEstimateData | null;
   /** Hard failure for the current pair — there is NO fallback; show it. */
   error: string | null;
+  /** True when `error` is a deterministic rejection (4xx / failed job) a retry
+   * can't fix — callers should present it as terminal, not "try again". */
+  terminal: boolean;
   /** Live solve progress 0–100 while a job is running (null otherwise). */
   progress: number | null;
   /** True while submitting/polling for the current pair. */
@@ -45,6 +60,7 @@ export function useLinkEstimate(
     epoch: number | null;
     data: LinkEstimateData | null;
     error: string | null;
+    terminal: boolean;
     inFlight: boolean;
     progress: number | null;
   }>({
@@ -52,6 +68,7 @@ export function useLinkEstimate(
     epoch: null,
     data: null,
     error: null,
+    terminal: false,
     inFlight: false,
     progress: null,
   });
@@ -71,12 +88,13 @@ export function useLinkEstimate(
         );
       }
     };
-    const fail = (msg: string) => {
+    const fail = (msg: string, terminal = false) => {
       if (cancelled) return;
       setFetchState({
         ...runId,
         data: null,
         error: msg,
+        terminal,
         inFlight: false,
         progress: null,
       });
@@ -87,6 +105,7 @@ export function useLinkEstimate(
         ...runId,
         data: json,
         error: null,
+        terminal: false,
         inFlight: false,
         progress: null,
       });
@@ -139,7 +158,7 @@ export function useLinkEstimate(
           // belt-and-braces so a malformed payload can never present as a
           // successful canonical run.
           if (!Array.isArray(j.links)) {
-            return fail("job finished but returned no result");
+            return fail("job finished but returned no result", true);
           }
           succeed({
             epoch: runId.epoch,
@@ -150,7 +169,8 @@ export function useLinkEstimate(
           return;
         }
         if (j.state === "failed" || j.state === "cancelled") {
-          return fail(j.error ? String(j.error).slice(0, 200) : j.state);
+          // A failed/cancelled job is a deterministic outcome for this input.
+          return fail(j.error ? String(j.error).slice(0, 200) : j.state, true);
         }
         if (typeof j.progress?.percent === "number") {
           setProgress(j.progress.percent);
@@ -169,6 +189,7 @@ export function useLinkEstimate(
           ...runId,
           data: null,
           error: null,
+          terminal: false,
           inFlight: true,
           progress: 0,
         });
@@ -184,7 +205,12 @@ export function useLinkEstimate(
         });
         if (!res.ok) {
           if (cancelled) return;
-          return fail(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+          // A 4xx is a deterministic rejection (e.g. the operator owns more
+          // links than the exact breakdown can solve) — surface the service's
+          // own message as TERMINAL, never as a transient "try again".
+          const body = await res.text();
+          const terminal = res.status >= 400 && res.status < 500;
+          return fail(cleanError(body), terminal);
         }
         // Capture the job id BEFORE any cancelled-check: the job already exists
         // server-side, so an early return here (selection change mid-POST,
@@ -217,6 +243,7 @@ export function useLinkEstimate(
   return {
     data: isCurrent && !fetchState.inFlight ? fetchState.data : null,
     error: isCurrent ? fetchState.error : null,
+    terminal: isCurrent ? fetchState.terminal : false,
     progress: isCurrent ? fetchState.progress : null,
     loading: !!contributor && !!epoch && (!isCurrent || fetchState.inFlight),
   };

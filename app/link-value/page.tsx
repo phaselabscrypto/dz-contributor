@@ -11,6 +11,7 @@ import { LoadingState, ErrorState, EmptyState } from "@/components/ui/states";
 import {
   getContributorDisplayName,
   getContributorColor,
+  MAX_BREAKDOWN_FOCUS_LINKS,
 } from "@/lib/constants/config";
 import { linkMetaRows, type LinkMetaRow } from "@/lib/utils/link-value";
 import {
@@ -43,16 +44,32 @@ function Inner() {
       .sort((a, b) => b.linkCount - a.linkCount);
   }, [topology]);
 
+  const selected = useMemo(
+    () => contributors.find((c) => c.code === contributor) ?? null,
+    [contributors, contributor],
+  );
+  // The breakdown is an exact 2^players game (one player per link touching the
+  // operator on EITHER endpoint == focusLinkCount), intractable past
+  // MAX_BREAKDOWN_FOCUS_LINKS. Over-cap operators stay in the picker (hiding a
+  // notable operator is more confusing than listing it), but selecting one shows
+  // a calm "not available" note instead of submitting a doomed job.
+  const overLinkCap =
+    !!selected && selected.focusLinkCount > MAX_BREAKDOWN_FOCUS_LINKS;
+
   const latestEpoch = epochsData?.latest ?? null;
 
   // Canonical per-link Shapley — from the epoch precompute cache, or a job, or
-  // a hard error.
+  // a hard error. Skipped (null) when the operator is over the exact-solve cap.
   const {
     data: canonical,
     error: canonicalErr,
+    terminal: canonicalTerminal,
     progress,
     loading: canonicalLoading,
-  } = useLinkEstimate(contributor || null, latestEpoch);
+  } = useLinkEstimate(
+    contributor && !overLinkCap ? contributor : null,
+    latestEpoch,
+  );
 
   // Topology METADATA only (names, endpoints, specs) — never values.
   const metaRows: LinkMetaRow[] = useMemo(() => {
@@ -125,10 +142,23 @@ function Inner() {
         />
       )}
 
-      {contributor && canonicalErr && (
+      {contributor && overLinkCap && selected && (
+        <EmptyState
+          title="Per-link breakdown unavailable"
+          message={`A per-link breakdown isn't available for ${getContributorDisplayName(
+            contributor,
+          )} — it connects to too many links to value individually.`}
+        />
+      )}
+
+      {contributor && !overLinkCap && canonicalErr && (
         <ErrorState
           title="Couldn't load link values"
-          message={`${canonicalErr}. Try again shortly.`}
+          message={
+            canonicalTerminal
+              ? canonicalErr
+              : `${canonicalErr}. Try again shortly.`
+          }
         />
       )}
 
@@ -313,8 +343,8 @@ export default function LinkValuePage() {
   return (
     <>
       <PageHeader
-        title="Link Value-Add"
-        description="How much each link contributes to a contributor's rewards."
+        title="Link Rewards"
+        description="How much each of an operator's existing links contributes to their reward this epoch."
       />
       <div className="flex-1 px-4 sm:px-6 py-4 sm:py-6">
         <Suspense fallback={<LoadingState label="Loading" />}>

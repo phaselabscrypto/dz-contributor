@@ -11,9 +11,10 @@ export default function HomePage() {
           See exactly what your links earn — and what they would earn.
         </h1>
         <p className="text-sm sm:text-base text-cream-60 leading-relaxed">
-          Live network state, real reward distributions from the DoubleZero
-          Economic Hub, and a Shapley-based forecaster for any add/remove
-          scenario. One stop for every contributor reward question.
+          For operators running links today and anyone weighing whether to
+          join: live network state, real reward distributions from the
+          DoubleZero Economic Hub, and a Shapley-based forecaster for any
+          scenario.
         </p>
       </div>
 
@@ -21,15 +22,15 @@ export default function HomePage() {
         <ModeCard
           href="/simulate"
           title="Forecast"
-          subtitle="Add or remove links — see the 2Z delta"
-          body="Pick a contributor, modify their link footprint, and run a Shapley simulation against historical demand. Get before/after share, projected 2Z per epoch / month / year, and per-contributor impact."
+          subtitle="Model your links — see the 2Z you'd earn"
+          body="Whether you run links today or you're thinking about joining: add or drop links, set demand, and run a Shapley what-if for before/after reward share and projected 2Z."
           primary
         />
         <ModeCard
           href="/link-value"
-          title="Link Value-Add"
-          subtitle="Rank a contributor's links by reward contribution"
-          body="See which of your existing links carry the most weight. Bandwidth, latency, metro uniqueness, and live utilization are factored into a relative value score per link."
+          title="Link Rewards"
+          subtitle="Per-link reward breakdown — existing operators only"
+          body="Pick an operator and see how much each of their existing links contributes to their reward this epoch. A faithful, read-only attribution — no hypotheticals."
         />
       </div>
 

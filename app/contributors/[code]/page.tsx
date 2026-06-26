@@ -318,7 +318,7 @@ export default function ContributorDetailPage() {
               href={`/contributors/${code}/links`}
               className="text-xs uppercase tracking-[0.12em] font-mono text-cream-40 hover:text-foreground transition-colors"
             >
-              Full table + value-add →
+              Full table + link rewards →
             </Link>
           </div>
           <div className="overflow-x-auto">

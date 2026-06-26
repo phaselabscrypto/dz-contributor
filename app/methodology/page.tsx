@@ -222,7 +222,7 @@ validator_take_per_epoch = operator_share × validator_pool_per_epoch × 0.65`}
             </p>
           </Section>
 
-          <Section title="Link value-add">
+          <Section title="Link Rewards">
             <p>
               <Link href="/link-value" className="underline decoration-dotted hover:text-foreground">
                 /link-value

@@ -21,7 +21,7 @@ const NAV: SidebarItem[] = [
   { href: "/validators", label: "Validators", group: "Overview" },
   { href: "/links", label: "Links", group: "Overview" },
   { href: "/simulate", label: "Forecast", group: "Tools" },
-  { href: "/link-value", label: "Link Value-Add", group: "Tools" },
+  { href: "/link-value", label: "Link Rewards", group: "Tools" },
   { href: "/economics", label: "Economics", group: "Analysis" },
   { href: "/rewards", label: "Rewards", group: "Analysis" },
   { href: "/changelog", label: "Changelog", group: "Analysis" },

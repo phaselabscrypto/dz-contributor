@@ -147,6 +147,7 @@ export async function fetchOnchainTopology(): Promise<FetchTopologyResult> {
       pk: c.pk,
       deviceCount: 0,
       linkCount: 0,
+      focusLinkCount: 0,
       totalStakeSol: 0,
       validatorCount: 0,
       totalBandwidthBps: 0,
@@ -162,11 +163,24 @@ export async function fetchOnchainTopology(): Promise<FetchTopologyResult> {
       }
     }
   }
+  const onchainDeviceContributor = new Map<string, string>();
+  for (const d of devices) onchainDeviceContributor.set(d.pk, d.contributorCode);
   for (const l of links) {
     const c = contributorMap.get(l.contributorCode);
     if (c) {
       c.linkCount++;
       c.totalBandwidthBps += l.bandwidthBps;
+    }
+    // Either-endpoint attribution (mirrors live-topology-fetch + the service's
+    // count_focus_links) — what gates the per-link breakdown.
+    const endpoints = new Set<string>();
+    const a = onchainDeviceContributor.get(l.sideAPk);
+    const z = onchainDeviceContributor.get(l.sideZPk);
+    if (a) endpoints.add(a);
+    if (z) endpoints.add(z);
+    for (const code of endpoints) {
+      const ec = contributorMap.get(code);
+      if (ec) ec.focusLinkCount++;
     }
   }
 
