@@ -63,6 +63,11 @@ pub const RECLAIM_MIN_IDLE_MS: usize = 30_000;
 /// `XACK`'d off the work Stream.
 pub const MAX_DELIVERIES: usize = 3;
 
+/// Tighter redelivery cap for `LinkEstimate`: an OOM SIGKILL is uncatchable, so
+/// the entry is reclaimed and re-OOMs each worker it lands on. Dead-lettering
+/// after one retry stops an oversized breakdown crash-looping the whole pool.
+pub const MAX_DELIVERIES_LINK_ESTIMATE: usize = 1;
+
 // ── Per-job key TTLs ─────────────────────────────────────────────────────
 
 /// TTL (seconds) for the payload String — covers a job's whole lifetime with

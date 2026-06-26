@@ -950,8 +950,14 @@ async fn reclaim(
             ack(store, &entry.id).await?;
             continue;
         }
-        if delivery_count(store, &entry.id).await? > queue::MAX_DELIVERIES {
-            let parsed = queue::StreamEntry::from_field_map(&entry.map).ok();
+        // Parse up front so the redelivery cap can be kind-aware (LinkEstimate
+        // dead-letters sooner — see `MAX_DELIVERIES_LINK_ESTIMATE`).
+        let parsed = queue::StreamEntry::from_field_map(&entry.map).ok();
+        let max_deliveries = match parsed.as_ref().map(|e| e.kind) {
+            Some(JobKind::LinkEstimate) => queue::MAX_DELIVERIES_LINK_ESTIMATE,
+            _ => queue::MAX_DELIVERIES,
+        };
+        if delivery_count(store, &entry.id).await? > max_deliveries {
             let job_id = parsed
                 .as_ref()
                 .map(|e| e.job_id.clone())

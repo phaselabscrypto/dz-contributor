@@ -151,15 +151,6 @@ const MAX_DEVICES: usize = 500;
 const MAX_LINKS: usize = 2_000;
 const MAX_DEMANDS: usize = 2_000;
 
-/// Maximum distinct operators (Shapley "players"). Every coalition LP — on both
-/// the monolithic `/shapley` path and the per-city reward path (where each city
-/// solve enumerates the FULL operator set; see `compute_per_city`) — costs
-/// `2^operators` LPs, so the engine's exact solve is infeasible past ~20. We
-/// reject above the cap at the API boundary so an oversized input fails fast and
-/// cheap, instead of allocating its way into the engine and timing out on the
-/// shared worker. Real epochs sit well under this (e.g. epoch-149 ≈ 14).
-const MAX_OPERATORS: usize = 20;
-
 fn validate_dimensions(input: &ShapleyInputIn) -> Result<(), String> {
     if input.devices.len() > MAX_DEVICES {
         return Err(format!(
@@ -187,19 +178,6 @@ fn validate_dimensions(input: &ShapleyInputIn) -> Result<(), String> {
             "demands count {} exceeds limit {}",
             input.demands.len(),
             MAX_DEMANDS
-        ));
-    }
-    let operator_count = input
-        .devices
-        .iter()
-        .map(|d| d.operator.as_str())
-        .collect::<std::collections::HashSet<_>>()
-        .len();
-    if operator_count > MAX_OPERATORS {
-        return Err(format!(
-            "operator count {operator_count} exceeds the {MAX_OPERATORS}-operator \
-             exact-solve limit (each coalition LP enumerates 2^operators; the engine \
-             cannot solve beyond this on any path)"
         ));
     }
     Ok(())
@@ -926,6 +904,34 @@ pub async fn simulate(
 /// path is bounded by the engine's 20-player cap only.
 const SYNC_MAX_FOCUS_LINKS: usize = 12;
 
+/// Worker count for the link-estimate solve's scoped rayon pool. Each rayon
+/// worker holds its own resident whole-demand HiGHS model, so the global 16
+/// would keep 16 big models alive and OOM the 16Gi worker; a small pool caps
+/// them. Concurrency-only — output is thread-count invariant (see the
+/// determinism test). Override per-deploy with `LINK_ESTIMATE_SOLVE_THREADS`.
+const LINK_ESTIMATE_SOLVE_THREADS_DEFAULT: usize = 4;
+const LINK_ESTIMATE_SOLVE_THREADS_ENV: &str = "LINK_ESTIMATE_SOLVE_THREADS";
+
+/// Pure clamp policy (split from the env read so it's unit-testable): unset →
+/// default, result pinned to `1..=max` (`max.max(1)` keeps `clamp` total).
+fn resolve_solve_threads(requested: Option<usize>, max: usize) -> usize {
+    requested
+        .unwrap_or(LINK_ESTIMATE_SOLVE_THREADS_DEFAULT)
+        .clamp(1, max.max(1))
+}
+
+/// Resolve the scoped-pool worker count from `LINK_ESTIMATE_SOLVE_THREADS`,
+/// clamped to `1..=available_parallelism`.
+pub(crate) fn link_estimate_solve_threads() -> usize {
+    let max = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(LINK_ESTIMATE_SOLVE_THREADS_DEFAULT);
+    let requested = std::env::var(LINK_ESTIMATE_SOLVE_THREADS_ENV)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    resolve_solve_threads(requested, max)
+}
+
 /// Count the focus operator's links (OR ownership — either endpoint's device
 /// belongs to the focus operator), mirroring the engine's retag semantics.
 pub(crate) fn count_focus_links(input: &ShapleyInputIn, operator_focus: &str) -> usize {
@@ -1111,9 +1117,28 @@ pub(crate) async fn run_link_estimate(
 ) -> Result<LinkEstimateResponse, LinkEstimateError> {
     let engine_input = build_input(input);
     let focus = operator_focus.to_string();
-    let joined = tokio::task::spawn_blocking(move || match control {
-        Some(c) => engine_input.network_link_estimate_cancellable(&focus, &c),
-        None => engine_input.network_link_estimate(&focus),
+    let solve_threads = link_estimate_solve_threads();
+    let joined = tokio::task::spawn_blocking(move || {
+        let solve = move || match control {
+            Some(c) => engine_input.network_link_estimate_cancellable(&focus, &c),
+            None => engine_input.network_link_estimate(&focus),
+        };
+        // Cap resident HiGHS models to `solve_threads` (one per rayon worker) so
+        // the global 16-thread pool can't keep 16 whole-demand models alive and
+        // OOM the worker. `install` returns the closure's value unchanged.
+        match rayon::ThreadPoolBuilder::new()
+            .num_threads(solve_threads)
+            .thread_name(|i| format!("link-est-solve-{i}"))
+            .build()
+        {
+            Ok(pool) => pool.install(solve),
+            // Degrade to the global pool rather than fail the solve.
+            Err(e) => {
+                tracing::warn!(error = %e, solve_threads,
+                    "link-estimate scoped pool build failed; using global pool");
+                solve()
+            }
+        }
     })
     .await;
 
@@ -1237,6 +1262,25 @@ pub async fn link_estimate_start(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response();
+    }
+
+    // Reject an over-cap focus up front (the engine hard-caps at 20 players, so
+    // >19 links can never solve) instead of enqueueing a guaranteed failure.
+    // Sanity/time guard only — the OOM fix is the scoped pool in `run_link_estimate`.
+    let focus_links = count_focus_links(&body.input, &body.operator_focus);
+    if focus_links > SWEEP_MAX_FOCUS_LINKS {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": format!(
+                    "operator_focus '{}' owns {focus_links} links; the async \
+                     /jobs/link-estimate path caps at {SWEEP_MAX_FOCUS_LINKS} \
+                     (a 2^players coalition solve grows exponentially)",
+                    body.operator_focus
+                )
+            })),
         )
             .into_response();
     }
@@ -1673,6 +1717,92 @@ mod tests {
         );
     }
 
+    /// Parity guard for the scoped-pool fix: a 1- vs 16-thread solve must agree
+    /// (link identity exactly, values within 1e-9 — far inside the 1e-2 Python
+    /// tolerance), because the engine collects coalitions in deterministic index
+    /// order. 1e-9 (not bit-exact) avoids flaking on sub-ULP warm-start drift.
+    #[test]
+    fn link_estimate_is_thread_count_invariant() {
+        let raw = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/simple.json"),
+        )
+        .expect("read simple.json");
+        let input: ShapleyInputIn = serde_json::from_str(&raw).expect("parse simple.json");
+
+        // Fresh engine per solve, moved into the pool, so the closure is `Send`.
+        let solve = |threads: usize| {
+            let engine = build_input(&input);
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("build scoped pool")
+                .install(move || engine.network_link_estimate("Alpha"))
+                .expect("link-estimate solve")
+        };
+
+        let one = solve(1);
+        let many = solve(16);
+
+        assert!(!one.is_empty(), "Alpha owns links; expected >= 1 row");
+        assert_eq!(
+            one.len(),
+            many.len(),
+            "link count must not depend on pool size"
+        );
+        for (a, b) in one.iter().zip(&many) {
+            assert_eq!(
+                (&a.device1, &a.device2),
+                (&b.device1, &b.device2),
+                "link identity/order must not depend on pool size"
+            );
+            assert!(
+                (a.value - b.value).abs() < 1e-9,
+                "value moved with pool size: {} vs {}",
+                a.value,
+                b.value
+            );
+            assert!(
+                (a.percent - b.percent).abs() < 1e-9,
+                "percent moved with pool size: {} vs {}",
+                a.percent,
+                b.percent
+            );
+        }
+    }
+
+    /// `install` runs on the N-thread pool, not the inherited global one.
+    #[test]
+    fn scoped_pool_runs_on_requested_thread_count() {
+        let observed = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("build scoped pool")
+            .install(rayon::current_num_threads);
+        assert_eq!(observed, 4);
+    }
+
+    /// Pure clamp: unset → default, pinned to `1..=max`, no panic at `max == 0`.
+    #[test]
+    fn resolve_solve_threads_defaults_and_clamps() {
+        assert_eq!(
+            resolve_solve_threads(None, 16),
+            LINK_ESTIMATE_SOLVE_THREADS_DEFAULT
+        );
+        assert_eq!(resolve_solve_threads(Some(6), 16), 6, "in-range honoured");
+        assert_eq!(resolve_solve_threads(Some(0), 16), 1, "floor at 1");
+        assert_eq!(
+            resolve_solve_threads(Some(100), 16),
+            16,
+            "ceil at available parallelism"
+        );
+        assert_eq!(
+            resolve_solve_threads(None, 0),
+            1,
+            "degenerate max never panics the clamp"
+        );
+        assert_eq!(resolve_solve_threads(Some(8), 0), 1);
+    }
+
     fn canonical_input() -> ShapleyInputIn {
         ShapleyInputIn {
             devices: vec![
@@ -1756,37 +1886,6 @@ mod tests {
         let fra2 = built.devices.iter().find(|d| d.device == "FRA2").unwrap();
         assert_eq!(fra2.operator, "Beta");
         assert_eq!(fra2.edge, 0);
-    }
-
-    #[test]
-    fn validate_dimensions_caps_operator_count() {
-        // Minimal input with `n` distinct operators (one device each); empty
-        // links/demands trivially pass the other dimension checks.
-        fn input_with_operators(n: usize) -> ShapleyInputIn {
-            ShapleyInputIn {
-                devices: (0..n)
-                    .map(|i| DeviceIn {
-                        device: format!("DEV{i}"),
-                        edge: 1,
-                        operator: format!("op{i}"),
-                    })
-                    .collect(),
-                private_links: vec![],
-                public_links: vec![],
-                demands: vec![],
-                operator_uptime: 0.98,
-                contiguity_bonus: 5.0,
-                demand_multiplier: 1.0,
-                city_weights: Default::default(),
-            }
-        }
-        // Exactly at the cap is accepted (the engine's exact-solve ceiling).
-        assert!(validate_dimensions(&input_with_operators(MAX_OPERATORS)).is_ok());
-        // One over the cap is rejected before any allocation, with an
-        // operator-count message.
-        let err = validate_dimensions(&input_with_operators(MAX_OPERATORS + 1))
-            .expect_err("over-cap operator count must be rejected");
-        assert!(err.contains("operator count"), "unexpected message: {err}");
     }
 
     #[test]

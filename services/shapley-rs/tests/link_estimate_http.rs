@@ -38,6 +38,10 @@ fn app() -> Router {
             "/precompute/link-estimates/status",
             get(dz_shapley_service::routes::link_estimate_sweep_status),
         )
+        .route(
+            "/jobs/link-estimate",
+            post(dz_shapley_service::routes::link_estimate_start),
+        )
         .with_state(state)
 }
 
@@ -166,6 +170,49 @@ async fn link_estimate_sync_cap_directs_to_jobs() {
         msg.contains("13"),
         "error should state the offending link count: {resp}"
     );
+}
+
+/// The async path caps focus links (>19) before the queue lookup, so an over-cap
+/// focus 422s even without Redis.
+#[tokio::test]
+async fn async_link_estimate_cap_rejects_oversized_focus() {
+    // 20 Alpha-owned links > the 19 cap; demands empty (cap fires before compute).
+    let mut devices: Vec<Value> = (0..21)
+        .map(|i| json!({ "device": format!("AAA{}", i + 1), "edge": 1, "operator": "Alpha" }))
+        .collect();
+    devices.push(json!({ "device": "BBB1", "edge": 1, "operator": "Beta" }));
+    let links: Vec<Value> = (0..20)
+        .map(|i| {
+            json!({ "device1": format!("AAA{}", i + 1), "device2": format!("AAA{}", i + 2),
+                    "latency": 1.0 + i as f64, "bandwidth": 10.0, "uptime": 1.0, "shared": null })
+        })
+        .collect();
+    let body = json!({
+        "input": { "devices": devices, "private_links": links, "public_links": [], "demands": [] },
+        "operator_focus": "Alpha",
+    });
+
+    let resp = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/jobs/link-estimate")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status, 422, "expected 422, got {status}: {json}");
+    let msg = json["error"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("20"),
+        "error should state the offending link count: {json}"
+    );
+    assert!(msg.contains("19"), "error should state the cap: {json}");
 }
 
 async fn post_sweep(body: Value) -> (axum::http::StatusCode, Value) {
