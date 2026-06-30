@@ -491,42 +491,90 @@ export function SimulateTab({
         </span>
       </div>
 
-      {/* Step 1: Contributor selector */}
+      {/* Step 1: Audience selector — existing operator vs new contributor */}
       <Card className="bg-cream-5 border-cream-8">
         <CardHeader>
           <CardTitle className="font-display text-sm tracking-wide text-cream">
-            Select your contributor
+            Who are you?
           </CardTitle>
           <CardDescription className="text-cream-40">
-            Choose an existing operator or simulate as a new contributor
+            Forecast as an existing operator changing your links, or as a new
+            contributor seeing the reward share you&apos;d add by joining.
           </CardDescription>
         </CardHeader>
-        <CardContent>
-          <Select value={contributorCode} onValueChange={handleContributorChange}>
-            <SelectTrigger className="w-full sm:w-[320px]">
-              <SelectValue placeholder="Choose a contributor..." />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={NEW_CONTRIBUTOR_VALUE}>
-                <span className="flex items-center gap-2">
-                  <Plus className="size-3 text-green" />
-                  <span className="text-green">New contributor</span>
-                </span>
-              </SelectItem>
-              {sortedContributors.map((c) => (
-                <SelectItem key={c.code} value={c.code}>
-                  <span className="flex items-center gap-2">
-                    <span
-                      className="size-2 rounded-full inline-block"
-                      style={{ backgroundColor: getContributorColor(c.code) }}
-                    />
-                    {getContributorDisplayName(c.code)}
-                    <span className="text-cream-30 ml-1">{c.linkCount} links</span>
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+        <CardContent className="space-y-3">
+          <div
+            role="radiogroup"
+            aria-label="Forecast as"
+            className="inline-flex border border-cream-15 bg-surface w-full sm:w-[360px]"
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked={!isNewContributor}
+              onClick={() => {
+                if (isNewContributor) handleContributorChange("");
+              }}
+              className={`flex-1 px-3 py-2 text-xs font-mono transition-colors ${
+                !isNewContributor
+                  ? "bg-cream text-dark"
+                  : "text-cream-60 hover:text-cream"
+              }`}
+            >
+              Existing operator
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={isNewContributor}
+              onClick={() => {
+                if (!isNewContributor)
+                  handleContributorChange(NEW_CONTRIBUTOR_VALUE);
+              }}
+              className={`flex-1 px-3 py-2 text-xs font-mono transition-colors border-l border-cream-15 ${
+                isNewContributor
+                  ? "bg-cream text-dark"
+                  : "text-cream-60 hover:text-cream"
+              }`}
+            >
+              New contributor
+            </button>
+          </div>
+
+          {isNewContributor ? (
+            <p className="text-xs text-cream-40 flex items-start gap-2">
+              <Plus className="size-3 text-green shrink-0 mt-0.5" />
+              <span>
+                Starting from 0% share — add the links you&apos;d contribute
+                below and run the forecast.
+              </span>
+            </p>
+          ) : (
+            <Select
+              value={contributorCode}
+              onValueChange={handleContributorChange}
+            >
+              <SelectTrigger className="w-full sm:w-[320px]">
+                <SelectValue placeholder="Choose your operator..." />
+              </SelectTrigger>
+              <SelectContent>
+                {sortedContributors.map((c) => (
+                  <SelectItem key={c.code} value={c.code}>
+                    <span className="flex items-center gap-2">
+                      <span
+                        className="size-2 rounded-full inline-block"
+                        style={{ backgroundColor: getContributorColor(c.code) }}
+                      />
+                      {getContributorDisplayName(c.code)}
+                      <span className="text-cream-30 ml-1">
+                        {c.linkCount} links
+                      </span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </CardContent>
       </Card>
 
