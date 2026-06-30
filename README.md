@@ -93,17 +93,17 @@ All API routes return JSON. Cached server-side; SWR-cached client-side.
 
 ### Shapley solver
 
-Two implementations:
+The canonical path is the **Rust microservice** (`services/shapley-rs/`),
+which wraps Phase's fork of the Foundation's `network-shapley-rs` crate.
+Set `SHAPLEY_SERVICE_URL` to its URL after deploy. Every response is
+labelled with the `method` used — `lp-multi-commodity-flow-rs` for the
+reward solve, `retag-shapley-rs` for per-link estimates.
 
-1. **Rust microservice** (`services/shapley-rs/`) — wraps the canonical
-   `network-shapley-rs` crate. Set `SHAPLEY_SERVICE_URL` env to its public
-   URL after deploy. This is the bit-comparable path.
-2. **TypeScript fallback** (`lib/utils/shapley-solver.ts`) — coalition
-   enumeration with greedy bandwidth-aware demand packing. Used when the
-   Rust service is unreachable. Directionally correct, not exact.
-
-The Next.js routes try Rust first, fall back to TS, and label every
-response with the `method` actually used.
+There is **no silent fallback**: if the Rust service is unreachable the
+routes return `502` rather than substituting a heuristic. A TypeScript
+coalition-enumeration solver (`lib/utils/shapley-solver.ts`) remains in
+the tree for local dev/reference only — it does not serve production
+responses.
 
 ### Forecasting (`/simulate`)
 
@@ -218,9 +218,13 @@ GitHub Actions in `.github/workflows/`:
 - `shapley-rs.yml` — `cargo build` + `cargo test` + `cargo clippy` for
   the Rust microservice on every push to `services/shapley-rs/**`
 
-Rust correctness is pinned to the upstream `simple` example via
-`tests/upstream_simple.rs` and a 3-operator scenario in
-`tests/three_operator.rs`. The smoke harness at `tests/smoke.sh`
+Solver correctness is pinned against the Foundation's reference:
+`tests/upstream_simple.rs` matches the upstream `simple` example within
+1%, `tests/link_estimate_http.rs` checks the per-link HTTP contract and
+over-cap handling, and `tests/dedup_devices.rs` covers canonical device
+handling. The engine itself (the `network-shapley-rs` fork) is
+parity-tested against the Foundation's Python reference (`network_shapley`
+and `network_linkestimate`). The smoke harness at `tests/smoke.sh`
 re-validates the deployed service end-to-end.
 
 ## Pending external inputs
