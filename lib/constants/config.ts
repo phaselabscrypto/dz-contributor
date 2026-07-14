@@ -149,6 +149,39 @@ export const SHAPLEY_PARAMS = {
   demandMultiplier: 1.0, // canonical DEMAND_MULTIPLIER (epoch-149 verified)
 };
 
+/**
+ * Parse a float env var; fall back to `fallback` when unset, empty, non-numeric,
+ * or negative. Mirrors the env-driven config pattern used above for
+ * `SHAPLEY_SERVICE_URL`.
+ */
+function numEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") return fallback;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? v : fallback;
+}
+
+// Canonical-builder reward params — the two knobs that define DoubleZero's
+// CURRENT (post-#369) reward methodology. Defaults mirror DZ's shipped
+// `contributor-rewards` config (example.config.toml: `[demand] priority = 20.0`,
+// `[input] public_latency_multiplier = 1.25`) and are env-overridable exactly as
+// DZ's config is ("all fields can be overridden via environment variables").
+//
+// The canonical builder now targets DZ-current and is empirically parity-verified
+// against DZ's own `export shapley` at epoch 184 (max |Δproportion| = 2.35e-15;
+// see ~/.claude/plans/dz-contributor-dz-export-okd-parity_walkthrough.md).
+// Epoch-149 HISTORICAL values were ibrlPriority 0.0 / publicLatencyMultiplier 1.0
+// (pre-#369); reproduce a pre-#369 epoch by passing an explicit override to
+// `buildCanonicalShapleyInput` or setting the envs below.
+//
+// NOTE: the fallback builders (`shapley-input-builder.ts`, `live-shapley-input.ts`)
+// do NOT yet consume these two params (they still emit priority 0 / raw latency) —
+// a tracked follow-up; the canonical/production reward path uses the values here.
+export const CANONICAL_SHAPLEY_PARAMS = {
+  ibrlPriority: numEnv("DZ_IBRL_PRIORITY", 20.0),
+  publicLatencyMultiplier: numEnv("DZ_PUBLIC_LATENCY_MULTIPLIER", 1.25),
+};
+
 export function getSnapshotUrl(epoch: number): string {
   return S3_SNAPSHOT_URL_TEMPLATE.replace("{N}", epoch.toString());
 }
