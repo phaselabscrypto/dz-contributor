@@ -21,6 +21,7 @@ import type {
   RawDeviceInterface,
 } from "@/lib/types/snapshot";
 import type { ShapleyInput } from "@/lib/types/shapley";
+import { CANONICAL_SHAPLEY_PARAMS } from "@/lib/constants/config";
 
 // Constants — calculator/constants.rs
 const BPS_TO_MBPS = 1_000_000;
@@ -28,14 +29,14 @@ const FALLBACK_EDGE_MBPS = 10_000.0;
 
 // DemandSettings defaults — settings/mod.rs:80
 const DEMAND_TRAFFIC = 0.15;
-// IBRL demand priority. 0.0 is the epoch-149 value (what this builder is
-// verified byte-for-byte against). DZ later raised the IBRL priority to 20.0
-// (doublezero-offchain PR #369, 2026-05-20) — AFTER epoch 149. We are pinned to
-// epoch 149, so 0.0 is correct here; re-pinning to a newer epoch means changing
-// this to 20.0 *and* re-verifying against that epoch's snapshot, not a drive-by
-// bump. Keep `lib/constants/config.ts` SHAPLEY_PARAMS in lockstep with the
-// tuning constants below.
-const DEMAND_PRIORITY = 0.0;
+// IBRL/unicast demand priority and the public-latency multiplier are the two
+// knobs that define DoubleZero's CURRENT (post-#369) reward methodology. They
+// are now config-driven — see `CANONICAL_SHAPLEY_PARAMS` in
+// `lib/constants/config.ts` (defaults 20.0 / 1.25, mirroring DZ's shipped
+// example.config.toml, env-overridable). Epoch-149 used 0.0 / 1.0; reproduce a
+// pre-#369 epoch by passing `buildCanonicalShapleyInput(snap, { ibrlPriority: 0,
+// publicLatencyMultiplier: 1 })`. Parity-verified vs DZ `export shapley` at
+// epoch 184 (max |Δ| = 2.35e-15).
 const DEMAND_KIND_IBRL = 1;
 const DEMAND_KIND_SHRED = 2;
 
@@ -282,7 +283,10 @@ function buildPrivateLinks(
 // 3) Public links — handler.rs:225-343 + processor/internet.rs
 // ─────────────────────────────────────────────────────────────────────────────
 
-function buildPublicLinks(snap: RawSnapshot): ShapleyInput["public_links"] {
+function buildPublicLinks(
+  snap: RawSnapshot,
+  latencyMultiplier: number,
+): ShapleyInput["public_links"] {
   const fd = snap.fetch_data;
   const serv = fd.dz_serviceability;
   const startUs = fd.start_us;
@@ -356,7 +360,9 @@ function buildPublicLinks(snap: RawSnapshot): ShapleyInput["public_links"] {
   for (const [pair, ls] of pairLatencies) {
     const [city1, city2] = pair.split("|");
     const avg = ls.reduce((s, x) => s + x, 0) / ls.length;
-    rows.push({ city1, city2, latency: avg });
+    // Public-internet latency ×multiplier (DZ `[input] public_latency_multiplier`,
+    // an M/M/1 loaded-vs-baseline model; 1.0 = epoch-149 raw pass-through).
+    rows.push({ city1, city2, latency: avg * latencyMultiplier });
   }
   rows.sort((a, b) =>
     a.city1 === b.city1 ? a.city2.localeCompare(b.city2) : a.city1.localeCompare(b.city1),
@@ -472,7 +478,10 @@ export function calculateCityWeights(
  * Generate IBRL + Shred demand rows from city stats — TypeScript port of DZ
  * `generate` (`ingestor/demand.rs:286-353`).
  */
-function buildDemands(cs: Map<string, CityStats>): ShapleyInput["demands"] {
+function buildDemands(
+  cs: Map<string, CityStats>,
+  ibrlPriority: number,
+): ShapleyInput["demands"] {
   const senders: Array<[string, CityStats]> = [];
   const receiversShred: Array<[string, CityStats]> = [];
   for (const [c, s] of cs) {
@@ -491,7 +500,7 @@ function buildDemands(cs: Map<string, CityStats>): ShapleyInput["demands"] {
         end,
         receivers: endS.validators,
         traffic: DEMAND_TRAFFIC,
-        priority: DEMAND_PRIORITY,
+        priority: ibrlPriority,
         type: DEMAND_KIND_IBRL,
         multicast: false,
       });
@@ -528,6 +537,16 @@ export interface CanonicalBuildResult {
 }
 
 /**
+ * Optional per-call override of the two DZ-current reward params. Defaults come
+ * from `CANONICAL_SHAPLEY_PARAMS` (config/env). Use this to reproduce a specific
+ * historical epoch's params (e.g. epoch 149: `{ ibrlPriority: 0, publicLatencyMultiplier: 1 }`).
+ */
+export interface CanonicalParamsOverride {
+  ibrlPriority?: number;
+  publicLatencyMultiplier?: number;
+}
+
+/**
  * Build canonical Shapley input tables from a snapshot.
  *
  * Returns `canonical: false` (with `reason`) when the snapshot doesn't carry
@@ -536,7 +555,14 @@ export interface CanonicalBuildResult {
  */
 export function buildCanonicalShapleyInput(
   snap: RawSnapshot,
+  override?: CanonicalParamsOverride,
 ): CanonicalBuildResult {
+  const ibrlPriority =
+    override?.ibrlPriority ?? CANONICAL_SHAPLEY_PARAMS.ibrlPriority;
+  const publicLatencyMultiplier =
+    override?.publicLatencyMultiplier ??
+    CANONICAL_SHAPLEY_PARAMS.publicLatencyMultiplier;
+
   const fd = snap.fetch_data;
 
   if (fd.start_us == null || fd.end_us == null) {
@@ -556,13 +582,13 @@ export function buildCanonicalShapleyInput(
 
   const { rows: devices, deviceId } = buildDevices(snap);
   const private_links = buildPrivateLinks(snap, deviceId);
-  const public_links = buildPublicLinks(snap);
+  const public_links = buildPublicLinks(snap, publicLatencyMultiplier);
   // City stats drive BOTH the demand table and the cross-city aggregation
   // weights, so build them once and derive both — exactly as DZ derives
   // `generate(&city_stats)` and `calculate_city_weights(&city_stats)` from the
   // same `CityStats` (calculator/input.rs).
   const cityStats = buildCityStats(snap);
-  const demands = buildDemands(cityStats);
+  const demands = buildDemands(cityStats, ibrlPriority);
   const city_weights = calculateCityWeights(cityStats);
 
   return {

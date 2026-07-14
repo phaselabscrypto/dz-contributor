@@ -36,6 +36,17 @@ The `reason` returned by the canonical builder is surfaced on the response as `i
 
 > Tuning constants (`operator_uptime`, `contiguity_bonus`, `demand_multiplier`) are emitted by every builder, but the two builders intentionally differ on `demand_multiplier`: the canonical builder hardcodes the Foundation-faithful `1.2` (`DEMAND_MULTIPLIER` in `canonical-input-builder.ts`), while the heuristic builder uses `SHAPLEY_PARAMS.demandMultiplier = 1.0` from `lib/constants/config.ts`. The divergence is deliberate — the multiplier normalizes out of the final share proportions — and the canonical values are verified against the Foundation reference on a pinned mainnet epoch.
 
+### DoubleZero-current reward params (post-#369)
+
+Two params define DoubleZero's current (post-PR #369) reward methodology and are **config-driven** via `CANONICAL_SHAPLEY_PARAMS` in `lib/constants/config.ts`, mirroring DZ's shipped `contributor-rewards` config (env-overridable):
+
+| Param | Config / env | Default (DZ-current) | Epoch-149 (historical) | Effect |
+|---|---|---|---|---|
+| IBRL/unicast demand priority | `ibrlPriority` / `DZ_IBRL_PRIORITY` | `20.0` | `0.0` | objective weight of validator↔validator (unicast) demands; `0` = unicast unvalued |
+| Public-latency multiplier | `publicLatencyMultiplier` / `DZ_PUBLIC_LATENCY_MULTIPLIER` | `1.25` | `1.0` | scales public-internet link latency (DZ's M/M/1 loaded-vs-baseline model); `1.0` = raw pass-through |
+
+The canonical builder (`buildCanonicalShapleyInput(snap, override?)`) reads these from config by default; pass an explicit `override` to reproduce a specific historical epoch (e.g. epoch 149 uses `{ ibrlPriority: 0, publicLatencyMultiplier: 1 }`, as `scripts/gen-epoch149-parity-fixture.ts` does). The DZ-current defaults are **empirically parity-verified against DoubleZero's own `export shapley`** on mainnet epoch 184 — operator proportions match to `max |Δ| = 2.35e-15`. The epoch-149 golden (`services/shapley-rs/tests/parity_epoch149.rs`) remains pinned to the historical params and is a superseded anchor, not the current-parity gate. (The fallback heuristic builder does not yet consume these two params — tracked follow-up.)
+
 ## Solver dispatch
 
 `lib/utils/shapley-remote.ts` is the single place that talks to the Rust microservice. `computeShapleyRemote(input)` POSTs the input as JSON to the `/shapley` endpoint of `SHAPLEY_SERVICE_URL`, with `Content-Type: application/json` and — when `SHAPLEY_API_TOKEN` is set — an `Authorization: Bearer ${SHAPLEY_API_TOKEN}` header that is never exposed to the browser. The request timeout constant `TIMEOUT_MS` is `180_000` (180s). The function throws on a missing URL, a network failure, or any non-2xx response.

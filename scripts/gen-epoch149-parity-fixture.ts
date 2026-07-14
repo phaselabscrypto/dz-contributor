@@ -102,8 +102,15 @@ async function main() {
   mkdirSync(OUT_DIR, { recursive: true });
 
   // 1) Canonical input (code-keyed operators + city_weights).
+  //    Epoch 149 predates DZ PR #369, so reproduce it with the HISTORICAL params
+  //    (IBRL priority 0.0, public-latency multiplier 1.0) — the builder's default
+  //    now targets DZ-current (20.0 / 1.25). This keeps the committed epoch-149
+  //    golden faithful; drop the override to regenerate a post-#369 epoch.
   const raw = await loadSnapshot();
-  const result = buildCanonicalShapleyInput(raw);
+  const result = buildCanonicalShapleyInput(raw, {
+    ibrlPriority: 0.0,
+    publicLatencyMultiplier: 1.0,
+  });
   if (!result.canonical) {
     throw new Error(`canonical builder declined epoch ${EPOCH}: ${result.reason}`);
   }

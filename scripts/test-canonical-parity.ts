@@ -172,7 +172,13 @@ function main(): void {
 
   console.log("Running TS canonical builder…");
   const snap = loadSnapshot();
-  const result = buildCanonicalShapleyInput(snap);
+  // This script diffs against DZ's epoch-149 Python reference (pre-#369), so
+  // reproduce with the HISTORICAL params. The builder default now targets
+  // DZ-current (20.0 / 1.25); drop the override to diff a post-#369 reference.
+  const result = buildCanonicalShapleyInput(snap, {
+    ibrlPriority: 0.0,
+    publicLatencyMultiplier: 1.0,
+  });
   if (!result.canonical) {
     console.error(`TS builder returned canonical=false: ${result.reason}`);
     process.exit(2);

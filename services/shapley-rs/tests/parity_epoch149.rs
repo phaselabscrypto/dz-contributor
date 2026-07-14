@@ -9,6 +9,17 @@
 //! Reference: `contributor-rewards/v0.5.3` → `network-shapley-rs v0.5.0`.
 //! See `services/shapley-rs/docs/DZ_PARITY.md`.
 //!
+//! HISTORICAL ANCHOR (pre-#369). Epoch-149's on-chain leaves were computed with
+//! the OLD reward params (IBRL priority 0.0, public-latency ×1.0) and the
+//! superseded v0.5.0 linear uptime penalty. The canonical TS builder now targets
+//! DoubleZero's CURRENT (post-#369) methodology (IBRL priority 20.0, public
+//! latency ×1.25) — empirically parity-verified against DZ's own `export shapley`
+//! at epoch 184 (max |Δproportion| = 2.35e-15; see
+//! `~/.claude/plans/dz-contributor-dz-export-okd-parity_walkthrough.md`). This
+//! test therefore validates a *superseded* epoch under its *original* params and
+//! is intentionally reproduced with the historical override in
+//! `scripts/gen-epoch149-parity-fixture.ts`; it is NOT the current-parity gate.
+//!
 //! Gated `#[ignore]` (the per-city exact solve at production scale is heavy) and
 //! SKIPS (does not fail) when the fixture is absent, so CI stays green until the
 //! fixture is generated:
