@@ -10,10 +10,11 @@ import { parseSnapshot } from "@/lib/utils/snapshot-parser";
 import { buildShapleyInput } from "@/lib/utils/shapley-input-builder";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
 import { startSimulateJob } from "@/lib/utils/shapley-remote";
+import { modifyShapleyInput } from "@/lib/utils/shapley-input-modifier";
 import {
-  modifyShapleyInput,
-  type DemandOverrides,
-} from "@/lib/utils/shapley-input-modifier";
+  applyDemandOverrides,
+  normalizeDemandOverrides,
+} from "@/lib/utils/demand-overrides";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
 
 /**
@@ -69,10 +70,12 @@ export async function POST(request: NextRequest) {
 
   const safeRemoveLinks = Array.isArray(removeLinks) ? removeLinks : [];
   const safeAddLinks = Array.isArray(addLinks) ? addLinks : [];
-  const safeDemandOverrides: DemandOverrides =
-    demandOverrides && typeof demandOverrides === "object"
-      ? (demandOverrides as DemandOverrides)
-      : ({} as DemandOverrides);
+  const normalized = normalizeDemandOverrides(demandOverrides);
+  if (!normalized.ok) {
+    return NextResponse.json({ error: normalized.error }, { status: 400 });
+  }
+  const overrides = normalized.overrides;
+  const hasOverrides = Object.keys(overrides).length > 0;
 
   try {
     const url = getSnapshotUrl(epoch);
@@ -95,14 +98,45 @@ export async function POST(request: NextRequest) {
       baselineInput = buildShapleyInput(raw, parsed);
     }
 
+    // Demand overrides regenerate the demand table from override-patched
+    // city stats (DZ-parity) — only meaningful for canonical snapshots.
+    let demandBase = baselineInput;
+    if (hasOverrides) {
+      if (!canonical.canonical) {
+        return NextResponse.json(
+          {
+            error: `demandOverrides require a canonical snapshot; epoch ${epoch} is not (${canonical.reason})`,
+          },
+          { status: 400 }
+        );
+      }
+      const applied = applyDemandOverrides(raw, baselineInput, overrides);
+      if (!applied.ok) {
+        return NextResponse.json(
+          {
+            error: `Unknown metro(s) in demandOverrides: ${applied.unknownMetros.join(
+              ", "
+            )}. Valid metros: ${applied.knownMetros.join(", ")}`,
+          },
+          { status: 400 }
+        );
+      }
+      if (applied.input.demands.length === 0) {
+        return NextResponse.json(
+          { error: "demandOverrides remove all demand rows" },
+          { status: 400 }
+        );
+      }
+      demandBase = applied.input;
+    }
+
     const modifiedInput = modifyShapleyInput(
-      baselineInput,
+      demandBase,
       parsed,
       raw,
       contributorCode,
       safeRemoveLinks,
-      safeAddLinks,
-      safeDemandOverrides
+      safeAddLinks
     );
 
     const jobId = await startSimulateJob(baselineInput, modifiedInput);

@@ -78,6 +78,35 @@ export interface CityDemand {
   totalSlots: number;
   linkCount: number;
   demandScore: number; // higher = more underserved high-demand city
+  /**
+   * Uppercased exchange (metro) code this location maps to, via the same
+   * name-based join the server uses for link endpoints
+   * (buildLocationCodeToMetro). Undefined when the location name matches no
+   * exchange.
+   */
+  metroCode?: string;
+  metroName?: string;
+}
+
+/**
+ * Per-metro demand row for the simulator's "Modify demand" panel — the key
+ * space the solver's demand table actually uses. `validatorCount` and
+ * `stakeProxy` follow the CANONICAL counting rule (every user at the
+ * exchange, keyed by device.exchange_pk — see buildCityStats), so an
+ * override typed back at "Current" is a true no-op for the solver.
+ */
+export interface MetroDemand {
+  /** Uppercased exchange code — the demandOverrides key. */
+  metroCode: string;
+  metroName: string;
+  validatorCount: number;
+  /** Leader-schedule slot sum (stake proxy) — display/sort only. */
+  stakeProxy: number;
+  /** Sum of member locations' demandScore (sorting only). */
+  demandScore: number;
+  /** Sum of member locations' linkCount (display only). */
+  linkCount: number;
+  locationCodes: string[];
 }
 
 export interface ParsedSnapshot {
@@ -87,6 +116,13 @@ export interface ParsedSnapshot {
   locations: Location[];
   exchanges: Exchange[];
   cityDemands: CityDemand[];
+  metroDemands: MetroDemand[];
+  /**
+   * True when the snapshot carries the fields the canonical demand builder
+   * requires (start_us/end_us + metro_prices) — demand overrides are only
+   * meaningful on canonical snapshots.
+   */
+  canonicalDemand: boolean;
   totalSlots: number;
   totalValidators: number;
   version: string;

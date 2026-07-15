@@ -17,17 +17,14 @@ interface AddLinkSpec {
 }
 
 /**
- * Per-metro override of the validator/user count that drives demand for that
- * metro. The Shapley `demand` table is keyed by (start, end) metro codes; we
- * apply overrides as a multiplier on the receivers/traffic for any demand row
- * whose `start` or `end` is in the override set.
- */
-export type DemandOverrides = Record<string, number>;
-
-/**
- * Creates a modified copy of a ShapleyInput for what-if simulation.
- * Removes specified links, adds new ones for the given contributor, and
- * optionally rescales demand for specific metros.
+ * Creates a modified copy of a ShapleyInput for what-if simulation:
+ * removes specified links and adds new ones for the given contributor.
+ *
+ * Demand overrides are NOT handled here — they are applied by regenerating
+ * the demand table from override-patched city stats (see
+ * `lib/utils/demand-overrides.ts`), the only DZ-faithful way to change a
+ * metro's validator count. Scaling existing rows breaks the solver's
+ * per-type (start, traffic, multicast) uniformity invariant.
  */
 export function modifyShapleyInput(
   baselineInput: ShapleyInput,
@@ -35,8 +32,7 @@ export function modifyShapleyInput(
   raw: RawSnapshot,
   contributorCode: string,
   removeLinkPubkeys: string[],
-  addLinks: AddLinkSpec[],
-  demandOverrides: DemandOverrides = {}
+  addLinks: AddLinkSpec[]
 ): ShapleyInput {
   // Deep clone baseline
   const input: ShapleyInput = {
@@ -146,47 +142,6 @@ export function modifyShapleyInput(
       uptime: 0.99,
       shared: null,
     });
-  }
-
-  // --- Apply demand overrides ---
-  // We model overrides as a multiplier vs. the average current receivers
-  // count for that metro. Anything <=0 zeros out demand at that endpoint.
-  if (Object.keys(demandOverrides).length > 0) {
-    const baselineByMetro = new Map<string, number>();
-    for (const d of input.demands) {
-      for (const m of [d.start, d.end]) {
-        if (!baselineByMetro.has(m)) baselineByMetro.set(m, 0);
-        baselineByMetro.set(m, (baselineByMetro.get(m) ?? 0) + d.receivers);
-      }
-    }
-
-    const ratioFor = (metro: string): number | null => {
-      const override = demandOverrides[metro];
-      if (override === undefined) return null;
-      const baseline = baselineByMetro.get(metro) ?? 0;
-      if (baseline <= 0) return override > 0 ? 1 : 0;
-      return Math.max(override, 0) / baseline;
-    };
-
-    for (const d of input.demands) {
-      const rA = ratioFor(d.start);
-      const rZ = ratioFor(d.end);
-      // If either endpoint has an override, scale traffic/receivers by the
-      // smaller of the two so a city with reduced demand doesn't get its
-      // demand resurrected by a high-demand peer.
-      let mult = 1;
-      if (rA !== null && rZ !== null) mult = Math.min(rA, rZ);
-      else if (rA !== null) mult = rA;
-      else if (rZ !== null) mult = rZ;
-      if (mult !== 1) {
-        d.receivers = Math.max(0, Math.round(d.receivers * mult));
-        d.traffic = Math.max(0, d.traffic * mult);
-      }
-    }
-    // Drop demands with zero receivers/traffic — keeps the LP smaller.
-    input.demands = input.demands.filter(
-      (d) => d.receivers > 0 && d.traffic > 0
-    );
   }
 
   // --- Remove orphaned devices ---

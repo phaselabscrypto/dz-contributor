@@ -69,6 +69,11 @@ export interface SimulateRequest {
     bandwidthGbps?: number;
     latencyMs?: number;
   }>;
+  /**
+   * Per-metro validator-count overrides. Keys are UPPERCASED exchange codes
+   * (e.g. "FRA"); values are absolute validator counts. Applied by
+   * regenerating the demand table (see lib/utils/demand-overrides.ts).
+   */
   demandOverrides?: Record<string, number>;
 }
 

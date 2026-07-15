@@ -374,7 +374,7 @@ function buildPublicLinks(
 // 4) City stats + demands + city weights — demand.rs:119-353, util.rs:19-36
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface CityStats {
+export interface CityStats {
   validators: number;
   /**
    * Sum of leader-schedule slot counts for this city's validators — DZ's
@@ -394,7 +394,7 @@ interface CityStats {
  * (mainnet) — so the resulting `cityWeights` line up 1:1 with the source
  * cities the per-city Shapley aggregation iterates over.
  */
-function buildCityStats(snap: RawSnapshot): Map<string, CityStats> {
+export function buildCityStats(snap: RawSnapshot): Map<string, CityStats> {
   const fd = snap.fetch_data;
   const serv = fd.dz_serviceability;
   const metroPrices = fd.metro_prices ?? {};
@@ -478,7 +478,7 @@ export function calculateCityWeights(
  * Generate IBRL + Shred demand rows from city stats — TypeScript port of DZ
  * `generate` (`ingestor/demand.rs:286-353`).
  */
-function buildDemands(
+export function buildDemands(
   cs: Map<string, CityStats>,
   ibrlPriority: number,
 ): ShapleyInput["demands"] {
