@@ -10,10 +10,11 @@ import { parseSnapshot } from "@/lib/utils/snapshot-parser";
 import { buildShapleyInput } from "@/lib/utils/shapley-input-builder";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
 import { computeShapleyRemote, simulateShapleyRemote } from "@/lib/utils/shapley-remote";
+import { modifyShapleyInput } from "@/lib/utils/shapley-input-modifier";
 import {
-  modifyShapleyInput,
-  type DemandOverrides,
-} from "@/lib/utils/shapley-input-modifier";
+  applyDemandOverrides,
+  normalizeDemandOverrides,
+} from "@/lib/utils/demand-overrides";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
 import { reportError } from "@/lib/observability";
 
@@ -26,6 +27,8 @@ const baselineCache = new Map<
   {
     raw: RawSnapshot;
     input: ShapleyInput;
+    /** Whether `input` came from the canonical builder (vs heuristic fallback). */
+    canonical: boolean;
     baseline: ShapleyOutput;
     timestamp: number;
   }
@@ -95,10 +98,12 @@ export async function POST(request: NextRequest) {
 
   const safeRemoveLinks = Array.isArray(removeLinks) ? removeLinks : [];
   const safeAddLinks = Array.isArray(addLinks) ? addLinks : [];
-  const safeDemandOverrides: DemandOverrides =
-    demandOverrides && typeof demandOverrides === "object"
-      ? (demandOverrides as DemandOverrides)
-      : ({} as DemandOverrides);
+  const normalized = normalizeDemandOverrides(demandOverrides);
+  if (!normalized.ok) {
+    return NextResponse.json({ error: normalized.error }, { status: 400 });
+  }
+  const overrides = normalized.overrides;
+  const hasOverrides = Object.keys(overrides).length > 0;
 
   try {
     evictStaleCache();
@@ -129,22 +134,59 @@ export async function POST(request: NextRequest) {
       }
 
       const remote = await computeShapleyRemote(input);
-      cached = { raw, input, baseline: remote.output, timestamp: Date.now() };
+      cached = {
+        raw,
+        input,
+        canonical: canonical.canonical,
+        baseline: remote.output,
+        timestamp: Date.now(),
+      };
       baselineCache.set(epoch, cached);
     }
 
     const { raw, input: baselineInput, baseline } = cached;
     const parsed = parseSnapshot(raw);
 
+    // Demand overrides regenerate the demand table from override-patched
+    // city stats (DZ-parity) — only meaningful for canonical snapshots.
+    let demandBase = baselineInput;
+    if (hasOverrides) {
+      if (!cached.canonical) {
+        return NextResponse.json(
+          {
+            error: `demandOverrides require a canonical snapshot; epoch ${epoch} is not`,
+          },
+          { status: 400 }
+        );
+      }
+      const applied = applyDemandOverrides(raw, baselineInput, overrides);
+      if (!applied.ok) {
+        return NextResponse.json(
+          {
+            error: `Unknown metro(s) in demandOverrides: ${applied.unknownMetros.join(
+              ", "
+            )}. Valid metros: ${applied.knownMetros.join(", ")}`,
+          },
+          { status: 400 }
+        );
+      }
+      if (applied.input.demands.length === 0) {
+        return NextResponse.json(
+          { error: "demandOverrides remove all demand rows" },
+          { status: 400 }
+        );
+      }
+      demandBase = applied.input;
+    }
+
     // Build modified input
     const modifiedInput = modifyShapleyInput(
-      baselineInput,
+      demandBase,
       parsed,
       raw,
       contributorCode,
       safeRemoveLinks,
-      safeAddLinks,
-      safeDemandOverrides
+      safeAddLinks
     );
 
     // ── Primary: /simulate endpoint (single call, coalition reuse) ────
