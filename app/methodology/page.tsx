@@ -141,7 +141,7 @@ share(op)   = shapley(op) / Σ_op shapley(op)`}
 
           <Section title="Latest-epoch Shapley anchor">
             <p>
-              <code>GET /api/shapley/baseline</code> returns the canonical
+              <code>GET /api/shapley/baseline</code> returns the
               Shapley values for the <em>latest completed epoch</em> (DZ-current
               methodology), served from the shared per-epoch cache and kept warm
               by the precompute cron — not an on-demand live-topology solve.

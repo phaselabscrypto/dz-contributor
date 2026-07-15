@@ -102,7 +102,7 @@ export function RewardReconciliation({ contributorCode }: Props) {
           sub={
             baseline.method === "local-ts-heuristic-DEV-ONLY"
               ? "TS heuristic (dev)"
-              : "canonical Rust solver"
+              : "Rust solver"
           }
         />
         <DeltaCell direction={direction} delta={delta} />

@@ -2,16 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { SHAPLEY_SERVICE_URL, MIN_DZ_EPOCH } from "@/lib/constants/config";
 import { getEpochAvailability } from "@/lib/utils/epoch-discovery";
-import { buildInputForEpoch, EpochNotFoundError } from "@/lib/utils/canonical-epoch";
+import { buildInputForEpoch, EpochNotFoundError } from "@/lib/utils/epoch-shapley";
 import { startBaselinePrecompute } from "@/lib/utils/shapley-remote";
 import { reportError } from "@/lib/observability";
 
 /**
  * GET /api/shapley/precompute  (cron)
  *
- * Warms the canonical baseline for the latest epoch so `/api/shapley/baseline`
+ * Warms the baseline for the latest epoch so `/api/shapley/baseline`
  * (and `/api/shapley?epoch=latest`) serve a cache hit instead of triggering a
- * cold per-city solve inside a user request. Builds the SAME canonical input
+ * cold per-city solve inside a user request. Builds the SAME input
  * those routes build, then QUEUES the OKD baseline precompute (async worker);
  * the result lands in the input-hash cache. `?epoch=N` for manual backfill.
  *
@@ -67,10 +67,10 @@ export async function GET(request: NextRequest) {
     const { input, inputSource } = await buildInputForEpoch(epoch);
     if (inputSource === "snapshot-heuristic") {
       // Heuristic input lacks city_weights → the per-city reward path can't run
-      // it. The latest epoch is always canonical; a heuristic result here means
+      // it. The latest epoch always builds cleanly; a heuristic result here means
       // the snapshot is too old/incomplete to warm.
       return NextResponse.json(
-        { error: `epoch ${epoch} snapshot not canonical — cannot warm baseline`, epoch },
+        { error: `epoch ${epoch} snapshot too old or incomplete — cannot warm baseline`, epoch },
         { status: 422 },
       );
     }

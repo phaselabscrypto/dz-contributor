@@ -63,7 +63,7 @@ export function useHealth() {
 
 /**
  * Live-network Shapley anchor — computes Shapley values against the
- * the LATEST completed epoch's canonical result (DZ-current methodology),
+ * the LATEST completed epoch's result (DZ-current methodology),
  * served from the shared per-epoch cache and kept warm by the precompute
  * cron — NOT an on-demand live-topology solve. Updates roughly once per
  * epoch (~2-3 days). 5-minute client refresh.
@@ -71,7 +71,7 @@ export function useHealth() {
 export interface BaselineShapley {
   method: string;
   computedAt: string;
-  source: "canonical-latest-epoch";
+  source: "latest-epoch";
   epoch: number;
   operatorCount: number;
   values: Record<string, { value: number; share: number }>;

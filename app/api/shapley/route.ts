@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  computeCanonicalForEpoch,
+  getEpochShapley,
   EpochNotFoundError,
   ShapleyServiceError,
-} from "@/lib/utils/canonical-epoch";
+} from "@/lib/utils/epoch-shapley";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
 import { reportError } from "@/lib/observability";
 
@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const result = await computeCanonicalForEpoch(epoch);
+    const result = await getEpochShapley(epoch);
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof EpochNotFoundError) {

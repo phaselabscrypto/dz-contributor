@@ -1,11 +1,11 @@
 /**
- * Shared canonical per-epoch Shapley computation.
+ * Shared per-epoch Shapley computation.
  *
- * Single source of truth for "compute the canonical Shapley result for epoch N"
- * — used by `/api/shapley?epoch=N` and `/api/shapley/baseline` (latest epoch).
- * Owns a per-epoch LRU so both routes hit the same warm cache; the heavy solve
- * runs in the Rust service (input-hash cached) or, in local dev only, the TS
- * heuristic solver.
+ * Single source of truth for "compute the Shapley result for epoch N" — used by
+ * `/api/shapley?epoch=N` and `/api/shapley/baseline` (latest epoch). Owns a
+ * per-epoch LRU so both routes hit the same warm cache; the heavy solve runs in
+ * the Rust service (input-hash cached) or, in local dev only, the TS heuristic
+ * solver.
  */
 import { getSnapshotUrl, SHAPLEY_SERVICE_URL } from "@/lib/constants/config";
 import type { RawSnapshot } from "@/lib/types/snapshot";
@@ -18,12 +18,13 @@ import { computeShapleyRemote } from "@/lib/utils/shapley-remote";
 import { fetchCanonicalInput, isCanonicalEnabled } from "@/lib/utils/canonical-inputs";
 import { LruCache } from "@/lib/utils/lru-cache";
 
+// Wire-facing `inputSource` labels — unchanged (the UI + /methodology parse them).
 export type InputSource =
   | "canonical-foundation"
   | "canonical-snapshot"
   | "snapshot-heuristic";
 
-export interface CanonicalEpochResult {
+export interface EpochShapleyResult {
   epoch: number;
   method: string;
   inputSource: InputSource;
@@ -54,15 +55,15 @@ export class ShapleyServiceError extends Error {
 }
 
 // TTL 30min; inputs are immutable historical snapshots so a hit is always valid.
-const epochCache = new LruCache<number, CanonicalEpochResult>({
+const epochCache = new LruCache<number, EpochShapleyResult>({
   ttlMs: 30 * 60 * 1000,
   maxSize: 32,
 });
 
 /**
- * Build the canonical Shapley input for an epoch (canonical-foundation CSVs →
- * canonical snapshot builder → heuristic fallback), matching the `/api/shapley`
- * priority chain. Throws {@link EpochNotFoundError} when the snapshot is absent.
+ * Build the Shapley input for an epoch (foundation CSVs → snapshot builder →
+ * heuristic fallback), matching the `/api/shapley` priority chain. Throws
+ * {@link EpochNotFoundError} when the snapshot is absent.
  */
 export async function buildInputForEpoch(epoch: number): Promise<{
   input: ShapleyInput;
@@ -70,9 +71,9 @@ export async function buildInputForEpoch(epoch: number): Promise<{
   inputFallbackReason?: string;
 }> {
   if (isCanonicalEnabled) {
-    const canonical = await fetchCanonicalInput(epoch);
-    if (canonical) {
-      return { input: canonical, inputSource: "canonical-foundation" };
+    const foundation = await fetchCanonicalInput(epoch);
+    if (foundation) {
+      return { input: foundation, inputSource: "canonical-foundation" };
     }
   }
 
@@ -84,25 +85,23 @@ export async function buildInputForEpoch(epoch: number): Promise<{
   }
   const raw = (await res.json()) as RawSnapshot;
 
-  const canonical = buildCanonicalShapleyInput(raw);
-  if (canonical.canonical) {
-    return { input: canonical.input, inputSource: "canonical-snapshot" };
+  const built = buildCanonicalShapleyInput(raw);
+  if (built.canonical) {
+    return { input: built.input, inputSource: "canonical-snapshot" };
   }
   const parsed = parseSnapshot(raw);
   return {
     input: buildShapleyInput(raw, parsed),
     inputSource: "snapshot-heuristic",
-    inputFallbackReason: canonical.reason,
+    inputFallbackReason: built.reason,
   };
 }
 
 /**
- * Compute (or return cached) the canonical Shapley result for an epoch.
+ * Compute (or return cached) the Shapley result for an epoch.
  * @throws EpochNotFoundError | ShapleyServiceError
  */
-export async function computeCanonicalForEpoch(
-  epoch: number,
-): Promise<CanonicalEpochResult> {
+export async function getEpochShapley(epoch: number): Promise<EpochShapleyResult> {
   const cached = epochCache.get(epoch);
   if (cached !== undefined) return cached;
 
@@ -126,7 +125,7 @@ export async function computeCanonicalForEpoch(
     method = "local-ts-heuristic-DEV-ONLY";
   }
 
-  const result: CanonicalEpochResult = {
+  const result: EpochShapleyResult = {
     epoch,
     method,
     inputSource,

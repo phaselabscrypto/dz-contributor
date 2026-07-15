@@ -16,7 +16,7 @@ function relativeAge(iso: string): string {
 }
 
 /**
- * Latest-epoch canonical Shapley anchor. Different from the all-time `reward_percentage`
+ * Latest-epoch Shapley anchor. Different from the all-time `reward_percentage`
  * surfaced from economic-hub — this is "what would the contributor pool split
  * look like if rewards were paid against the current network?"
  *
@@ -143,7 +143,7 @@ export function LiveBaselineShapley() {
       )}
 
       <div className="px-4 py-2 text-xs text-muted-foreground font-mono border-t border-border">
-        Latest completed epoch, canonical (DZ-current methodology) — different
+        Latest completed epoch (DZ-current methodology) — different
         from the all-time share above, which sums historical pool distributions.
       </div>
     </div>
