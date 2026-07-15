@@ -63,15 +63,16 @@ export function useHealth() {
 
 /**
  * Live-network Shapley anchor — computes Shapley values against the
- * current topology (not a historical snapshot). 5-minute refresh; the
- * LP solve is comparatively expensive and the input only changes when
- * malbec topology refreshes every 60s anyway.
+ * the LATEST completed epoch's canonical result (DZ-current methodology),
+ * served from the shared per-epoch cache and kept warm by the precompute
+ * cron — NOT an on-demand live-topology solve. Updates roughly once per
+ * epoch (~2-3 days). 5-minute client refresh.
  */
 export interface BaselineShapley {
   method: string;
   computedAt: string;
-  source: "live-topology";
-  topologyFetchedAt: string;
+  source: "canonical-latest-epoch";
+  epoch: number;
   operatorCount: number;
   values: Record<string, { value: number; share: number }>;
   inputSummary: {

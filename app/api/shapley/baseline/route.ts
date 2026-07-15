@@ -1,30 +1,25 @@
 import { NextResponse } from "next/server";
-import { SHAPLEY_SERVICE_URL } from "@/lib/constants/config";
-import type { ShapleyOutput } from "@/lib/types/shapley";
-import { buildLiveShapleyInput } from "@/lib/utils/live-shapley-input";
-import { computeShapley as computeShapleyTS } from "@/lib/utils/shapley-solver";
-import { computeShapleyRemote } from "@/lib/utils/shapley-remote";
+import {
+  computeCanonicalForEpoch,
+  EpochNotFoundError,
+  ShapleyServiceError,
+} from "@/lib/utils/canonical-epoch";
+import { getEpochAvailability } from "@/lib/utils/epoch-discovery";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
-import { fetchLiveTopology } from "@/lib/utils/live-topology-fetch";
 import { reportError } from "@/lib/observability";
 
 /**
  * GET /api/shapley/baseline
  *
- * Returns Shapley values computed against the CURRENT live topology.
+ * The reward "baseline" widgets want: the LATEST completed epoch's canonical
+ * Shapley shares (DZ-current methodology). This route resolves the latest
+ * available epoch and returns its canonical result from the shared per-epoch
+ * cache — the heavy solve runs once (warmed by the precompute cron), never
+ * on-demand per request, and never against non-canonical live topology.
  *
- * When `SHAPLEY_SERVICE_URL` is set, this route ONLY serves canonical
- * results from the Rust solver. If the remote call fails the route
- * returns 502 — we never silently fall back to the local TS heuristic,
- * because that would mask divergence between the two algorithms in
- * production (review note on PR #7).
- *
- * The local TS solver remains available only when `SHAPLEY_SERVICE_URL`
- * is unset entirely (local dev without a Rust service running). In that
- * mode the response method is stamped `local-ts-heuristic-DEV-ONLY` so
- * any downstream consumer can detect the non-canonical path.
+ * (Previously this ran a full Shapley solve against LIVE Malbec topology on
+ * demand, which was expensive, un-warmed, and non-canonical — replaced.)
  */
-
 interface CacheEntry {
   data: unknown;
   timestamp: number;
@@ -39,71 +34,44 @@ export async function GET(request: Request) {
   });
   if (limited) return limited;
 
-
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return NextResponse.json(cached.data);
   }
 
-  // Direct in-process call — no HTTP self-fetch. Both routes share the
-  // same module-level cache via `fetchLiveTopology`, so the caching
-  // benefit is preserved without the cold-start deadlock risk.
-  let topology;
+  let epoch: number;
   try {
-    topology = await fetchLiveTopology();
+    epoch = (await getEpochAvailability()).latest;
   } catch (err) {
-    reportError(err, {
-      source: "api/shapley/baseline",
-      extras: { phase: "topology-fetch" },
-    });
+    reportError(err, { source: "api/shapley/baseline", extras: { phase: "epoch-discovery" } });
+    if (cached) return NextResponse.json(cached.data); // serve last-good rather than 502
+    return NextResponse.json({ error: "Service temporarily unavailable" }, { status: 502 });
+  }
+
+  try {
+    const r = await computeCanonicalForEpoch(epoch);
+    const result = {
+      method: r.method,
+      computedAt: new Date().toISOString(),
+      source: "canonical-latest-epoch" as const,
+      epoch: r.epoch,
+      operatorCount: r.operatorCount,
+      values: r.values,
+      inputSummary: r.inputSummary,
+    };
+    cached = { data: result, timestamp: Date.now() };
+    return NextResponse.json(result);
+  } catch (err) {
+    // Cold epoch not yet warmed by the cron: prefer last-good over a 502.
+    if (cached) return NextResponse.json(cached.data);
+    if (err instanceof EpochNotFoundError) {
+      return NextResponse.json({ error: err.message }, { status: 404 });
+    }
+    const phase = err instanceof ShapleyServiceError ? "remote-call" : "outer";
+    reportError(err, { source: "api/shapley/baseline", extras: { epoch, phase } });
+    // 202: the epoch exists but isn't computed yet (warming) — not a hard outage.
     return NextResponse.json(
-      { error: "Service temporarily unavailable" },
-      { status: 502 },
+      { error: "Baseline warming — canonical result not yet cached for the latest epoch", epoch },
+      { status: 202 },
     );
   }
-  const input = buildLiveShapleyInput(topology);
-
-  let output;
-  let method: string;
-
-  if (SHAPLEY_SERVICE_URL) {
-    // Canonical path only. No silent fallback — see file header.
-    try {
-      const remote = await computeShapleyRemote(input);
-      output = remote.output;
-      method = remote.method;
-    } catch (err) {
-      reportError(err, {
-        source: "api/shapley/baseline",
-        extras: { phase: "remote-call" },
-      });
-      return NextResponse.json(
-        { error: "Service temporarily unavailable" },
-        { status: 502 },
-      );
-    }
-  } else {
-    // No remote configured — assumed to be local dev. Loudly stamp the
-    // response so any production deployment that hits this branch is
-    // immediately spottable in the method label.
-    output = computeShapleyTS(input);
-    method = "local-ts-heuristic-DEV-ONLY";
-  }
-
-  const result = {
-    method,
-    computedAt: new Date().toISOString(),
-    source: "live-topology" as const,
-    topologyFetchedAt: new Date(topology.fetchedAt).toISOString(),
-    operatorCount: Object.keys(output).length,
-    values: output,
-    inputSummary: {
-      deviceCount: input.devices.length,
-      privateLinkCount: input.private_links.length,
-      publicLinkCount: input.public_links.length,
-      demandCount: input.demands.length,
-    },
-  };
-
-  cached = { data: result, timestamp: Date.now() };
-  return NextResponse.json(result);
 }

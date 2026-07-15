@@ -97,12 +97,12 @@ export function RewardReconciliation({ contributorCode }: Props) {
           sub={`${hub.epochs.length} distributed epochs`}
         />
         <Cell
-          label="Live network share"
+          label="Latest-epoch share"
           value={livePct > 0 ? `${livePct.toFixed(2)}%` : "—"}
           sub={
-            baseline.method === "lp-multi-commodity-flow-rs"
-              ? "canonical Rust solver"
-              : "TS heuristic"
+            baseline.method === "local-ts-heuristic-DEV-ONLY"
+              ? "TS heuristic (dev)"
+              : "canonical Rust solver"
           }
         />
         <DeltaCell direction={direction} delta={delta} />

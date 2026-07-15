@@ -139,15 +139,17 @@ share(op)   = shapley(op) / Σ_op shapley(op)`}
             </Formula>
           </Section>
 
-          <Section title="Live network Shapley anchor">
+          <Section title="Latest-epoch Shapley anchor">
             <p>
-              <code>GET /api/shapley/baseline</code> returns Shapley values
-              computed against the <em>current</em> live topology rather than
-              a historical S3 snapshot. Surfaced on{" "}
+              <code>GET /api/shapley/baseline</code> returns the canonical
+              Shapley values for the <em>latest completed epoch</em> (DZ-current
+              methodology), served from the shared per-epoch cache and kept warm
+              by the precompute cron — not an on-demand live-topology solve.
+              Surfaced on{" "}
               <Link href="/economics" className="underline decoration-dotted hover:text-foreground">
                 /economics
               </Link>{" "}
-              under &ldquo;Live network Shapley anchor&rdquo;.
+              under &ldquo;Latest-epoch Shapley anchor&rdquo;.
             </p>
             <p>
               Inputs come from the canonical TS builder when the historical
