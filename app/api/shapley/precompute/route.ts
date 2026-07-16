@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SHAPLEY_SERVICE_URL, MIN_DZ_EPOCH } from "@/lib/constants/config";
 import { getEpochAvailability } from "@/lib/utils/epoch-discovery";
-import { buildInputForEpoch, EpochNotFoundError } from "@/lib/utils/epoch-shapley";
+import {
+  buildInputForEpoch,
+  buildSnapshotInputForEpoch,
+  EpochNotFoundError,
+} from "@/lib/utils/epoch-shapley";
 import {
   JobStartError,
   startBaselinePrecompute,
@@ -90,7 +94,45 @@ export async function GET(request: NextRequest) {
         (res.job_id ? ` job_id=${res.job_id}` : "") +
         ` input_hash=${res.input_hash}`,
     );
-    return NextResponse.json({ epoch, inputSource, ...res });
+
+    // The foundation and snapshot-built inputs hash to DIFFERENT service
+    // cache keys. /baseline and /api/shapley prefer the foundation variant
+    // (and fall back to the snapshot variant when the CSVs are missing or a
+    // fetch fails), while simulate/jobs always build from the snapshot — so
+    // when the primary warm was the foundation variant, warm the snapshot
+    // variant too. Fail-soft: the primary warm is already enqueued, and the
+    // enqueue is idempotent per input hash.
+    let snapshotVariant: Record<string, unknown> | undefined;
+    if (inputSource === "canonical-foundation") {
+      try {
+        const snap = await buildSnapshotInputForEpoch(epoch);
+        if (snap.inputSource === "canonical-snapshot") {
+          const snapRes = await startBaselinePrecompute(snap.input);
+          snapshotVariant = { ...snapRes };
+          console.log(
+            `[shapley/precompute] epoch=${epoch} snapshot-variant ` +
+              `status=${snapRes.status}` +
+              (snapRes.job_id ? ` job_id=${snapRes.job_id}` : "") +
+              ` input_hash=${snapRes.input_hash}`,
+          );
+        }
+      } catch (err) {
+        reportError(err, {
+          source: "api/shapley/precompute",
+          extras: { epoch, phase: "snapshot-variant-warm" },
+        });
+        snapshotVariant = {
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+
+    return NextResponse.json({
+      epoch,
+      inputSource,
+      ...res,
+      ...(snapshotVariant ? { snapshotVariant } : {}),
+    });
   } catch (err) {
     if (err instanceof EpochNotFoundError) {
       return NextResponse.json({ error: err.message }, { status: 404 });

@@ -13,7 +13,7 @@ import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder"
 import { startSimulateJob } from "@/lib/utils/shapley-remote";
 import { modifyShapleyInput } from "@/lib/utils/shapley-input-modifier";
 import {
-  applyDemandOverrides,
+  buildOverriddenInput,
   normalizeDemandOverrides,
 } from "@/lib/utils/demand-overrides";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
@@ -76,7 +76,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: normalized.error }, { status: 400 });
   }
   const overrides = normalized.overrides;
-  const hasOverrides = Object.keys(overrides).length > 0;
 
   try {
     const url = getSnapshotUrl(epoch);
@@ -103,38 +102,20 @@ export async function POST(request: NextRequest) {
 
     // Demand overrides regenerate the demand table from override-patched
     // city stats (DZ-parity) — only meaningful for canonical snapshots.
-    let demandBase = baselineInput;
-    if (hasOverrides) {
-      if (!canonical.canonical) {
-        return NextResponse.json(
-          {
-            error: `demandOverrides require a canonical snapshot; epoch ${epoch} is not (${canonical.reason})`,
-          },
-          { status: 400 }
-        );
-      }
-      const applied = applyDemandOverrides(raw, baselineInput, overrides);
-      if (!applied.ok) {
-        return NextResponse.json(
-          {
-            error: `Unknown metro(s) in demandOverrides: ${applied.unknownMetros.join(
-              ", "
-            )}. Valid metros: ${applied.knownMetros.join(", ")}`,
-          },
-          { status: 400 }
-        );
-      }
-      if (applied.input.demands.length === 0) {
-        return NextResponse.json(
-          { error: "demandOverrides remove all demand rows" },
-          { status: 400 }
-        );
-      }
-      demandBase = applied.input;
+    const overridden = buildOverriddenInput({
+      snap: raw,
+      baselineInput,
+      overrides,
+      epoch,
+      canonical: canonical.canonical,
+      canonicalReason: canonical.reason,
+    });
+    if (!overridden.ok) {
+      return NextResponse.json({ error: overridden.error }, { status: 400 });
     }
 
     const modifiedInput = modifyShapleyInput(
-      demandBase,
+      overridden.input,
       parsed,
       raw,
       contributorCode,

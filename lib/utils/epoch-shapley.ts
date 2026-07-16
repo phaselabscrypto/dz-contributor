@@ -86,23 +86,45 @@ const epochCache = new LruCache<number, EpochShapleyResult>({
   maxSize: 32,
 });
 
+// Both consumers of getEpochShapley (/api/shapley, /api/shapley/baseline) run
+// with `maxDuration = 60`. The abort must fire while those functions are still
+// alive, so the timeout maps to the typed warming/502 path instead of the
+// platform killing the function into a raw 504. In practice the upstream
+// router cuts a cold solve at ~30s (504) first; this is the backstop when it
+// doesn't.
+const SOLVE_TIMEOUT_MS = 50_000;
+
+export interface BuiltEpochInput {
+  input: ShapleyInput;
+  inputSource: InputSource;
+  inputFallbackReason?: string;
+}
+
 /**
  * Build the Shapley input for an epoch (foundation CSVs → snapshot builder →
  * heuristic fallback), matching the `/api/shapley` priority chain. Throws
  * {@link EpochNotFoundError} when the snapshot is absent.
  */
-export async function buildInputForEpoch(epoch: number): Promise<{
-  input: ShapleyInput;
-  inputSource: InputSource;
-  inputFallbackReason?: string;
-}> {
+export async function buildInputForEpoch(epoch: number): Promise<BuiltEpochInput> {
   if (isCanonicalEnabled) {
     const foundation = await fetchCanonicalInput(epoch);
     if (foundation) {
       return { input: foundation, inputSource: "canonical-foundation" };
     }
   }
+  return buildSnapshotInputForEpoch(epoch);
+}
 
+/**
+ * Build the SNAPSHOT-derived input variant (canonical builder → heuristic
+ * fallback), bypassing the foundation CSVs. This is the variant the
+ * simulate/jobs routes build; it hashes differently from the foundation
+ * variant on the Rust service's cache, so the precompute cron warms both.
+ * Throws {@link EpochNotFoundError} when the snapshot is absent.
+ */
+export async function buildSnapshotInputForEpoch(
+  epoch: number,
+): Promise<BuiltEpochInput> {
   const url = getSnapshotUrl(epoch);
   const res = await fetch(url, {
     signal: AbortSignal.timeout(SNAPSHOT_FETCH_TIMEOUT_MS),
@@ -157,7 +179,9 @@ async function computeEpochShapley(epoch: number): Promise<EpochShapleyResult> {
   let method: string;
   if (SHAPLEY_SERVICE_URL) {
     try {
-      const remote = await computeShapleyRemote(input);
+      const remote = await computeShapleyRemote(input, {
+        timeoutMs: SOLVE_TIMEOUT_MS,
+      });
       output = remote.output;
       method = remote.method;
     } catch (err) {

@@ -160,10 +160,12 @@ share(op)   = shapley(op) / Σ_op shapley(op)`}
               private links have bandwidth constraints.
             </p>
             <p>
-              Result is cached for 5 minutes (LP solve cost). Method label
-              in the response is always{" "}
-              <code>lp-multi-commodity-flow-rs</code> in production; if you
-              see <code>local-ts-heuristic-DEV-ONLY</code> the deployment
+              Results come from the shared per-epoch cache (kept warm by the
+              precompute cron), with a short 5-minute last-good cache in
+              front. The method label in the response is always an{" "}
+              <code>lp-*</code> label from the Rust solver in production
+              (currently <code>lp-per-city-stake-weighted-exact</code>); if
+              you see <code>local-ts-heuristic-DEV-ONLY</code> the deployment
               is missing <code>SHAPLEY_SERVICE_URL</code> and the result
               is not canonical.
             </p>

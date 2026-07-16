@@ -78,21 +78,40 @@ export async function GET(request: Request) {
     cached = { data: result, timestamp: Date.now() };
     return NextResponse.json(result);
   } catch (err) {
+    // Report EVERY failure before deciding the response. Warm instances
+    // serve last-good below, so without this a hard outage would produce
+    // nothing but quiet 200s until instances recycle — an unmonitorable
+    // failure mode (instances live minutes-to-hours).
+    const warming = err instanceof ShapleyServiceError && err.warming;
+    const phase = warming
+      ? "warming"
+      : err instanceof EpochNotFoundError
+        ? "epoch-not-found"
+        : err instanceof ShapleyServiceError
+          ? "remote-call"
+          : "outer";
+    reportError(err, {
+      source: "api/shapley/baseline",
+      extras: {
+        epoch,
+        phase,
+        servedLastGood: cached !== null,
+        ...(err instanceof ShapleyServiceError ? { status: err.status } : {}),
+      },
+    });
+
     // Prefer last-good over any error response.
     if (cached) return NextResponse.json(cached.data);
     if (err instanceof EpochNotFoundError) {
       return NextResponse.json({ error: err.message }, { status: 404 });
     }
-    if (err instanceof ShapleyServiceError && err.warming) {
+    if (warming) {
       // Timeout-class failure: a solve was cut mid-flight, so the epoch
-      // exists but isn't cached yet. Healing is owned by the precompute cron
-      // (a cut synchronous solve's result is DISCARDED server-side, it does
-      // not land in the cache) — so sustained warming means the cron is
-      // broken. Report it; this must stay visible, not hide behind 202s.
-      reportError(err, {
-        source: "api/shapley/baseline",
-        extras: { epoch, phase: "warming", status: err.status },
-      });
+      // exists but isn't cached yet. The service now finishes cut solves in
+      // a detached task (memory + S3 land anyway — services/shapley-rs
+      // routes.rs `shapley`), so warming self-heals on a later request; the
+      // precompute cron is the proactive warmer. Sustained warming therefore
+      // means BOTH are broken — the reportError above must stay visible.
       return NextResponse.json(
         {
           status: "warming",
@@ -106,15 +125,6 @@ export async function GET(request: Request) {
     // Everything else is a hard failure: service down/misconfigured, Rust
     // 4xx/5xx, snapshot-fetch errors. 502 per the no-silent-degradation rule
     // (docs/shapley-pipeline.md) — never disguised as warming.
-    const phase = err instanceof ShapleyServiceError ? "remote-call" : "outer";
-    reportError(err, {
-      source: "api/shapley/baseline",
-      extras: {
-        epoch,
-        phase,
-        ...(err instanceof ShapleyServiceError ? { status: err.status } : {}),
-      },
-    });
     return NextResponse.json(
       { error: "Service temporarily unavailable" },
       { status: 502 },

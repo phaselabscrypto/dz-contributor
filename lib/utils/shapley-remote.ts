@@ -89,9 +89,15 @@ const MAX_ERROR_DETAIL_CHARS = 500;
  * unset; throws `RemoteSolveError` if the request times out client-side
  * or the response is not 2xx. The thrown error message is intentionally
  * specific so the caller can log the underlying cause without re-wrapping.
+ *
+ * `timeoutMs` defaults to 180s — callers running inside a smaller function
+ * budget (e.g. `maxDuration = 60` routes) MUST pass a timeout below that
+ * budget, or the platform kills the function into a raw 504 before this
+ * abort can produce the typed timeout error.
  */
 export async function computeShapleyRemote(
   input: ShapleyInput,
+  opts: { timeoutMs?: number } = {},
 ): Promise<ShapleyRemoteResult> {
   const url = shapleyEndpointUrl("/shapley");
   if (!url) {
@@ -103,13 +109,14 @@ export async function computeShapleyRemote(
     );
   }
 
+  const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
       headers: buildHeaders(),
       body: JSON.stringify(input),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     // AbortSignal.timeout yields TimeoutError on current Node, AbortError on
@@ -120,7 +127,7 @@ export async function computeShapleyRemote(
       (err.name === "TimeoutError" || err.name === "AbortError")
     ) {
       throw new RemoteSolveError(
-        `Rust Shapley service timed out after ${TIMEOUT_MS}ms`,
+        `Rust Shapley service timed out after ${timeoutMs}ms`,
         undefined,
         true,
         err,

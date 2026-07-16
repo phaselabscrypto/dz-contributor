@@ -101,6 +101,55 @@ export type ApplyOverridesResult =
   | { ok: true; input: ShapleyInput }
   | { ok: false; unknownMetros: string[]; knownMetros: string[] };
 
+export type BuildOverriddenInputResult =
+  | { ok: true; input: ShapleyInput }
+  | { ok: false; error: string };
+
+/**
+ * Route-level composition over {@link applyDemandOverrides}: folds the
+ * canonical-snapshot requirement, the unknown-metro rejection, and the
+ * "no demand rows left" guard into one self-explaining error string (the
+ * caller returns it as a 400). Empty overrides are a no-op that returns
+ * `baselineInput` unchanged. Shared by `/api/shapley/jobs` and
+ * `/api/shapley/simulate` so the two contracts cannot drift.
+ */
+export function buildOverriddenInput(args: {
+  snap: RawSnapshot;
+  baselineInput: ShapleyInput;
+  overrides: DemandOverrides;
+  epoch: number;
+  canonical: boolean;
+  /** The canonical builder's reason when `canonical` is false, if known. */
+  canonicalReason?: string;
+}): BuildOverriddenInputResult {
+  const { snap, baselineInput, overrides, epoch, canonical, canonicalReason } =
+    args;
+  if (Object.keys(overrides).length === 0) {
+    return { ok: true, input: baselineInput };
+  }
+  if (!canonical) {
+    return {
+      ok: false,
+      error:
+        `demandOverrides require a canonical snapshot; epoch ${epoch} is not` +
+        (canonicalReason ? ` (${canonicalReason})` : ""),
+    };
+  }
+  const applied = applyDemandOverrides(snap, baselineInput, overrides);
+  if (!applied.ok) {
+    return {
+      ok: false,
+      error: `Unknown metro(s) in demandOverrides: ${applied.unknownMetros.join(
+        ", "
+      )}. Valid metros: ${applied.knownMetros.join(", ")}`,
+    };
+  }
+  if (applied.input.demands.length === 0) {
+    return { ok: false, error: "demandOverrides remove all demand rows" };
+  }
+  return { ok: true, input: applied.input };
+}
+
 /**
  * Apply validator-count overrides by regenerating the demand table from
  * override-patched city stats (DZ-parity — see module doc).

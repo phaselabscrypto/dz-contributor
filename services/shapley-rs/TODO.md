@@ -43,16 +43,14 @@ After deploying, add a CI step that runs it against the live service:
 ./tests/smoke.sh "https://<deployed-route-host>"
 ```
 
-## Detach the baseline store from the request handler
+## Optional: per-hash in-flight dedup on the sync cold path
 
-A synchronous `/shapley` cold solve that gets cut by the router timeout (HAProxy
-30s → 504) runs to completion on its `spawn_blocking` thread but its result is
-DISCARDED: the store step in `compute_and_store_baseline` lives in the handler
-future, which axum drops on client disconnect. Consequence: user-triggered cold
-baseline requests burn full-length doomed solves, and the frontend's
-`202 warming` state can only heal via the 6-hourly precompute cron.
-
-Fix: wrap the cold path's solve+store in `tokio::spawn` (detached from the
-request future, mirroring the worker path's store at `worker.rs`) so a cut
-solve still lands in the memory+S3 cache — making warming self-heal on the
-first request instead of waiting for the cron.
+The `/shapley` cold path now runs solve+store in a detached `tokio::spawn`
+(a router-cut request's result still lands in memory + S3, so the frontend's
+`202 warming` self-heals on the next request instead of waiting for the
+precompute cron). What remains: concurrent cold requests for the SAME
+`input_hash` each spawn their own solve — the TS layer single-flights per
+Vercel instance and the first store wins, so this only costs redundant CPU
+during a cold burst, never correctness. If it shows up in practice, add an
+in-flight `HashMap<u64, watch::Receiver<...>>` guard to `AppState` so later
+requests await the first solve.

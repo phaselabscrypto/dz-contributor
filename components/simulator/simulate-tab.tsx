@@ -1104,8 +1104,10 @@ export function SimulateTab({
                     <div className="sm:col-span-3 text-right">Current</div>
                     <div className="sm:col-span-3 text-right">Modified</div>
                   </div>
+                  {/* All sender metros — the container scrolls, so no cap
+                       (a hidden metro would be silently uneditable). */}
                   <div className="max-h-[280px] overflow-y-auto divide-y divide-cream-8">
-                    {senderMetros.slice(0, 30).map((metro) => {
+                    {senderMetros.map((metro) => {
                       const current = metro.validatorCount;
                       const overrideValue = demandOverrides[metro.metroCode];
                       const inputValue =
