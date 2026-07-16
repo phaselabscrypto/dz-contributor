@@ -3,6 +3,7 @@ import {
   getSnapshotUrl,
   MIN_DZ_EPOCH,
   SHAPLEY_SERVICE_URL,
+  SNAPSHOT_FETCH_TIMEOUT_MS,
 } from "@/lib/constants/config";
 import type { RawSnapshot } from "@/lib/types/snapshot";
 import type { ShapleyInput, ShapleyOutput } from "@/lib/types/shapley";
@@ -10,10 +11,11 @@ import { parseSnapshot } from "@/lib/utils/snapshot-parser";
 import { buildShapleyInput } from "@/lib/utils/shapley-input-builder";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
 import { computeShapleyRemote, simulateShapleyRemote } from "@/lib/utils/shapley-remote";
+import { modifyShapleyInput } from "@/lib/utils/shapley-input-modifier";
 import {
-  modifyShapleyInput,
-  type DemandOverrides,
-} from "@/lib/utils/shapley-input-modifier";
+  buildOverriddenInput,
+  normalizeDemandOverrides,
+} from "@/lib/utils/demand-overrides";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
 import { reportError } from "@/lib/observability";
 
@@ -26,6 +28,8 @@ const baselineCache = new Map<
   {
     raw: RawSnapshot;
     input: ShapleyInput;
+    /** Whether `input` came from the canonical builder (vs heuristic fallback). */
+    canonical: boolean;
     baseline: ShapleyOutput;
     timestamp: number;
   }
@@ -95,10 +99,11 @@ export async function POST(request: NextRequest) {
 
   const safeRemoveLinks = Array.isArray(removeLinks) ? removeLinks : [];
   const safeAddLinks = Array.isArray(addLinks) ? addLinks : [];
-  const safeDemandOverrides: DemandOverrides =
-    demandOverrides && typeof demandOverrides === "object"
-      ? (demandOverrides as DemandOverrides)
-      : ({} as DemandOverrides);
+  const normalized = normalizeDemandOverrides(demandOverrides);
+  if (!normalized.ok) {
+    return NextResponse.json({ error: normalized.error }, { status: 400 });
+  }
+  const overrides = normalized.overrides;
 
   try {
     evictStaleCache();
@@ -107,7 +112,9 @@ export async function POST(request: NextRequest) {
     let cached = baselineCache.get(epoch);
     if (!cached || Date.now() - cached.timestamp > CACHE_TTL) {
       const url = getSnapshotUrl(epoch);
-      const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(SNAPSHOT_FETCH_TIMEOUT_MS),
+      });
 
       if (!res.ok) {
         return NextResponse.json(
@@ -129,22 +136,40 @@ export async function POST(request: NextRequest) {
       }
 
       const remote = await computeShapleyRemote(input);
-      cached = { raw, input, baseline: remote.output, timestamp: Date.now() };
+      cached = {
+        raw,
+        input,
+        canonical: canonical.canonical,
+        baseline: remote.output,
+        timestamp: Date.now(),
+      };
       baselineCache.set(epoch, cached);
     }
 
     const { raw, input: baselineInput, baseline } = cached;
     const parsed = parseSnapshot(raw);
 
+    // Demand overrides regenerate the demand table from override-patched
+    // city stats (DZ-parity) — only meaningful for canonical snapshots.
+    const overridden = buildOverriddenInput({
+      snap: raw,
+      baselineInput,
+      overrides,
+      epoch,
+      canonical: cached.canonical,
+    });
+    if (!overridden.ok) {
+      return NextResponse.json({ error: overridden.error }, { status: 400 });
+    }
+
     // Build modified input
     const modifiedInput = modifyShapleyInput(
-      baselineInput,
+      overridden.input,
       parsed,
       raw,
       contributorCode,
       safeRemoveLinks,
-      safeAddLinks,
-      safeDemandOverrides
+      safeAddLinks
     );
 
     // ── Primary: /simulate endpoint (single call, coalition reuse) ────

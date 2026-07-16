@@ -1,6 +1,6 @@
 "use client";
 
-import { useBaselineShapley } from "@/lib/hooks/use-live";
+import { useBaselineShapley, isBaselineWarming } from "@/lib/hooks/use-live";
 import {
   getContributorColor,
   getContributorDisplayName,
@@ -16,7 +16,7 @@ function relativeAge(iso: string): string {
 }
 
 /**
- * Live-topology Shapley anchor. Different from the all-time `reward_percentage`
+ * Latest-epoch Shapley anchor. Different from the all-time `reward_percentage`
  * surfaced from economic-hub — this is "what would the contributor pool split
  * look like if rewards were paid against the current network?"
  *
@@ -25,9 +25,11 @@ function relativeAge(iso: string): string {
  */
 export function LiveBaselineShapley() {
   const { data, isLoading, error } = useBaselineShapley();
+  const warming = data && isBaselineWarming(data) ? data : null;
+  const ready = data && !isBaselineWarming(data) ? data : null;
 
-  const ranked = data
-    ? Object.entries(data.values)
+  const ranked = ready
+    ? Object.entries(ready.values)
         .map(([operator, v]) => ({
           operator,
           value: v.value,
@@ -38,7 +40,7 @@ export function LiveBaselineShapley() {
     : [];
 
   const handleExport = () => {
-    if (!data) return;
+    if (!ready) return;
     const csv = rowsToCsv(
       ["Operator", "Display Name", "Value", "Share %"],
       ranked.map((r) => [
@@ -58,15 +60,15 @@ export function LiveBaselineShapley() {
     <div className="border border-border bg-surface">
       <div className="border-b border-border px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
         <span className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-mono">
-          Live network Shapley anchor
+          Latest-epoch Shapley anchor
         </span>
         <div className="flex items-center gap-3 text-xs text-muted-foreground font-mono">
-          {data && (
+          {ready && (
             <>
-              <span title={data.method}>{methodLabel(data.method)}</span>
+              <span title={ready.method}>{methodLabel(ready.method)}</span>
               <span aria-hidden="true">·</span>
-              <span title={data.computedAt}>
-                {relativeAge(data.computedAt)}
+              <span title={ready.computedAt}>
+                {relativeAge(ready.computedAt)}
               </span>
               <button
                 onClick={handleExport}
@@ -83,7 +85,13 @@ export function LiveBaselineShapley() {
 
       {isLoading && (
         <div className="px-4 py-6 text-xs text-muted-foreground font-mono">
-          Computing live baseline…
+          Computing latest-epoch baseline…
+        </div>
+      )}
+
+      {warming && !isLoading && (
+        <div className="px-4 py-6 text-xs text-muted-foreground font-mono">
+          Baseline warming for epoch {warming.epoch} — refreshes automatically.
         </div>
       )}
 
@@ -97,9 +105,9 @@ export function LiveBaselineShapley() {
         </div>
       )}
 
-      {!isLoading && !error && ranked.length === 0 && (
+      {!isLoading && !error && !warming && ranked.length === 0 && (
         <div className="px-4 py-6 text-xs text-muted-foreground font-mono">
-          No operators with non-zero share in current topology.
+          No operators with non-zero share for the latest epoch.
         </div>
       )}
 
@@ -143,8 +151,8 @@ export function LiveBaselineShapley() {
       )}
 
       <div className="px-4 py-2 text-xs text-muted-foreground font-mono border-t border-border">
-        Computed against the current live topology — different from the all-time
-        share above, which sums historical pool distributions.
+        Latest completed epoch (DZ-current methodology) — different
+        from the all-time share above, which sums historical pool distributions.
       </div>
     </div>
   );

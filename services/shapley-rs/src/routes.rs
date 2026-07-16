@@ -658,17 +658,41 @@ pub async fn shapley(
         return Json(resp).into_response();
     }
 
-    // ── Cold path: compute + store. The in-process compute load-shed was
-    // removed in Phase 2 (ADR 0001) — the heavy what-if path runs on the
-    // worker pool now; this synchronous endpoint is bounded only by the
-    // request timeout + body-size limit.
-    match compute_and_store_baseline(&state, &body, input_hash, None).await {
-        Ok(resp) => Json(resp).into_response(),
-        Err(e) => (
+    // ── Cold path: compute + store, DETACHED from the request future. Axum
+    // drops this handler's future when the client (or the cluster router's
+    // ~30s timeout) disconnects; the solve itself always ran to completion on
+    // its spawn_blocking thread, but the STORE step used to live in the
+    // dropped future, so a cut request's result never reached the cache and
+    // only the precompute cron could heal it. Running solve+store in a
+    // detached task means a cut solve still lands in memory + S3 and the
+    // caller's warming retry becomes a cache hit. (Concurrent cold requests
+    // for the same hash may still each burn a solve — the TS layer
+    // single-flights per instance, and the first store wins.)
+    //
+    // The in-process compute load-shed was removed in Phase 2 (ADR 0001) —
+    // the heavy what-if path runs on the worker pool; this synchronous
+    // endpoint is bounded only by the request timeout + body-size limit.
+    let task_state = Arc::clone(&state);
+    let store_task = tokio::spawn(async move {
+        compute_and_store_baseline(&task_state, &body, input_hash, None).await
+    });
+    match store_task.await {
+        Ok(Ok(resp)) => Json(resp).into_response(),
+        Ok(Err(e)) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({ "error": e })),
         )
             .into_response(),
+        // JoinError: the detached task itself panicked or was aborted —
+        // compute panics are already mapped to Err inside, so this is rare.
+        Err(e) => {
+            tracing::error!(error = %e, "detached baseline compute task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "baseline compute task failed" })),
+            )
+                .into_response()
+        }
     }
 }
 

@@ -7,6 +7,11 @@ export const FEE_CSV_URL_TEMPLATE =
 export const FEE_CONSOLIDATED_URL =
   "https://raw.githubusercontent.com/doublezerofoundation/fees/main/fees_and_payments_consolidated.csv";
 
+// 120s: the ~70-110MB epoch snapshot download measured 7-27s locally — a 30s
+// abort has intermittent failure built in (first observed on the link-value
+// precompute cron; the same fetch backs the shapley routes).
+export const SNAPSHOT_FETCH_TIMEOUT_MS = 120_000;
+
 // DZ epoch floor — the earliest snapshot the Foundation publishes on S3.
 // We deliberately do NOT pin a maximum because the network keeps producing
 // new epochs (~149 at time of writing, climbing every ~2 days). Routes that
@@ -135,8 +140,8 @@ export const LAMPORTS_PER_SOL = 1_000_000_000;
 export const EPOCHS_PER_MONTH = 13;
 export const EPOCHS_PER_YEAR = 166; // 13 × 12.77 ≈ 166 epochs/year
 
-// Shapley tuning parameters used by the fallback input builders
-// (`shapley-input-builder.ts`, `live-shapley-input.ts`). These MUST mirror the
+// Shapley tuning parameters used by the fallback input builder
+// (`shapley-input-builder.ts`). These MUST mirror the
 // constants in the canonical builder (`canonical-input-builder.ts`), which is
 // verified byte-for-byte against the DZ Rust reference on mainnet epoch 149 —
 // otherwise rewards computed via the fallback path are scaled differently from
@@ -174,8 +179,8 @@ function numEnv(name: string, fallback: number): number {
 // (pre-#369); reproduce a pre-#369 epoch by passing an explicit override to
 // `buildCanonicalShapleyInput` or setting the envs below.
 //
-// NOTE: the fallback builders (`shapley-input-builder.ts`, `live-shapley-input.ts`)
-// do NOT yet consume these two params (they still emit priority 0 / raw latency) —
+// NOTE: the fallback builder (`shapley-input-builder.ts`)
+// does NOT yet consume these two params (it still emits priority 0 / raw latency) —
 // a tracked follow-up; the canonical/production reward path uses the values here.
 export const CANONICAL_SHAPLEY_PARAMS = {
   ibrlPriority: numEnv("DZ_IBRL_PRIORITY", 20.0),

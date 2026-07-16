@@ -42,3 +42,15 @@ After deploying, add a CI step that runs it against the live service:
 ```bash
 ./tests/smoke.sh "https://<deployed-route-host>"
 ```
+
+## Optional: per-hash in-flight dedup on the sync cold path
+
+The `/shapley` cold path now runs solve+store in a detached `tokio::spawn`
+(a router-cut request's result still lands in memory + S3, so the frontend's
+`202 warming` self-heals on the next request instead of waiting for the
+precompute cron). What remains: concurrent cold requests for the SAME
+`input_hash` each spawn their own solve — the TS layer single-flights per
+Vercel instance and the first store wins, so this only costs redundant CPU
+during a cold burst, never correctness. If it shows up in practice, add an
+in-flight `HashMap<u64, watch::Receiver<...>>` guard to `AppState` so later
+requests await the first solve.

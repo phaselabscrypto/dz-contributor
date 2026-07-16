@@ -7,6 +7,7 @@ import {
   useLiveStatus,
   useEconomicHub,
   useBaselineShapley,
+  isBaselineWarming,
 } from "@/lib/hooks/use-live";
 import {
   ehNameToCode,
@@ -47,8 +48,11 @@ export default function NetworkPageClient() {
   const { data: status } = useLiveStatus();
   const { data: hub } = useEconomicHub();
   const { data: baseline } = useBaselineShapley();
+  // Warming (202) = not computed yet — treat exactly like "no data yet".
+  const baselineReady =
+    baseline && !isBaselineWarming(baseline) ? baseline : null;
 
-  // Merge live link counts with all-time reward share + live Shapley share
+  // Merge live link counts with all-time reward share + latest-epoch Shapley share
   const leaderboard = useMemo(() => {
     if (!topology) return [];
     const ehByCode = new Map<string, number>();
@@ -61,13 +65,13 @@ export default function NetworkPageClient() {
       .filter((c) => c.linkCount > 0)
       .map((c) => {
         const rewardPct = ehByCode.get(c.code) ?? 0;
-        const livePct = baseline?.values?.[c.code]?.share
-          ? baseline.values[c.code].share * 100
+        const livePct = baselineReady?.values?.[c.code]?.share
+          ? baselineReady.values[c.code].share * 100
           : 0;
         return { ...c, rewardPct, livePct };
       })
       .sort((a, b) => b.rewardPct - a.rewardPct || b.linkCount - a.linkCount);
-  }, [topology, hub, baseline]);
+  }, [topology, hub, baselineReady]);
 
   if (topoError && !topology) {
     return (
@@ -226,9 +230,9 @@ export default function NetworkPageClient() {
             Top contributors
           </span>
           <div className="flex items-center gap-3 text-xs font-mono">
-            {baseline && (
+            {baselineReady && (
               <span className="text-emerald-300/80 hidden md:inline">
-                live
+                latest epoch
               </span>
             )}
             {hub && (
@@ -261,10 +265,10 @@ export default function NetworkPageClient() {
                 </span>
               </div>
               <div className="flex items-center gap-3 shrink-0">
-                {baseline && c.livePct > 0 && (
+                {baselineReady && c.livePct > 0 && (
                   <span
                     className="tabular-nums font-mono text-xs text-emerald-300/80 hidden md:inline"
-                    title="Live Shapley share against current network"
+                    title="Shapley share for the latest completed epoch"
                   >
                     {c.livePct.toFixed(2)}%
                   </span>

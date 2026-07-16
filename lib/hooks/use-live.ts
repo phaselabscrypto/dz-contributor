@@ -63,15 +63,16 @@ export function useHealth() {
 
 /**
  * Live-network Shapley anchor — computes Shapley values against the
- * current topology (not a historical snapshot). 5-minute refresh; the
- * LP solve is comparatively expensive and the input only changes when
- * malbec topology refreshes every 60s anyway.
+ * the LATEST completed epoch's result (DZ-current methodology),
+ * served from the shared per-epoch cache and kept warm by the precompute
+ * cron — NOT an on-demand live-topology solve. Updates roughly once per
+ * epoch (~2-3 days). 5-minute client refresh.
  */
 export interface BaselineShapley {
   method: string;
   computedAt: string;
-  source: "live-topology";
-  topologyFetchedAt: string;
+  source: "latest-epoch";
+  epoch: number;
   operatorCount: number;
   values: Record<string, { value: number; share: number }>;
   inputSummary: {
@@ -82,11 +83,47 @@ export interface BaselineShapley {
   };
 }
 
+/**
+ * 202 body from /api/shapley/baseline: the latest epoch exists but its
+ * result isn't cached yet (a cold solve was cut mid-flight; the precompute
+ * cron heals it). A valid data state, not an error.
+ */
+export interface BaselineWarming {
+  status: "warming";
+  message: string;
+  epoch: number;
+}
+
+export type BaselineShapleyResponse = BaselineShapley | BaselineWarming;
+
+export function isBaselineWarming(
+  d: BaselineShapleyResponse,
+): d is BaselineWarming {
+  return (d as BaselineWarming).status === "warming";
+}
+
+// Dedicated fetcher: 202 is a warming payload, not a success-shaped
+// BaselineShapley (202 passes `res.ok`, so the shared fetcher would hand
+// the warming body to consumers typed as ready data). The shared `fetcher`
+// stays 2xx-naive for the other hooks.
+const baselineFetcher = async (
+  url: string,
+): Promise<BaselineShapleyResponse> => {
+  const res = await fetch(url);
+  if (res.status === 202) return res.json();
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  return res.json();
+};
+
 export function useBaselineShapley() {
-  return useSWR<BaselineShapley>("/api/shapley/baseline", fetcher, {
-    ...swrCfg,
-    refreshInterval: 5 * 60_000,
-  });
+  return useSWR<BaselineShapleyResponse>(
+    "/api/shapley/baseline",
+    baselineFetcher,
+    {
+      ...swrCfg,
+      refreshInterval: 5 * 60_000,
+    },
+  );
 }
 
 export interface PoolProjection {

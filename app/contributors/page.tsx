@@ -6,6 +6,7 @@ import {
   useLiveTopology,
   useEconomicHub,
   useBaselineShapley,
+  isBaselineWarming,
 } from "@/lib/hooks/use-live";
 import { PageHeader } from "@/components/ui/page-header";
 import {
@@ -40,6 +41,9 @@ export default function ContributorsPage() {
   const { data: topology, isLoading, error, mutate } = useLiveTopology();
   const { data: hub } = useEconomicHub();
   const { data: baseline } = useBaselineShapley();
+  // Warming (202) = not computed yet — treat exactly like "no data yet".
+  const baselineReady =
+    baseline && !isBaselineWarming(baseline) ? baseline : null;
   const [query, setQuery] = useState("");
   const [sortState, setSortState] = useLocalStorageState<{
     key: SortKey;
@@ -66,12 +70,12 @@ export default function ContributorsPage() {
     }
     return topology.contributors.map((c) => {
       const rewardPct = ehMap.get(c.code) ?? 0;
-      const livePct = baseline?.values?.[c.code]?.share
-        ? baseline.values[c.code].share * 100
+      const livePct = baselineReady?.values?.[c.code]?.share
+        ? baselineReady.values[c.code].share * 100
         : 0;
       return { ...c, rewardPct, livePct };
     });
-  }, [topology, hub, baseline]);
+  }, [topology, hub, baselineReady]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

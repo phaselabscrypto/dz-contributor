@@ -7,8 +7,14 @@ import type {
   Location,
   Exchange,
   CityDemand,
+  MetroDemand,
   ParsedSnapshot,
 } from "@/lib/types/contributor";
+import {
+  buildCityNameToMetro,
+  buildLocationCodeToMetro,
+} from "./shapley-input-builder";
+import { buildCityStats } from "./canonical-input-builder";
 
 /**
  * Sentinel demand score for a location that has validators but zero
@@ -189,6 +195,16 @@ export function parseSnapshot(raw: RawSnapshot): ParsedSnapshot {
   );
   const totalValidators = Object.keys(scheduleMap).length;
 
+  // Location → metro (uppercased exchange code) via the same name-based join
+  // the server uses to translate link endpoints — keeps UI grouping and the
+  // modifier's link translation in one namespace.
+  const cityNameToMetro = buildCityNameToMetro(raw);
+  const locToMetro = buildLocationCodeToMetro(raw, cityNameToMetro);
+  const exchangeCodeToName = new Map<string, string>();
+  for (const ex of exchangeMap.values()) {
+    exchangeCodeToName.set(ex.code.toUpperCase(), ex.name);
+  }
+
   // Compute city demands
   const cityDemands: CityDemand[] = [];
   for (const loc of locationMap.values()) {
@@ -208,6 +224,13 @@ export function parseSnapshot(raw: RawSnapshot): ParsedSnapshot {
         ? UNSERVED_LOCATION_DEMAND_SCORE
         : 0;
 
+    const metroCode = locToMetro.get(loc.code);
+    if (!metroCode && process.env.NODE_ENV !== "production") {
+      console.warn(
+        `[snapshot-parser] No metro mapping for location ${loc.code} (${loc.name})`
+      );
+    }
+
     cityDemands.push({
       locationCode: loc.code,
       locationName: loc.name,
@@ -216,10 +239,36 @@ export function parseSnapshot(raw: RawSnapshot): ParsedSnapshot {
       totalSlots: locationSlots,
       linkCount,
       demandScore,
+      metroCode,
+      metroName: metroCode ? exchangeCodeToName.get(metroCode) : undefined,
     });
   }
 
   cityDemands.sort((a, b) => b.demandScore - a.demandScore);
+
+  // Per-metro demand rows for the simulator's "Modify demand" panel.
+  // Validator/stake counts use the CANONICAL rule (buildCityStats: every user
+  // at the exchange, keyed by device.exchange_pk) so the panel's "Current"
+  // equals exactly what demand regeneration uses; display-only signals
+  // (demandScore/linkCount) aggregate the member locations via the name-join.
+  const metroStats = buildCityStats(raw);
+  const metroDemands: MetroDemand[] = [];
+  for (const [metroCode, stats] of metroStats) {
+    const members = cityDemands.filter((cd) => cd.metroCode === metroCode);
+    metroDemands.push({
+      metroCode,
+      metroName: exchangeCodeToName.get(metroCode) || metroCode,
+      validatorCount: stats.validators,
+      stakeProxy: stats.stakeProxy,
+      demandScore: members.reduce((sum, cd) => sum + cd.demandScore, 0),
+      linkCount: members.reduce((sum, cd) => sum + cd.linkCount, 0),
+      locationCodes: members.map((cd) => cd.locationCode),
+    });
+  }
+  metroDemands.sort(
+    (a, b) =>
+      b.demandScore - a.demandScore || b.validatorCount - a.validatorCount
+  );
 
   // Build contributors
   const contributors: Contributor[] = Object.entries(svc.contributors).map(
@@ -256,6 +305,14 @@ export function parseSnapshot(raw: RawSnapshot): ParsedSnapshot {
     locations: Array.from(locationMap.values()),
     exchanges: Array.from(exchangeMap.values()),
     cityDemands,
+    metroDemands,
+    // Mirrors buildCanonicalShapleyInput's guards exactly (missing
+    // start_us/end_us window or missing/empty metro_prices → non-canonical).
+    canonicalDemand:
+      raw.fetch_data.start_us != null &&
+      raw.fetch_data.end_us != null &&
+      !!raw.fetch_data.metro_prices &&
+      Object.keys(raw.fetch_data.metro_prices).length > 0,
     totalSlots,
     totalValidators,
     version: raw.metadata?.network || "",

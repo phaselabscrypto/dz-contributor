@@ -8,6 +8,7 @@ import {
   useEconomicHub,
   useLiveStatus,
   useBaselineShapley,
+  isBaselineWarming,
 } from "@/lib/hooks/use-live";
 import { usePrices } from "@/lib/hooks/use-prices";
 import { PageHeader } from "@/components/ui/page-header";
@@ -117,8 +118,10 @@ export default function ContributorDetailPage() {
 
   // Live-network Shapley share (current footing). May be 0 for operators
   // whose devices are present but have no flowing demand routed through
-  // them in the live LP.
-  const livePct = (baseline?.values?.[code]?.share ?? 0) * 100;
+  // them in the live LP. Warming (202) = not computed yet, shown as "computing".
+  const baselineReady =
+    baseline && !isBaselineWarming(baseline) ? baseline : null;
+  const livePct = (baselineReady?.values?.[code]?.share ?? 0) * 100;
   const liveDeltaPct = livePct - rewardPct;
 
   // active vs degraded link counts
@@ -234,7 +237,7 @@ export default function ContributorDetailPage() {
                     : `${liveDeltaPct.toFixed(2)} pts vs all-time`
                   : livePct > 0
                   ? "current footing"
-                  : baseline
+                  : baselineReady
                   ? "no demand routed"
                   : "computing…"
               }

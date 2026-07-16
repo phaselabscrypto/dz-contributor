@@ -140,6 +140,7 @@ export function SimulateTab({
   const [newCityZ, setNewCityZ] = useState("");
   const [newBandwidth, setNewBandwidth] = useState<number>(10);
   const [newLatency, setNewLatency] = useState<number>(10);
+  // Metro-keyed (uppercased exchange code, e.g. "FRA") validator-count overrides.
   const [demandOverrides, setDemandOverrides] = useState<Record<string, number>>({});
   const [showDemandEditor, setShowDemandEditor] = useState(false);
   const [simResult, setSimResult] = useState<SimulateResponse | null>(null);
@@ -183,6 +184,40 @@ export function SimulateTab({
       snapshot.cityDemands
         .filter((d) => d.totalSlots > 0)
         .sort((a, b) => b.demandScore - a.demandScore),
+    [snapshot]
+  );
+
+  const senderMetros = useMemo(
+    () => snapshot.metroDemands.filter((m) => m.validatorCount > 0),
+    [snapshot]
+  );
+
+  // Endpoint pick for "+100G hot corridor": first two activeCities with
+  // distinct, defined metroCodes (same-metro links are dropped server-side).
+  const hotCorridorPair = useMemo(() => {
+    const a = activeCities.find((c) => c.metroCode);
+    const b = a
+      ? activeCities.find((c) => c.metroCode && c.metroCode !== a.metroCode)
+      : undefined;
+    return a && b ? ([a, b] as const) : null;
+  }, [activeCities]);
+
+  // Endpoint picks for "+3-city hub triangle": top 3 activeCities with
+  // pairwise-distinct defined metroCodes.
+  const hubTrianglePicks = useMemo(() => {
+    const picks: typeof activeCities = [];
+    for (const c of activeCities) {
+      if (!c.metroCode) continue;
+      if (picks.some((p) => p.metroCode === c.metroCode)) continue;
+      picks.push(c);
+      if (picks.length === 3) break;
+    }
+    return picks.length === 3 ? picks : null;
+  }, [activeCities]);
+
+  // Location -> metro lookup for flagging intra-metro drafts (Task 5).
+  const locationToMetro = useMemo(
+    () => new Map(snapshot.cityDemands.map((cd) => [cd.locationCode, cd.metroCode])),
     [snapshot]
   );
 
@@ -464,6 +499,15 @@ export function SimulateTab({
   const showExistingLinks = contributor && !isNewContributor;
   const showAddLinks = contributorCode !== "";
 
+  // True when the two currently-selected "add link" endpoints resolve to the
+  // same metro — intra-metro links don't earn rewards.
+  const draftEndpointsSameMetro = useMemo(() => {
+    if (!newCityA || !newCityZ) return false;
+    const metroA = locationToMetro.get(newCityA);
+    const metroZ = locationToMetro.get(newCityZ);
+    return metroA !== undefined && metroA === metroZ;
+  }, [newCityA, newCityZ, locationToMetro]);
+
   return (
     <div className="space-y-6">
       {/* Fee-history error banner — visible, never silent (issue #19) */}
@@ -688,13 +732,14 @@ export function SimulateTab({
           </CardHeader>
           <CardContent>
             <div className="flex flex-wrap gap-2">
-              {/* 100G hot corridor */}
+              {/* 100G hot corridor — picks the top two activeCities with
+                   distinct, defined metroCodes so the server doesn't silently
+                   drop a same-metro link. */}
               <button
                 type="button"
                 onClick={() => {
-                  if (activeCities.length < 2) return;
-                  const a = activeCities[0];
-                  const b = activeCities[1];
+                  if (!hotCorridorPair) return;
+                  const [a, b] = hotCorridorPair;
                   setAddedLinks((prev) => [
                     ...prev,
                     {
@@ -706,7 +751,7 @@ export function SimulateTab({
                   ]);
                   setSimResult(null);
                 }}
-                disabled={activeCities.length < 2}
+                disabled={!hotCorridorPair}
                 className="text-xs font-mono px-3 py-1.5 border border-cream-15 hover:border-cream-30 hover:bg-cream-8 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 + 100G hot corridor
@@ -737,13 +782,14 @@ export function SimulateTab({
                 </button>
               )}
 
-              {/* Hub triangle (only useful for new contributors) */}
+              {/* Hub triangle — top 3 activeCities with pairwise-distinct
+                   defined metroCodes (only useful for new contributors). */}
               {isNewContributor && (
                 <button
                   type="button"
                   onClick={() => {
-                    if (activeCities.length < 3) return;
-                    const [a, b, c] = activeCities;
+                    if (!hubTrianglePicks) return;
+                    const [a, b, c] = hubTrianglePicks;
                     setAddedLinks((prev) => [
                       ...prev,
                       {
@@ -767,7 +813,7 @@ export function SimulateTab({
                     ]);
                     setSimResult(null);
                   }}
-                  disabled={activeCities.length < 3}
+                  disabled={!hubTrianglePicks}
                   className="text-xs font-mono px-3 py-1.5 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                 >
                   + 3-city hub triangle
@@ -778,17 +824,16 @@ export function SimulateTab({
               <button
                 type="button"
                 onClick={() => {
-                  if (activeCities.length === 0) return;
-                  const top = activeCities[0];
-                  const baseline = top.validatorCount || 1;
+                  if (senderMetros.length === 0) return;
+                  const top = senderMetros[0];
                   setDemandOverrides((prev) => ({
                     ...prev,
-                    [top.locationCode]: baseline * 2,
+                    [top.metroCode]: top.validatorCount * 2,
                   }));
                   setShowDemandEditor(true);
                   setSimResult(null);
                 }}
-                disabled={activeCities.length === 0}
+                disabled={senderMetros.length === 0 || !snapshot.canonicalDemand}
                 className="text-xs font-mono px-3 py-1.5 border border-cream-15 hover:border-cream-30 hover:bg-cream-8 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 ↑ 2× top-metro demand
@@ -911,6 +956,14 @@ export function SimulateTab({
               </button>
             </div>
 
+            {/* Intra-metro draft warning */}
+            {draftEndpointsSameMetro && (
+              <p className="text-xs text-amber flex items-center gap-1.5">
+                <AlertTriangle className="size-3 shrink-0" />
+                Intra-metro links don&apos;t earn rewards — pick locations in two different metros.
+              </p>
+            )}
+
             {/* Bandwidth + RTT */}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
@@ -986,6 +1039,12 @@ export function SimulateTab({
                     <span className="ml-2 text-xs font-mono text-cream-30 tabular-nums">
                       {link.bandwidthGbps}G · {link.latencyMs}ms
                     </span>
+                    {locationToMetro.get(link.cityA) !== undefined &&
+                      locationToMetro.get(link.cityA) === locationToMetro.get(link.cityZ) && (
+                        <span className="ml-2 text-xs text-amber font-mono shrink-0">
+                          intra-metro
+                        </span>
+                      )}
                     <button
                       onClick={() => removeAddedLink(i)}
                       aria-label="Remove link"
@@ -1034,105 +1093,116 @@ export function SimulateTab({
           </CardHeader>
           {showDemandEditor && (
             <CardContent className="space-y-3">
-              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 text-xs uppercase tracking-[0.14em] text-cream-30 font-mono pb-1 border-b border-cream-8">
-                <div className="sm:col-span-6">Metro</div>
-                <div className="sm:col-span-3 text-right">Current</div>
-                <div className="sm:col-span-3 text-right">Modified</div>
-              </div>
-              <div className="max-h-[280px] overflow-y-auto divide-y divide-cream-8">
-                {activeCities.slice(0, 30).map((city) => {
-                  const current = city.validatorCount;
-                  const overrideValue = demandOverrides[city.locationCode];
-                  const inputValue =
-                    overrideValue !== undefined
-                      ? String(overrideValue)
-                      : "";
-                  return (
-                    <div
-                      key={city.locationCode}
-                      className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center py-2 text-sm"
-                    >
-                      <div className="sm:col-span-6 min-w-0">
-                        <div className="text-cream truncate">
-                          {city.locationName}
+              {!snapshot.canonicalDemand ? (
+                <p className="text-xs text-cream-30 font-mono">
+                  Demand editing requires a canonical snapshot — not available for this epoch.
+                </p>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 text-xs uppercase tracking-[0.14em] text-cream-30 font-mono pb-1 border-b border-cream-8">
+                    <div className="sm:col-span-6">Metro</div>
+                    <div className="sm:col-span-3 text-right">Current</div>
+                    <div className="sm:col-span-3 text-right">Modified</div>
+                  </div>
+                  {/* All sender metros — the container scrolls, so no cap
+                       (a hidden metro would be silently uneditable). */}
+                  <div className="max-h-[280px] overflow-y-auto divide-y divide-cream-8">
+                    {senderMetros.map((metro) => {
+                      const current = metro.validatorCount;
+                      const overrideValue = demandOverrides[metro.metroCode];
+                      const inputValue =
+                        overrideValue !== undefined
+                          ? String(overrideValue)
+                          : "";
+                      return (
+                        <div
+                          key={metro.metroCode}
+                          className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center py-2 text-sm"
+                        >
+                          <div className="sm:col-span-6 min-w-0">
+                            <div className="text-cream truncate">
+                              {metro.metroName}
+                            </div>
+                            <div className="text-xs text-cream-30 font-mono truncate">
+                              {metro.metroCode} · {metro.locationCodes.length} location{metro.locationCodes.length === 1 ? "" : "s"}
+                            </div>
+                          </div>
+                          <div className="sm:col-span-3 text-right text-cream-60 font-mono tabular-nums">
+                            {current}
+                          </div>
+                          <div className="sm:col-span-3 flex items-center justify-end gap-1.5">
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              min={0}
+                              value={inputValue}
+                              placeholder={String(current)}
+                              onChange={(e) => {
+                                const raw = e.target.value;
+                                setDemandOverrides((prev) => {
+                                  const next = { ...prev };
+                                  if (raw === "") {
+                                    delete next[metro.metroCode];
+                                  } else {
+                                    const n = parseInt(raw, 10);
+                                    if (!Number.isNaN(n) && n >= 0) {
+                                      next[metro.metroCode] = n;
+                                    }
+                                  }
+                                  return next;
+                                });
+                                setSimResult(null);
+                              }}
+                              className="w-20 border border-cream-15 bg-surface px-2 py-1 text-xs font-mono tabular-nums text-cream text-right focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                            />
+                            {overrideValue !== undefined && (
+                              <button
+                                type="button"
+                                aria-label={`Reset ${metro.metroCode}`}
+                                onClick={() => {
+                                  setDemandOverrides((prev) => {
+                                    const next = { ...prev };
+                                    delete next[metro.metroCode];
+                                    return next;
+                                  });
+                                  setSimResult(null);
+                                }}
+                                className="text-cream-30 hover:text-cream transition-colors"
+                              >
+                                <X className="size-3" />
+                              </button>
+                            )}
+                          </div>
                         </div>
-                        <div className="text-xs text-cream-30 font-mono truncate">
-                          {city.locationCode} · {city.country}
-                        </div>
-                      </div>
-                      <div className="sm:col-span-3 text-right text-cream-60 font-mono tabular-nums">
-                        {current}
-                      </div>
-                      <div className="sm:col-span-3 flex items-center justify-end gap-1.5">
-                        <input
-                          type="number"
-                          inputMode="numeric"
-                          min={0}
-                          value={inputValue}
-                          placeholder={String(current)}
-                          onChange={(e) => {
-                            const raw = e.target.value;
-                            setDemandOverrides((prev) => {
-                              const next = { ...prev };
-                              if (raw === "") {
-                                delete next[city.locationCode];
-                              } else {
-                                const n = parseInt(raw, 10);
-                                if (!Number.isNaN(n) && n >= 0) {
-                                  next[city.locationCode] = n;
-                                }
-                              }
-                              return next;
-                            });
-                            setSimResult(null);
-                          }}
-                          className="w-20 border border-cream-15 bg-surface px-2 py-1 text-xs font-mono tabular-nums text-cream text-right focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                        />
-                        {overrideValue !== undefined && (
-                          <button
-                            type="button"
-                            aria-label={`Reset ${city.locationCode}`}
-                            onClick={() => {
-                              setDemandOverrides((prev) => {
-                                const next = { ...prev };
-                                delete next[city.locationCode];
-                                return next;
-                              });
-                              setSimResult(null);
-                            }}
-                            className="text-cream-30 hover:text-cream transition-colors"
-                          >
-                            <X className="size-3" />
-                          </button>
-                        )}
-                      </div>
+                      );
+                    })}
+                  </div>
+                  {demandOverrideCount > 0 && (
+                    <div className="flex items-center justify-between pt-2 border-t border-cream-8">
+                      <span className="text-xs text-cream-40 font-mono">
+                        {demandOverrideCount} metro override
+                        {demandOverrideCount > 1 ? "s" : ""}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDemandOverrides({});
+                          setSimResult(null);
+                        }}
+                        className="text-xs text-cream-40 hover:text-cream font-mono transition-colors"
+                      >
+                        Clear all
+                      </button>
                     </div>
-                  );
-                })}
-              </div>
-              {demandOverrideCount > 0 && (
-                <div className="flex items-center justify-between pt-2 border-t border-cream-8">
-                  <span className="text-xs text-cream-40 font-mono">
-                    {demandOverrideCount} metro override
-                    {demandOverrideCount > 1 ? "s" : ""}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDemandOverrides({});
-                      setSimResult(null);
-                    }}
-                    className="text-xs text-cream-40 hover:text-cream font-mono transition-colors"
-                  >
-                    Clear all
-                  </button>
-                </div>
+                  )}
+                  <p className="text-xs text-cream-30 font-mono leading-relaxed">
+                    Overrides set the validator count for a metro; the demand
+                    table is regenerated from the modified counts (matching
+                    mainnet ingest). Set to 0 to remove that metro&apos;s
+                    validator demand entirely.
+                  </p>
+                </>
               )}
-              <p className="text-xs text-cream-30 font-mono leading-relaxed">
-                Overrides scale traffic for all demand rows touching the
-                selected metro. Set to 0 to remove that metro&apos;s demand
-                entirely.
-              </p>
             </CardContent>
           )}
         </Card>

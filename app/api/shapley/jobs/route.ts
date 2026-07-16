@@ -3,6 +3,7 @@ import {
   getSnapshotUrl,
   MIN_DZ_EPOCH,
   SHAPLEY_SERVICE_URL,
+  SNAPSHOT_FETCH_TIMEOUT_MS,
 } from "@/lib/constants/config";
 import type { RawSnapshot } from "@/lib/types/snapshot";
 import type { ShapleyInput } from "@/lib/types/shapley";
@@ -10,10 +11,11 @@ import { parseSnapshot } from "@/lib/utils/snapshot-parser";
 import { buildShapleyInput } from "@/lib/utils/shapley-input-builder";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
 import { startSimulateJob } from "@/lib/utils/shapley-remote";
+import { modifyShapleyInput } from "@/lib/utils/shapley-input-modifier";
 import {
-  modifyShapleyInput,
-  type DemandOverrides,
-} from "@/lib/utils/shapley-input-modifier";
+  buildOverriddenInput,
+  normalizeDemandOverrides,
+} from "@/lib/utils/demand-overrides";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
 
 /**
@@ -69,14 +71,17 @@ export async function POST(request: NextRequest) {
 
   const safeRemoveLinks = Array.isArray(removeLinks) ? removeLinks : [];
   const safeAddLinks = Array.isArray(addLinks) ? addLinks : [];
-  const safeDemandOverrides: DemandOverrides =
-    demandOverrides && typeof demandOverrides === "object"
-      ? (demandOverrides as DemandOverrides)
-      : ({} as DemandOverrides);
+  const normalized = normalizeDemandOverrides(demandOverrides);
+  if (!normalized.ok) {
+    return NextResponse.json({ error: normalized.error }, { status: 400 });
+  }
+  const overrides = normalized.overrides;
 
   try {
     const url = getSnapshotUrl(epoch);
-    const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(SNAPSHOT_FETCH_TIMEOUT_MS),
+    });
     if (!res.ok) {
       return NextResponse.json(
         { error: `Epoch ${epoch} not found` },
@@ -95,14 +100,27 @@ export async function POST(request: NextRequest) {
       baselineInput = buildShapleyInput(raw, parsed);
     }
 
-    const modifiedInput = modifyShapleyInput(
+    // Demand overrides regenerate the demand table from override-patched
+    // city stats (DZ-parity) — only meaningful for canonical snapshots.
+    const overridden = buildOverriddenInput({
+      snap: raw,
       baselineInput,
+      overrides,
+      epoch,
+      canonical: canonical.canonical,
+      canonicalReason: canonical.reason,
+    });
+    if (!overridden.ok) {
+      return NextResponse.json({ error: overridden.error }, { status: 400 });
+    }
+
+    const modifiedInput = modifyShapleyInput(
+      overridden.input,
       parsed,
       raw,
       contributorCode,
       safeRemoveLinks,
-      safeAddLinks,
-      safeDemandOverrides
+      safeAddLinks
     );
 
     const jobId = await startSimulateJob(baselineInput, modifiedInput);

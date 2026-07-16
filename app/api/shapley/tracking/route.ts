@@ -4,6 +4,7 @@ import type { RawSnapshot } from "@/lib/types/snapshot";
 import type { ShapleyOutput } from "@/lib/types/shapley";
 import { parseSnapshot } from "@/lib/utils/snapshot-parser";
 import { buildShapleyInput } from "@/lib/utils/shapley-input-builder";
+import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
 import { getEpochAvailability } from "@/lib/utils/epoch-discovery";
 import { tryComputeShapleyRemote } from "@/lib/utils/shapley-remote";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
@@ -70,8 +71,13 @@ async function shapleyForEpoch(
     return { epoch, reason: "snapshot-fetch-failed" };
   }
 
-  const parsed = parseSnapshot(raw);
-  const input = buildShapleyInput(raw, parsed);
+  // Canonical builder (DZ-current, includes city_weights the per-city reward
+  // path requires). Heuristic fallback only for pre-canonical snapshots that
+  // lack start_us/metro_prices — those will be soft-skipped by the Rust guard.
+  const canonical = buildCanonicalShapleyInput(raw);
+  const input = canonical.canonical
+    ? canonical.input
+    : buildShapleyInput(raw, parseSnapshot(raw));
 
   const remote = await tryComputeShapleyRemote(input);
   if (!remote) {
