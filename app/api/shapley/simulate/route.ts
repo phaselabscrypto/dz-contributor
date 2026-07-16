@@ -3,6 +3,7 @@ import {
   getSnapshotUrl,
   MIN_DZ_EPOCH,
   SHAPLEY_SERVICE_URL,
+  SNAPSHOT_FETCH_TIMEOUT_MS,
 } from "@/lib/constants/config";
 import type { RawSnapshot } from "@/lib/types/snapshot";
 import type { ShapleyInput, ShapleyOutput } from "@/lib/types/shapley";
@@ -112,7 +113,9 @@ export async function POST(request: NextRequest) {
     let cached = baselineCache.get(epoch);
     if (!cached || Date.now() - cached.timestamp > CACHE_TTL) {
       const url = getSnapshotUrl(epoch);
-      const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(SNAPSHOT_FETCH_TIMEOUT_MS),
+      });
 
       if (!res.ok) {
         return NextResponse.json(

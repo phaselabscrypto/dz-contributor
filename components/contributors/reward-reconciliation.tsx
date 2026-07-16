@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import {
   useEconomicHub,
   useBaselineShapley,
+  isBaselineWarming,
 } from "@/lib/hooks/use-live";
 import { ehNameToCode } from "@/lib/constants/config";
 import { ArrowUpRight, ArrowDownRight, Minus, Info } from "lucide-react";
@@ -33,12 +34,19 @@ export function RewardReconciliation({ contributorCode }: Props) {
     );
   }, [hub, contributorCode]);
 
+  // Warming (202) means "not computed yet" — render as still-loading, never
+  // as a computed zero (the headline below claims "contributes no Shapley
+  // value" for livePct === 0, which would be false during warming).
+  const baselineReady =
+    baseline && !isBaselineWarming(baseline) ? baseline : null;
+
   const allTimePct = ehEntry?.rewardPercentage ?? 0;
-  const livePct = baseline?.values?.[contributorCode]?.share
-    ? baseline.values[contributorCode].share * 100
+  const livePct = baselineReady?.values?.[contributorCode]?.share
+    ? baselineReady.values[contributorCode].share * 100
     : 0;
 
-  if (hubLoading || baselineLoading) {
+  const baselineWarming = !!baseline && isBaselineWarming(baseline);
+  if (hubLoading || baselineLoading || baselineWarming) {
     return (
       <div className="border border-border bg-surface p-6">
         <LoadingState label="Reconciling reward share" />
@@ -46,7 +54,7 @@ export function RewardReconciliation({ contributorCode }: Props) {
     );
   }
 
-  if (!hub || !baseline) {
+  if (!hub || !baselineReady) {
     return null;
   }
 
@@ -100,7 +108,7 @@ export function RewardReconciliation({ contributorCode }: Props) {
           label="Latest-epoch share"
           value={livePct > 0 ? `${livePct.toFixed(2)}%` : "—"}
           sub={
-            baseline.method === "local-ts-heuristic-DEV-ONLY"
+            baselineReady.method === "local-ts-heuristic-DEV-ONLY"
               ? "TS heuristic (dev)"
               : "Rust solver"
           }

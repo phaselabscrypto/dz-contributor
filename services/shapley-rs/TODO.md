@@ -42,3 +42,17 @@ After deploying, add a CI step that runs it against the live service:
 ```bash
 ./tests/smoke.sh "https://<deployed-route-host>"
 ```
+
+## Detach the baseline store from the request handler
+
+A synchronous `/shapley` cold solve that gets cut by the router timeout (HAProxy
+30s → 504) runs to completion on its `spawn_blocking` thread but its result is
+DISCARDED: the store step in `compute_and_store_baseline` lives in the handler
+future, which axum drops on client disconnect. Consequence: user-triggered cold
+baseline requests burn full-length doomed solves, and the frontend's
+`202 warming` state can only heal via the 6-hourly precompute cron.
+
+Fix: wrap the cold path's solve+store in `tokio::spawn` (detached from the
+request future, mirroring the worker path's store at `worker.rs`) so a cut
+solve still lands in the memory+S3 cache — making warming self-heal on the
+first request instead of waiting for the cron.

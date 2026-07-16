@@ -60,10 +60,35 @@ function decodeResponse(data: RustShapleyResponse): ShapleyRemoteResult {
 }
 
 /**
+ * Typed failure from the Rust Shapley `/shapley` call: carries the upstream
+ * HTTP status (when a response arrived) and whether the failure was a
+ * client-side timeout. The baseline route's 202-warming vs 502 split hangs
+ * off these fields — see `ShapleyServiceError` in `epoch-shapley.ts`.
+ */
+export class RemoteSolveError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly timedOut: boolean = false,
+    cause?: unknown,
+  ) {
+    super(message);
+    this.name = "RemoteSolveError";
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+/**
+ * Upstream error bodies get truncated to this length: a HAProxy/OpenShift
+ * 504 page is kilobytes of HTML that would otherwise flood logs/Sentry.
+ */
+const MAX_ERROR_DETAIL_CHARS = 500;
+
+/**
  * Call the Rust Shapley service. Throws if `SHAPLEY_SERVICE_URL` is
- * unset, if the request fails, or if the response is not 2xx. The
- * thrown error message is intentionally specific so the caller can log
- * the underlying cause without re-wrapping.
+ * unset; throws `RemoteSolveError` if the request times out client-side
+ * or the response is not 2xx. The thrown error message is intentionally
+ * specific so the caller can log the underlying cause without re-wrapping.
  */
 export async function computeShapleyRemote(
   input: ShapleyInput,
@@ -78,18 +103,41 @@ export async function computeShapleyRemote(
     );
   }
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: buildHeaders(),
-    body: JSON.stringify(input),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: buildHeaders(),
+      body: JSON.stringify(input),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (err) {
+    // AbortSignal.timeout yields TimeoutError on current Node, AbortError on
+    // older lines (same two-name check as app/api/health/route.ts). Network
+    // failures (undici TypeError) pass through untyped → classified as hard.
+    if (
+      err instanceof Error &&
+      (err.name === "TimeoutError" || err.name === "AbortError")
+    ) {
+      throw new RemoteSolveError(
+        `Rust Shapley service timed out after ${TIMEOUT_MS}ms`,
+        undefined,
+        true,
+        err,
+      );
+    }
+    throw err;
+  }
 
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(
+    const detail = (await response.text().catch(() => "")).slice(
+      0,
+      MAX_ERROR_DETAIL_CHARS,
+    );
+    throw new RemoteSolveError(
       `Rust Shapley service HTTP ${response.status}` +
         (detail ? `: ${detail}` : ""),
+      response.status,
     );
   }
 

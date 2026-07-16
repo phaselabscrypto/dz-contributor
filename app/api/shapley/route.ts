@@ -7,6 +7,10 @@ import {
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
 import { reportError } from "@/lib/observability";
 
+// Same cold path as the baseline route (snapshot fetch + remote call) — must
+// survive past the upstream ~30s cut to return a typed error, not a raw 504.
+export const maxDuration = 60;
+
 export async function GET(request: NextRequest) {
   const limited = enforceRateLimit(request, {
     bucket: "shapley",

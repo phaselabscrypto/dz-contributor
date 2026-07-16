@@ -1,6 +1,10 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { getSnapshotUrl, MIN_DZ_EPOCH } from "@/lib/constants/config";
+import {
+  getSnapshotUrl,
+  MIN_DZ_EPOCH,
+  SNAPSHOT_FETCH_TIMEOUT_MS,
+} from "@/lib/constants/config";
+import { bearerMatches } from "@/lib/utils/cron-auth";
 import type { RawSnapshot } from "@/lib/types/snapshot";
 import { parseSnapshot } from "@/lib/utils/snapshot-parser";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
@@ -40,22 +44,6 @@ import { reportError } from "@/lib/observability";
 // mid-parse. 300s gives ample headroom (the sweep call itself is a sub-second
 // enqueue — the solves run on the service's worker pool, not here).
 export const maxDuration = 300;
-
-/**
- * Constant-time check of an `Authorization: Bearer <secret>` header against the
- * expected `CRON_SECRET`. Avoids leaking the secret via response-timing on the
- * first differing byte (`timingSafeEqual` requires equal-length buffers, so the
- * length check short-circuits unequal lengths — which reveals only length, not
- * content).
- */
-function bearerMatches(header: string | null, secret: string): boolean {
-  if (!header) return false;
-  const expected = Buffer.from(`Bearer ${secret}`);
-  const provided = Buffer.from(header);
-  return (
-    provided.length === expected.length && timingSafeEqual(provided, expected)
-  );
-}
 
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET;
@@ -103,10 +91,10 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // 120s: the 70MB snapshot download measured 7–27s locally — the old 30s
-    // abort had intermittent failure built in. Still well inside maxDuration.
+    // Shared 120s timeout (see SNAPSHOT_FETCH_TIMEOUT_MS for the measurement
+    // rationale). Still well inside maxDuration.
     const snapRes = await fetch(getSnapshotUrl(epoch), {
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(SNAPSHOT_FETCH_TIMEOUT_MS),
     });
     if (!snapRes.ok) {
       return NextResponse.json(

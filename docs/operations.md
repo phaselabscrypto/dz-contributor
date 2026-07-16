@@ -12,12 +12,13 @@ The frontend auto-deploys on every push to `main` via Vercel's GitHub integratio
 
 ### Cron jobs
 
-Two cron schedules are defined in `vercel.json`:
+Three cron schedules are defined in `vercel.json`:
 
 | Path | Schedule | Purpose |
 |------|----------|---------|
 | `/api/health` | `*/15 * * * *` (every 15 min) | Keep the function instance warm; also used by the `/status` page |
 | `/api/link-value/precompute` | `0 */6 * * *` (every 6 hours) | Cache-warming sweep for the latest epoch |
+| `/api/shapley/precompute` | `30 */6 * * *` (every 6 hours, offset 30 min) | Warm the latest epoch's baseline so `/api/shapley/baseline` serves cache hits |
 
 ### Precompute cron (`/api/link-value/precompute`)
 
@@ -28,6 +29,16 @@ Implemented in `app/api/link-value/precompute/route.ts`. Key behaviors:
 - **What it enqueues:** If the marker is absent, the handler fetches the ~70 MB epoch snapshot, builds the canonical Shapley input (same key derivation as the UI flow so cache keys align), enqueues one sweep job on the Rust service (`202 {job_id}`), and also enqueues a baseline precompute for the what-if simulator. Enqueued children run on the worker pool, not inside this function.
 - **`maxDuration = 300`:** The snapshot fetch + parse measured 7–27 s locally. Vercel's default function duration would kill the cron mid-parse; 300 s gives headroom for the worst-case download while keeping the actual enqueue sub-second. See the comment in `app/api/link-value/precompute/route.ts`.
 - **Error handling:** A `404` is returned when the epoch's snapshot does not exist upstream; other snapshot/upstream failures return `502`; a generic `500` covers everything else (raw error messages are not surfaced to avoid leaking the internal service host).
+
+### Precompute cron (`/api/shapley/precompute`)
+
+Implemented in `app/api/shapley/precompute/route.ts`. Warms the latest epoch's **baseline** (per-city Shapley) so `/api/shapley/baseline` and `/api/shapley?epoch=N` serve cache hits instead of triggering a cold synchronous solve inside a user request.
+
+- **Auth:** same `CRON_SECRET` bearer check as the link-value cron (shared helper `lib/utils/cron-auth.ts`, constant-time compare). Unset secret → `503`; mismatch → `401`. Rate-limited per IP before the auth check. Manual backfill: `?epoch=N` with a valid bearer token.
+- **What it enqueues:** builds the same canonical input the compute routes build, then `POST {service}/precompute` — the Rust service answers `200 {status: "already-cached"}` (input-hash hit) or `202 {status: "accepted", job_id}` and the solve runs on the worker pool. Idempotent per input hash.
+- **Status codes:** `422` when the epoch's snapshot only supports the heuristic builder (no `city_weights` — cannot warm); `404` when the snapshot doesn't exist; a `JobStartError` from the service passes its upstream status through (e.g. the service's `503` = async jobs disabled); other failures → `502`. Outcomes are logged (`[shapley/precompute] epoch=… status=…`) so a stuck cron is visible in Vercel logs.
+- **`maxDuration = 300`:** same rationale as the link-value cron (snapshot fetch + parse dominate; the enqueue is sub-second).
+- **Relation to the baseline route's 202:** while the latest epoch is not yet warmed, `/api/shapley/baseline` responds `202 {status: "warming", …}`. A cut synchronous solve does NOT populate the cache (the handler's store step is discarded on disconnect), so this cron is the only healing mechanism — sustained warming responses mean this cron is broken.
 
 ---
 
@@ -94,7 +105,7 @@ Consumed by the Next.js server-side code. Set via `vercel env add <NAME> product
 | `DZ_CONTRIBUTOR_REWARDS_PREFIX` | `dz_contributor_rewards` | Seed prefix for deriving each epoch's reward record address. Confirmed by DZ Foundation 2026-05-14. Default hardcoded in the record module. | Uses the hardcoded default. |
 | `ONCHAIN_ENABLED` | unset (effectively disabled) | Master switch for `/api/onchain/*` routes. Derived in `lib/onchain/program-ids.ts` as `Boolean(DZ_REGISTRY_PROGRAM_ID) \|\| process.env.ONCHAIN_ENABLED === "1"` — only the literal string `"1"` enables it; setting `DZ_REGISTRY_PROGRAM_ID` enables it implicitly. | On-chain routes return 503 with a stable error shape. |
 | `DZ_ACCOUNT_HAS_DISCRIMINATOR` | `"1"` | Whether on-chain accounts carry an 8-byte Anchor discriminator prefix before the borsh payload. Set to `"0"` for raw borsh structs. | Assumes discriminator present (strip 8 bytes before decode). |
-| `CRON_SECRET` | — | Secret Vercel injects into cron invocations as `Authorization: Bearer ${CRON_SECRET}`. Required for the precompute cron; checked with `timingSafeEqual` in `app/api/link-value/precompute/route.ts`. | Precompute route returns `503 { "error": "CRON_SECRET not configured" }` on every invocation, disabling the sweep. |
+| `CRON_SECRET` | — | Secret Vercel injects into cron invocations as `Authorization: Bearer ${CRON_SECRET}`. Required for BOTH precompute crons (`/api/link-value/precompute`, `/api/shapley/precompute`); checked with the shared constant-time helper in `lib/utils/cron-auth.ts`. | Both precompute routes return `503 { "error": "CRON_SECRET not configured" }` on every invocation, disabling cache warming — the baseline route then answers `202 warming` until a manual backfill. |
 | `NEXT_PUBLIC_SITE_URL` | `https://dz-contributor.vercel.app` | Used by `app/layout.tsx` for `metadataBase` and OG image canonical URLs. | Falls back to the Vercel project default URL. |
 | `NEXT_PUBLIC_SENTRY_DSN` | — | Sentry DSN for error tracking. The SDK calls in `lib/observability.ts` are no-ops until activated. | Errors log to console in dev; swallowed in production. |
 
@@ -228,3 +239,10 @@ curl -H "Authorization: Bearer <CRON_SECRET>" \
 ```
 
 Poll `GET {shapley-service}/jobs/{sweep_job_id}` for the sweep summary.
+
+The `/api/shapley/precompute` cron (30 minutes offset) warms the baseline the same way; its manual backfill is:
+
+```bash
+curl -H "Authorization: Bearer <CRON_SECRET>" \
+  "https://your-deploy.vercel.app/api/shapley/precompute?epoch=<N>"
+```
