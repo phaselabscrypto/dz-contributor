@@ -65,8 +65,9 @@ export async function GET(request: NextRequest) {
     });
   } catch (err) {
     reportError(err, { source: "api/snapshot", extras: { epoch } });
+    // Generic to the client — ${err} can carry upstream fetch detail.
     return NextResponse.json(
-      { error: `Failed to fetch snapshot: ${err}` },
+      { error: "Failed to fetch snapshot" },
       { status: 500 }
     );
   }

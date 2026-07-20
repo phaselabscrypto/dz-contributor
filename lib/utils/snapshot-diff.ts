@@ -125,6 +125,23 @@ export function extractDiffShape(raw: RawSnapshot): ParsedForDiff {
   return { epoch: raw.dz_epoch, links, contributors };
 }
 
+/**
+ * Client-safe message for a failed diff snapshot fetch. The known
+ * "epoch N: snapshot HTTP M" shape thrown by {@link fetchAndParseForDiff}
+ * is echoed verbatim (it is how the UI reports a missing epoch and names
+ * nothing internal); everything else is genericized — unexpected errors
+ * can carry hosts or config details that must not reach a public client.
+ */
+export function publicDiffFetchError(err: unknown): string {
+  if (
+    err instanceof Error &&
+    /^epoch \d+: snapshot HTTP \d+$/.test(err.message)
+  ) {
+    return err.message;
+  }
+  return "snapshot fetch failed";
+}
+
 export async function fetchAndParseForDiff(
   epoch: number,
 ): Promise<ParsedForDiff> {

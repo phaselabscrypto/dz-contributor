@@ -16,7 +16,8 @@ export async function GET(
 ) {
   if (!SHAPLEY_SERVICE_URL) {
     return NextResponse.json(
-      { error: "SHAPLEY_SERVICE_URL not configured" },
+      // Config-state 503: generic to the client (the env-var name is internal).
+      { error: "Simulation service is not available" },
       { status: 503 }
     );
   }

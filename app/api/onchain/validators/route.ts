@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { ONCHAIN_ENABLED } from "@/lib/onchain/program-ids";
 import { fetchOnchainValidatorPayouts } from "@/lib/onchain/validators";
+import { reportError } from "@/lib/observability";
 
 /**
  * GET /api/onchain/validators
@@ -27,11 +28,12 @@ export async function GET() {
     const history = await fetchOnchainValidatorPayouts();
     return NextResponse.json(history);
   } catch (err) {
+    // Full detail server-side only — the message can carry RPC config
+    // guidance / hostnames that must not reach the public client.
+    reportError(err, { source: "api/onchain/validators" });
     return NextResponse.json(
       {
-        error: `On-chain validator payout fetch failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        error: "On-chain validator payout fetch failed",
         epochs: [],
         source: "stub",
       },

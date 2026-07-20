@@ -35,7 +35,9 @@ export async function POST(request: NextRequest) {
 
   if (!SHAPLEY_SERVICE_URL) {
     return NextResponse.json(
-      { error: "SHAPLEY_SERVICE_URL not configured" },
+      // Config-state 503: generic to the client (the env-var name is
+      // internal); /api/health shows shapley-service: disabled for ops.
+      { error: "Simulation service is not available" },
       { status: 503 }
     );
   }

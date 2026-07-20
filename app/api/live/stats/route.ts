@@ -53,9 +53,9 @@ export async function GET() {
     return NextResponse.json(data);
   } catch (err) {
     reportError(err, { source: "api/live/stats" });
-    const msg = err instanceof Error ? err.message : String(err);
+    // Generic to the client — the message can name the upstream host.
     return NextResponse.json(
-      { error: `Stats fetch failed: ${msg}` },
+      { error: "Stats fetch failed" },
       { status: 502 },
     );
   }

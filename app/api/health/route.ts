@@ -15,13 +15,18 @@ import type { SourceHealth, SourceErrorCode } from "@/lib/types/health";
  *
  * The public response intentionally returns only:
  *   - a stable `name` (the upstream identifier)
- *   - a `host` (hostname only — never a path, query, or token)
+ *   - a `host` (hostname only — never a path, query, or token), and ONLY
+ *     for the hardcoded public upstreams (malbec, doublezero.xyz), whose
+ *     hosts are already in this public repo's source. Backends configured
+ *     via env vars (shapley-service, solana-rpc) report the literal
+ *     "(internal)" — their hostnames are deployment secrets.
  *   - the probe `status`, `latencyMs`, `httpStatus`
  *   - a categorized `errorCode` when failing (never raw error text)
  *
  * Full URLs, paths, and auth tokens never leave the server — they
  * stay inside the probe closure. This is a hardening fix for the
- * code review finding H17.
+ * code review finding H17 (host redaction extended in the PR #4
+ * information-disclosure pass).
  *
  * The wire shape (`SourceHealth`, `SourceErrorCode`) lives in
  * `lib/types/health.ts` and is shared with the client hook so the
@@ -55,8 +60,11 @@ async function probe(
   name: string,
   url: string,
   init?: RequestInit,
+  // Overrides the reported host — pass "(internal)" for env-configured
+  // backends whose hostname must not appear in the public body.
+  displayHost?: string,
 ): Promise<SourceHealth> {
-  const host = hostOnly(url);
+  const host = displayHost ?? hostOnly(url);
   const start = Date.now();
   try {
     const res = await fetch(url, {
@@ -92,16 +100,23 @@ async function probe(
 }
 
 async function probeRpc(name: string, url: string): Promise<SourceHealth> {
-  return probe(name, url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "getHealth",
-      params: [],
-    }),
-  });
+  return probe(
+    name,
+    url,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getHealth",
+        params: [],
+      }),
+    },
+    // The RPC endpoint is an env-configured (possibly paid) provider —
+    // its hostname stays out of the public body.
+    "(internal)",
+  );
 }
 
 export async function GET() {
@@ -115,13 +130,14 @@ export async function GET() {
   if (SHAPLEY_SERVICE_URL) {
     const healthUrl = shapleyEndpointUrl("/health");
     if (healthUrl) {
-      probes.push(probe("shapley-service", healthUrl));
+      // Env-configured internal service — hostname stays out of the body.
+      probes.push(probe("shapley-service", healthUrl, undefined, "(internal)"));
     }
   } else {
     probes.push(
       Promise.resolve({
         name: "shapley-service",
-        host: "(not configured)",
+        host: "(internal)",
         status: "disabled",
         latencyMs: null,
       }),
@@ -138,7 +154,7 @@ export async function GET() {
     probes.push(
       Promise.resolve({
         name: "solana-rpc",
-        host: "(not configured)",
+        host: "(internal)",
         status: "disabled",
         latencyMs: null,
       }),

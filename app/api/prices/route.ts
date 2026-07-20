@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { reportError } from "@/lib/observability";
 
 const JUPITER_PRICE_URL = "https://lite-api.jup.ag/price/v3";
 const TWO_Z_MINT = "J6pQQ3FAcJQeWPPGppWRb4nM8jU3wLyYbRrLh7feMfvd";
@@ -62,9 +63,10 @@ export async function GET() {
     cache = { data, timestamp: Date.now() };
     return NextResponse.json(data);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    // Full detail server-side only — upstream errors can name hosts/keys.
+    reportError(err, { source: "api/prices" });
     return NextResponse.json(
-      { error: `Failed to fetch prices: ${msg}` },
+      { error: "Failed to fetch prices" },
       { status: 500 },
     );
   }

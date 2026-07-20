@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getContributorDirectory } from "@/lib/onchain/contributor-directory";
+import { reportError } from "@/lib/observability";
 
 /**
  * GET /api/onchain/contributors
@@ -22,11 +23,12 @@ export async function GET() {
       },
     });
   } catch (err) {
+    // Full detail server-side only — the message can carry RPC config
+    // guidance / hostnames that must not reach the public client.
+    reportError(err, { source: "api/onchain/contributors" });
     return NextResponse.json(
       {
-        error: `Failed to fetch contributor directory: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        error: "Failed to fetch contributor directory",
         contributors: [],
         ownerToCode: {},
         codeToOwner: {},

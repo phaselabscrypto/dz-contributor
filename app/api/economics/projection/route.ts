@@ -89,8 +89,9 @@ export async function GET(request: Request) {
     hub = await fetchEconomicHub();
   } catch (err) {
     reportError(err, { source: "api/economics/projection", extras: { horizon } });
+    // Generic to the client — the message can name the upstream host.
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
+      { error: "Economic-hub fetch failed" },
       { status: 502 },
     );
   }
