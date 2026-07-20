@@ -95,11 +95,17 @@ export async function POST(request: NextRequest) {
       source: "api/link-value/jobs",
       extras: { epoch, contributorCode },
     });
-    const message = err instanceof Error ? err.message : String(err);
     // Propagate the upstream status instead of collapsing to 500: the Rust
     // 503 ("async jobs disabled") and 422 (player cap / validation) are
-    // distinct, actionable failures and must stay distinguishable.
+    // distinct, actionable failures and must stay distinguishable. Only 4xx
+    // BODIES pass through (the service's own validation feedback, safe to
+    // show); 5xx bodies can name internal state (e.g. Redis configuration)
+    // and are genericized — the status code alone carries the distinction.
     if (err instanceof JobStartError) {
+      const message =
+        err.status < 500
+          ? err.message
+          : "link-value jobs are temporarily unavailable";
       return NextResponse.json({ error: message }, { status: err.status });
     }
     // Generic on the catch-all 500 — a raw connection error can name the

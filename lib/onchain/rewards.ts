@@ -57,7 +57,9 @@ export interface OnchainRewardHistory {
   epochs: OnchainEpochReward[];
   source: "onchain";
   fetchedAt: string;
-  rpcUrl: string;
+  // NO rpcUrl here: this shape is served verbatim by /api/onchain/rewards,
+  // and the resolved URL embeds the provider API key in its path — it
+  // leaked a live Alchemy key to the public until removed (2026-07-21).
 }
 
 function rewardShareToPayload(r: RewardShare): OnchainContributorPayout {
@@ -185,6 +187,5 @@ export async function fetchOnchainRewardHistory(
     epochs,
     source: "onchain",
     fetchedAt: new Date().toISOString(),
-    rpcUrl,
   };
 }

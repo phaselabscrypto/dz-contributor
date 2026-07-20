@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { fetchOnchainTopology, isOnchainReady } from "@/lib/onchain/topology";
 import { OnchainNotConfigured } from "@/lib/onchain/decoders";
+import { reportError } from "@/lib/observability";
 
 export const revalidate = 60;
 export const dynamic = "force-dynamic";
@@ -12,12 +13,10 @@ export const dynamic = "force-dynamic";
  */
 export async function GET() {
   if (!isOnchainReady()) {
+    // Deliberately vague: the activation checklist (env-var names etc.)
+    // lives in lib/onchain/README.md, not in a public API response.
     return NextResponse.json(
-      {
-        ready: false,
-        reason:
-          "On-chain reader not configured. Set DZ_REGISTRY_PROGRAM_ID + ONCHAIN_ENABLED=1 once DZ ships the IDL.",
-      },
+      { ready: false, reason: "On-chain reads are not configured" },
       { status: 503 },
     );
   }
@@ -31,16 +30,16 @@ export async function GET() {
     });
   } catch (err) {
     if (err instanceof OnchainNotConfigured) {
+      // Expected disabled state — stable reason, activation details stay
+      // in the error message server-side (lib/onchain/decoders.ts).
       return NextResponse.json(
-        { ready: false, reason: err.message },
+        { ready: false, reason: "On-chain reads are not configured" },
         { status: 503 },
       );
     }
+    reportError(err, { source: "api/onchain/topology" });
     return NextResponse.json(
-      {
-        ready: false,
-        reason: err instanceof Error ? err.message : String(err),
-      },
+      { ready: false, reason: "On-chain topology fetch failed" },
       { status: 500 },
     );
   }

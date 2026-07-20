@@ -4,6 +4,7 @@ import {
   fetchOnchainRewardHistory,
 } from "@/lib/onchain/rewards";
 import { LruCache } from "@/lib/utils/lru-cache";
+import { reportError } from "@/lib/observability";
 
 /**
  * GET /api/onchain/rewards
@@ -64,11 +65,12 @@ export async function GET(request: NextRequest) {
     cache.set(cacheKey, history);
     return NextResponse.json(history);
   } catch (err) {
+    // Full detail server-side only — the message can carry RPC config
+    // guidance / hostnames that must not reach the public client.
+    reportError(err, { source: "api/onchain/rewards" });
     return NextResponse.json(
       {
-        error: `On-chain reward fetch failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        error: "On-chain reward fetch failed",
         source: "stub",
       },
       { status: 502 },
