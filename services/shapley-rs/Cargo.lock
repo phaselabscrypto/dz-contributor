@@ -1829,7 +1829,7 @@ dependencies = [
 [[package]]
 name = "network-shapley"
 version = "0.3.0"
-source = "git+https://github.com/phaselabscrypto/network-shapley-rs?rev=d813bc0699f5cfefabeece12caa349335b1f13e4#d813bc0699f5cfefabeece12caa349335b1f13e4"
+source = "git+https://github.com/phaselabscrypto/network-shapley-rs?rev=bb5a24e034daf9ad6680e393df85eaf6f20d987e#bb5a24e034daf9ad6680e393df85eaf6f20d987e"
 dependencies = [
  "csv",
  "highs",
