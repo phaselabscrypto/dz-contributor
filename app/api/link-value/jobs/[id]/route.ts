@@ -18,7 +18,7 @@ export async function GET(
 ) {
   if (!SHAPLEY_SERVICE_URL) {
     return NextResponse.json(
-      { error: "SHAPLEY_SERVICE_URL not configured" },
+      { error: "Link-value service is not available" },
       { status: 503 },
     );
   }
@@ -72,7 +72,7 @@ export async function DELETE(
 ) {
   if (!SHAPLEY_SERVICE_URL) {
     return NextResponse.json(
-      { error: "SHAPLEY_SERVICE_URL not configured" },
+      { error: "Link-value service is not available" },
       { status: 503 },
     );
   }

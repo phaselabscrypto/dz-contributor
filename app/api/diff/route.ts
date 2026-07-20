@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   fetchAndParseForDiff,
+  publicDiffFetchError,
   type LinkRef as DiffLinkRef,
 } from "@/lib/utils/snapshot-diff";
 import { getSnapshotUrl } from "@/lib/constants/config";
@@ -146,7 +147,7 @@ export async function GET(request: Request) {
   } catch (err) {
     reportError(err, { source: "api/diff", extras: { from, to } });
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
+      { error: publicDiffFetchError(err) },
       { status: 502 },
     );
   }

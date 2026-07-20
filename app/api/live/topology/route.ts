@@ -10,9 +10,9 @@ export async function GET() {
     return NextResponse.json(data);
   } catch (err) {
     reportError(err, { source: "api/live/topology" });
-    const msg = err instanceof Error ? err.message : String(err);
+    // Generic to the client — the message can name the upstream host.
     return NextResponse.json(
-      { error: `Topology fetch failed: ${msg}` },
+      { error: "Topology fetch failed" },
       { status: 502 },
     );
   }

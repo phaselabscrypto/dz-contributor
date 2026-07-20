@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   fetchAndParseForDiff,
   computeDiff,
+  publicDiffFetchError,
 } from "@/lib/utils/snapshot-diff";
 import { getContributorDisplayName } from "@/lib/constants/config";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
@@ -69,7 +70,7 @@ export async function GET(
   } catch (err) {
     reportError(err, { source: "api/diff/contributor", extras: { code, from, to } });
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
+      { error: publicDiffFetchError(err) },
       { status: 502 },
     );
   }

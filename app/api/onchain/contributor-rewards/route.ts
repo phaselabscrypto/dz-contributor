@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { fetchOnchainRewardHistory } from "@/lib/onchain/rewards";
 import { resolveContributorOwner } from "@/lib/onchain/contributor-directory";
 import { LruCache } from "@/lib/utils/lru-cache";
+import { reportError } from "@/lib/observability";
 
 /**
  * GET /api/onchain/contributor-rewards?code=<contributorCode>
@@ -41,11 +42,15 @@ export async function GET(request: Request) {
     try {
       ownerKey = await resolveContributorOwner(code);
     } catch (err) {
+      // Full detail (which can include RPC config guidance / hostnames) is
+      // reported server-side only — never echoed to the public client.
+      reportError(err, {
+        source: "api/onchain/contributor-rewards",
+        extras: { code, phase: "directory-resolve" },
+      });
       return NextResponse.json(
         {
-          error: `Failed to resolve contributor directory: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          error: "Failed to resolve contributor directory",
           code,
           epochs: [],
         },
@@ -106,12 +111,16 @@ export async function GET(request: Request) {
       },
     });
   } catch (err) {
+    reportError(err, {
+      source: "api/onchain/contributor-rewards",
+      extras: { code: resolvedCode, phase: "reward-history" },
+    });
     return NextResponse.json(
       {
         code: resolvedCode,
         ownerKey,
         epochs: [],
-        error: err instanceof Error ? err.message : String(err),
+        error: "On-chain reward fetch failed",
       },
       { status: 502 },
     );

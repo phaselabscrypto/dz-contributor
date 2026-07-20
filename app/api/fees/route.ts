@@ -44,8 +44,9 @@ export async function GET() {
     });
   } catch (err) {
     reportError(err, { source: "api/fees" });
+    // Generic to the client — ${err} can carry upstream fetch detail.
     return NextResponse.json(
-      { error: `Failed to fetch fees: ${err}` },
+      { error: "Failed to fetch fees" },
       { status: 500 }
     );
   }

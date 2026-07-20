@@ -30,9 +30,9 @@ export async function GET() {
     });
   } catch (err) {
     reportError(err, { source: "api/live/economic-hub" });
-    const msg = err instanceof Error ? err.message : String(err);
+    // Generic to the client — the message can name the upstream host.
     return NextResponse.json(
-      { error: `Economic-hub fetch failed: ${msg}` },
+      { error: "Economic-hub fetch failed" },
       { status: 502 },
     );
   }
