@@ -16,6 +16,10 @@ import {
   buildOverriddenInput,
   normalizeDemandOverrides,
 } from "@/lib/utils/demand-overrides";
+import {
+  normalizeLinkEdits,
+  validateLinkEditsAgainstSnapshot,
+} from "@/lib/utils/link-edits";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
 
 /**
@@ -71,8 +75,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const safeRemoveLinks = Array.isArray(removeLinks) ? removeLinks : [];
-  const safeAddLinks = Array.isArray(addLinks) ? addLinks : [];
+  const linkEdits = normalizeLinkEdits(addLinks, removeLinks);
+  if (!linkEdits.ok) {
+    return NextResponse.json({ error: linkEdits.error }, { status: 400 });
+  }
   const normalized = normalizeDemandOverrides(demandOverrides);
   if (!normalized.ok) {
     return NextResponse.json({ error: normalized.error }, { status: 400 });
@@ -116,13 +122,24 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: overridden.error }, { status: 400 });
     }
 
+    const linkCheck = validateLinkEditsAgainstSnapshot({
+      raw,
+      parsed,
+      contributorCode,
+      addLinks: linkEdits.addLinks,
+      removeLinks: linkEdits.removeLinks,
+    });
+    if (!linkCheck.ok) {
+      return NextResponse.json({ error: linkCheck.error }, { status: 400 });
+    }
+
     const modifiedInput = modifyShapleyInput(
       overridden.input,
       parsed,
       raw,
       contributorCode,
-      safeRemoveLinks,
-      safeAddLinks
+      linkEdits.removeLinks,
+      linkEdits.addLinks
     );
 
     const jobId = await startSimulateJob(baselineInput, modifiedInput);

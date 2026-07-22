@@ -28,6 +28,12 @@ export const MIN_DZ_EPOCH = 48;
 // broken down link-by-link by either implementation — gate before requesting.
 export const MAX_BREAKDOWN_FOCUS_LINKS = 19;
 
+// Sentinel contributorCode for the "new contributor" what-if in the simulator.
+// Intentionally absent from parsed.contributors — the modifier stamps new
+// devices with this operator id. Link-edit validation must accept it (with an
+// empty removeLinks) rather than rejecting it as an unknown contributor.
+export const NEW_CONTRIBUTOR_SIM_CODE = "new_contributor_sim";
+
 // Canonical Shapley solver service.
 //
 // `SHAPLEY_SERVICE_URL` should point at the Rust microservice in
