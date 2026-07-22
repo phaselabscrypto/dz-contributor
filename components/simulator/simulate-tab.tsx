@@ -19,6 +19,7 @@ import {
   CONTRIBUTOR_SHARE,
   EPOCHS_PER_MONTH,
   EPOCHS_PER_YEAR,
+  NEW_CONTRIBUTOR_SIM_CODE,
 } from "@/lib/constants/config";
 import dynamic from "next/dynamic";
 import { findCoverageGaps } from "@/lib/utils/demand";
@@ -285,6 +286,11 @@ export function SimulateTab({
 
   const addLink = () => {
     if (!newCityA || !newCityZ || newCityA === newCityZ) return;
+    // Intra-metro links are a solver no-op (rejected server-side); don't let
+    // the user stage a draft the API will 400 on.
+    const metroA = locationToMetro.get(newCityA);
+    const metroZ = locationToMetro.get(newCityZ);
+    if (metroA !== undefined && metroA === metroZ) return;
     setAddedLinks((prev) => [
       ...prev,
       {
@@ -313,7 +319,7 @@ export function SimulateTab({
     setSimReconnecting(false);
     cancelledRef.current = false;
     jobIdRef.current = null;
-    const apiCode = isNewContributor ? `new_contributor_sim` : contributorCode;
+    const apiCode = isNewContributor ? NEW_CONTRIBUTOR_SIM_CODE : contributorCode;
     try {
       // 1) Start the background job (returns immediately with a job id).
       const startRes = await fetch("/api/shapley/jobs", {
@@ -327,7 +333,19 @@ export function SimulateTab({
           demandOverrides,
         }),
       });
-      if (!startRes.ok) throw new Error(await startRes.text());
+      if (!startRes.ok) {
+        // Surface the API's `{ error }` message cleanly (validation 400s carry
+        // a self-explaining string); fall back to raw text if it isn't JSON.
+        const bodyText = await startRes.text();
+        let message = bodyText;
+        try {
+          const parsed = JSON.parse(bodyText) as { error?: string };
+          if (parsed?.error) message = parsed.error;
+        } catch {
+          /* not JSON — use the raw text */
+        }
+        throw new Error(message);
+      }
       const { jobId } = (await startRes.json()) as { jobId: string };
       jobIdRef.current = jobId;
 
@@ -948,7 +966,12 @@ export function SimulateTab({
               </div>
               <button
                 onClick={addLink}
-                disabled={!newCityA || !newCityZ || newCityA === newCityZ}
+                disabled={
+                  !newCityA ||
+                  !newCityZ ||
+                  newCityA === newCityZ ||
+                  draftEndpointsSameMetro
+                }
                 className="rounded-lg bg-cream-8 border border-cream-15 px-4 py-2 text-sm text-cream-60 hover:text-cream hover:bg-cream-10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               >
                 <Plus className="size-4 inline mr-1" />
@@ -1455,7 +1478,7 @@ export function SimulateTab({
                     const bPct = roundPct(c.beforeShare);
                     const aPct = roundPct(c.afterShare);
                     const dPct = Math.round((aPct - bPct) * 100) / 100;
-                    const apiCode = isNewContributor ? "new_contributor_sim" : contributorCode;
+                    const apiCode = isNewContributor ? NEW_CONTRIBUTOR_SIM_CODE : contributorCode;
                     const isTarget = c.code === apiCode;
                     return (
                       <div
@@ -1469,7 +1492,7 @@ export function SimulateTab({
                           style={{ backgroundColor: getContributorColor(c.code) }}
                         />
                         <span className={`flex-1 ${isTarget ? "text-cream font-medium" : "text-cream-60"}`}>
-                          {c.code === "new_contributor_sim" ? "You (new)" : getContributorDisplayName(c.code)}
+                          {c.code === NEW_CONTRIBUTOR_SIM_CODE ? "You (new)" : getContributorDisplayName(c.code)}
                         </span>
                         <span className="text-cream-40 tabular-nums">
                           {fmtPct(bPct)}
