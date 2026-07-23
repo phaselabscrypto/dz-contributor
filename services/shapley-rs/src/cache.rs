@@ -269,6 +269,84 @@ impl S3Cache {
         });
     }
 
+    /// Derive the S3 object key for a cached simulate (what-if) result.
+    ///
+    /// Keyed by the WHOLE `SimulateRequest` payload hash (`queue::hash_payload`,
+    /// identical to the stream entry's `input_hash`) — baseline AND modified
+    /// together determine the result. Distinct `simulate-` prefix so it can
+    /// never collide with the baseline `cache-` or `link-estimate-` keys;
+    /// `.json` (not bincode) because the simulate pipeline is kind-agnostic
+    /// `serde_json::Value` and bincode cannot round-trip `Value`. Epoch inputs
+    /// are immutable, so entries are valid forever; the `v3` engine-version
+    /// prefix still applies.
+    fn simulate_key(payload_hash: u64) -> String {
+        format!("shapley/v3/simulate-{payload_hash:016x}.json")
+    }
+
+    /// Load a cached simulate result from S3, if present and it parses as JSON.
+    /// A corrupt object is logged and treated as a miss (recompute) — same
+    /// posture as `jobs::RedisJobStore::result_cache_get`.
+    pub async fn load_simulate(&self, payload_hash: u64) -> Option<serde_json::Value> {
+        let key = Self::simulate_key(payload_hash);
+        match self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let bytes = resp.body.collect().await.ok()?.into_bytes();
+                match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    Ok(cached) => {
+                        tracing::info!(%key, "loaded simulate from S3");
+                        Some(cached)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, %key,
+                            "failed to deserialize S3 simulate — treating as miss");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, %key, "no simulate in S3");
+                None
+            }
+        }
+    }
+
+    /// Persist a simulate result to S3 in the background. Best-effort: failures
+    /// are logged loudly but never fail the compute that produced the result
+    /// (the Redis result cache still covers the next hour either way). The JSON
+    /// bytes match the Redis result-cache representation exactly, so an S3 hit
+    /// at submit and a Redis hit at pickup republish a byte-identical response.
+    pub fn store_simulate(&self, payload_hash: u64, resp: &serde_json::Value) {
+        let key = Self::simulate_key(payload_hash);
+        let bytes = resp.to_string().into_bytes();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        tokio::spawn(async move {
+            let size = bytes.len();
+            match client
+                .put_object()
+                .bucket(&bucket)
+                .key(&key)
+                .body(bytes.into())
+                .send()
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(%key, size_bytes = size, "stored simulate to S3")
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, %key, "failed to store simulate to S3")
+                }
+            }
+        });
+    }
+
     /// Derive the S3 object key for an epoch-sweep completion marker.
     ///
     /// The tag is opaque caller input (e.g. `epoch-149:canonical-v1:{fp}`), so
@@ -369,5 +447,18 @@ impl S3CacheRef {
             Ok(_) => tracing::info!(%key, size_bytes = size, "stored cache to S3"),
             Err(e) => tracing::error!(error = %e, "failed to store cache to S3"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::S3Cache;
+
+    #[test]
+    fn simulate_key_is_zero_padded_hex_under_v3_json() {
+        assert_eq!(
+            S3Cache::simulate_key(0xdead_beef),
+            "shapley/v3/simulate-00000000deadbeef.json"
+        );
     }
 }

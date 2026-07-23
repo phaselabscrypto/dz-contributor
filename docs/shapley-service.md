@@ -168,7 +168,7 @@ Keys in the diagram are shown without their `shapley:whatif:` / `shapley:linkest
 
 ## Redis keyspace
 
-Source of truth: the **constants** in `src/queue.rs` and `src/jobs.rs`. (The narrative keyspace comment at the top of `src/queue.rs` still shows the original 600 s state/cancel TTLs; the shipped constant `JOB_TTL_SECS = 1800` is what the code uses — the table below reflects the code.)
+Source of truth: the **constants** in `src/queue.rs` and `src/jobs.rs` (`JOB_TTL_SECS` for running states and `TERMINAL_TTL_SECS` for terminal states); the table below reflects the code.
 
 | Key pattern | Type | TTL | Purpose |
 |---|---|---|---|
@@ -176,9 +176,10 @@ Source of truth: the **constants** in `src/queue.rs` and `src/jobs.rs`. (The nar
 | `shapley:whatif:dead` | Stream | — | Dead-letter; poison entries (schema mismatch or delivery count > 3) |
 | `shapley:whatif:payload:{job_id}` | String | 3600 s (sweep payloads: 86400 s) | Serialized request body (store-and-reference; never inlined into the stream). Sweep payloads use a 24 h TTL and are refreshed by the worker on every child pickup so a deep queue cannot outlast the payload. |
 | `shapley:whatif:result:{hash}` | String | 3600 s | Idempotency cache keyed by the whole-request payload hash (hex); prevents recompute on redelivery |
-| `shapley:whatif:state:{job_id}` | Hash | 1800 s | Fields: `state`, `coalitions_solved`, `samples_done`, `max_samples`, `batch_samples`, `batch_total`, `batch_solved`, `phase`, `result` (done), `error` (failed); TTL refreshed on every bridge heartbeat |
-| `shapley:whatif:cancel:{job_id}` | String | 1800 s | Cancel flag (`"1"`); a separate key so progress flushes can never clobber a concurrent cancel (ADR C4 note in `src/queue.rs`) |
+| `shapley:whatif:state:{job_id}` | Hash | 1800 s (running) · 86400 s (terminal) | Fields: `state`, `coalitions_solved`, `samples_done`, `max_samples`, `batch_samples`, `batch_total`, `batch_solved`, `phase`, `result` (done), `error` (failed). Running state TTL is heartbeat-refreshed. Terminal states (done/failed/cancelled) expire at 86400 s so completed results stay pollable for 24 h (PSYS-557); for longer-lived retrieval, load from the S3 result store (see below). |
+| `shapley:whatif:cancel:{job_id}` | String | 1800 s | Cancel flag (`"1"`); a separate key so progress flushes can never clobber a concurrent cancel (ADR C4 note in `src/queue.rs`); only meaningful while a job is running |
 | `shapley:linkest:inflight:{hash}` | String | 86400 s | In-flight dedup claim for link-estimate solves; `SET NX EX`; cleared by the worker on terminal states; TTL is a crash backstop only |
+| `shapley/v3/simulate-{hash}.json` (S3) | JSON | — | Cached simulate result, persisted forever by input hash (hex). Re-running any previously-solved scenario completes at submit time (PSYS-557). Keyed by the whole-request payload hash, identical to the queue entry's `input_hash`. An optional out-of-repo S3 lifecycle rule can expire old results. |
 
 **Stream entry fields** (flat key/value pairs on the stream entry, defined in `src/queue.rs` `field` module):
 

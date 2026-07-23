@@ -1,6 +1,12 @@
 "use client";
 
 import { useState, useMemo, useRef, useEffect } from "react";
+import { useQueryState, createParser } from "nuqs";
+import {
+  parseAsRemovedLinks,
+  parseAsAddedLinks,
+  parseAsDemandOverrides,
+} from "@/lib/utils/scenario-url";
 import type { ParsedSnapshot } from "@/lib/types/contributor";
 import type { FeeHistory } from "@/lib/types/fees";
 import type { SimulateResponse } from "@/lib/types/shapley";
@@ -51,9 +57,37 @@ import {
   Minus,
   X,
   Plus,
+  Share2,
+  Check,
 } from "lucide-react";
 
 const NEW_CONTRIBUTOR_VALUE = "__new__";
+
+/**
+ * `run=1` marks a shared forecast that should auto-run on open. Only the Share
+ * button stamps it (AD5); a plain editor/bookmark URL never carries it, so a
+ * work-in-progress reload never fires a solve. Kept as a terse literal `1`
+ * rather than nuqs's `parseAsBoolean` ("true"/"false") for a tidy share URL.
+ */
+const parseAsRunFlag = createParser({
+  parse: (v: string) => v === "1",
+  serialize: (v: boolean) => (v ? "1" : ""),
+}).withDefault(false);
+
+// A completed job whose Redis state hash has aged out surfaces as the service's
+// "job not found (expired?)" string (getSimulateJob maps the 404 → failed). We
+// turn that dead-end into an actionable hint — re-running recomputes, and a
+// recently-solved scenario returns instantly from the durable result store.
+const EXPIRED_JOB_MESSAGE =
+  "This simulation has expired — Run again to recompute (recent results return instantly).";
+
+/** Map the raw job error to friendlier copy for the expired-job case. */
+function displaySimError(error: string | null): string | null {
+  if (!error) return error;
+  return error.toLowerCase().includes("job not found")
+    ? EXPIRED_JOB_MESSAGE
+    : error;
+}
 
 // ── Async-job polling policy ────────────────────────────────────────────────
 // A what-if job runs in the worker independently of this browser tab, so a
@@ -124,6 +158,52 @@ function fmtPct(pct: number, decimals = 2): string {
   return pct.toFixed(decimals) + "%";
 }
 
+/**
+ * Copy the current scenario URL — with `run=1` stamped so it auto-runs on
+ * open — to the clipboard, with a transient "Copied" confirmation. The edit
+ * params are already live-synced to the URL (nuqs), so we only add the run flag.
+ */
+function ShareButton({ className }: { className: string }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    },
+    []
+  );
+
+  const handleShare = async () => {
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set("run", "1");
+      await navigator.clipboard.writeText(url.toString());
+      setCopied(true);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard blocked (insecure context / denied) — a convenience action,
+      // so skip the confirmation rather than surface an error.
+    }
+  };
+
+  return (
+    <button type="button" onClick={handleShare} className={className}>
+      {copied ? (
+        <>
+          <Check className="size-4 shrink-0" />
+          Copied
+        </>
+      ) : (
+        <>
+          <Share2 className="size-4 shrink-0" />
+          Share
+        </>
+      )}
+    </button>
+  );
+}
+
 export function SimulateTab({
   snapshot,
   feeHistory,
@@ -133,16 +213,28 @@ export function SimulateTab({
   onContributorChange,
 }: SimulateTabProps) {
   const [contributorCode, setContributorCode] = useState<string>(initialContributorCode);
-  const [removedLinks, setRemovedLinks] = useState<Set<string>>(new Set());
-  const [addedLinks, setAddedLinks] = useState<
-    Array<{ cityA: string; cityZ: string; bandwidthGbps: number; latencyMs: number }>
-  >([]);
+  // Scenario edits live in the URL (nuqs) so a forecast is shareable and
+  // survives reload — see lib/utils/scenario-url.ts. removedLinks is consumed
+  // as a Set, but the URL holds an array; derive the Set and write arrays back.
+  const [removeParam, setRemoveParam] = useQueryState("remove", parseAsRemovedLinks);
+  const removedLinks = useMemo(() => new Set(removeParam), [removeParam]);
+  const [addedLinks, setAddedLinks] = useQueryState("add", parseAsAddedLinks);
   const [newCityA, setNewCityA] = useState("");
   const [newCityZ, setNewCityZ] = useState("");
   const [newBandwidth, setNewBandwidth] = useState<number>(10);
   const [newLatency, setNewLatency] = useState<number>(10);
   // Metro-keyed (uppercased exchange code, e.g. "FRA") validator-count overrides.
-  const [demandOverrides, setDemandOverrides] = useState<Record<string, number>>({});
+  const [demandOverrides, setDemandOverrides] = useQueryState("demand", parseAsDemandOverrides);
+  // `run=1` (stamped only by Share) auto-runs the scenario once on open. Epoch
+  // and contributor are already resolved when this tab mounts (the page gates
+  // on a loaded snapshot), so the run decision is knowable synchronously — we
+  // freeze it once so the job modal can open in its running state via lazy
+  // init rather than a setState-in-effect, and a later contributor/epoch change
+  // can't retroactively trigger a run without the modal.
+  const [runFlag] = useQueryState("run", parseAsRunFlag);
+  const [autoRunOnMount] = useState(
+    () => runFlag && selectedEpoch != null && contributorCode !== ""
+  );
   const [showDemandEditor, setShowDemandEditor] = useState(false);
   const [simResult, setSimResult] = useState<SimulateResponse | null>(null);
   const [simLoading, setSimLoading] = useState(false);
@@ -156,9 +248,12 @@ export function SimulateTab({
   const [simReconnecting, setSimReconnecting] = useState(false);
   const jobIdRef = useRef<string | null>(null);
   const cancelledRef = useRef(false);
+  const autoRunFiredRef = useRef(false);
   const resultsRef = useRef<HTMLDivElement>(null);
-  const [showJobModal, setShowJobModal] = useState(false);
-  const [jobState, setJobState] = useState<JobState>("confirming");
+  const [showJobModal, setShowJobModal] = useState(autoRunOnMount);
+  const [jobState, setJobState] = useState<JobState>(
+    autoRunOnMount ? "running" : "confirming"
+  );
 
   // Scroll to results when they arrive
   useEffect(() => {
@@ -260,26 +355,28 @@ export function SimulateTab({
 
   const handleContributorChange = (code: string) => {
     setContributorCode(code);
-    setRemovedLinks(new Set());
-    setAddedLinks([]);
+    // Clearing to null drops the params from the URL (identical edit-reset
+    // semantics to before, now also cleaning the shareable link).
+    setRemoveParam(null);
+    setAddedLinks(null);
     setSimResult(null);
     setSimError(null);
     setNewCityA("");
     setNewCityZ("");
-    setDemandOverrides({});
+    setDemandOverrides(null);
     setShowDemandEditor(false);
     onContributorChange?.(code);
   };
 
   const toggleLink = (pubkey: string) => {
-    setRemovedLinks((prev) => {
+    setRemoveParam((prev) => {
       const next = new Set(prev);
       if (next.has(pubkey)) {
         next.delete(pubkey);
       } else {
         next.add(pubkey);
       }
-      return next;
+      return Array.from(next);
     });
     setSimResult(null);
   };
@@ -348,6 +445,15 @@ export function SimulateTab({
       }
       const { jobId } = (await startRes.json()) as { jobId: string };
       jobIdRef.current = jobId;
+      // Cancel clicked while the start POST was in flight (it holds the socket
+      // through a multi-second snapshot fetch + input build): the modal is
+      // already closed and no poll loop will run, so this is the only place
+      // that can release the just-enqueued job — otherwise a worker computes
+      // a result nobody is tracking.
+      if (cancelledRef.current) {
+        void requestCancel(jobId);
+        return;
+      }
 
       // 2) Poll for progress until the job reaches a terminal state. A job
       // lives in the worker independently of this tab, so transient poll
@@ -452,6 +558,20 @@ export function SimulateTab({
     setJobState("running");
     handleSimulate();
   };
+
+  // Auto-run a shared forecast. The modal is already open in its running state
+  // (lazy-initialised from autoRunOnMount), so this only kicks off the existing
+  // job path — skipping the confirmation. The ref guard keeps it to a single
+  // fire per mount even under Strict-Mode's double-invoked effects; a fresh
+  // mount (reloading the shared link) re-runs and re-shows the forecast —
+  // instant when the result is still cached.
+  useEffect(() => {
+    if (autoRunFiredRef.current || !autoRunOnMount) return;
+    autoRunFiredRef.current = true;
+    handleSimulate();
+    // handleSimulate is intentionally omitted — the ref guard fires this once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRunOnMount]);
 
   /** Cancel handler — called from the modal's Cancel button in any state. */
   const handleModalCancel = () => {
@@ -784,10 +904,10 @@ export function SimulateTab({
                       .filter((l) => l.bandwidthGbps < 1)
                       .map((l) => l.pubkey);
                     if (subGigs.length === 0) return;
-                    setRemovedLinks((prev) => {
+                    setRemoveParam((prev) => {
                       const next = new Set(prev);
                       for (const pk of subGigs) next.add(pk);
-                      return next;
+                      return Array.from(next);
                     });
                     setSimResult(null);
                   }}
@@ -861,9 +981,9 @@ export function SimulateTab({
               <button
                 type="button"
                 onClick={() => {
-                  setAddedLinks([]);
-                  setRemovedLinks(new Set());
-                  setDemandOverrides({});
+                  setAddedLinks(null);
+                  setRemoveParam(null);
+                  setDemandOverrides(null);
                   setSimResult(null);
                 }}
                 disabled={!hasChanges}
@@ -1209,7 +1329,7 @@ export function SimulateTab({
                       <button
                         type="button"
                         onClick={() => {
-                          setDemandOverrides({});
+                          setDemandOverrides(null);
                           setSimResult(null);
                         }}
                         className="text-xs text-cream-40 hover:text-cream font-mono transition-colors"
@@ -1296,27 +1416,32 @@ export function SimulateTab({
               : ""
           }
         >
-          <button
-            onClick={() => {
-              setShowJobModal(true);
-              setJobState("confirming");
-            }}
-            disabled={!hasChanges || simLoading}
-            className="w-full rounded-lg bg-cream text-dark font-display text-sm tracking-wide py-3 shadow-lg transition-all hover:bg-cream-80 disabled:opacity-30 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-          >
-            {hasChanges ? (
-              <span className="flex items-center justify-center gap-2">
-                Calculate Impact
-                <span className="text-xs font-mono uppercase tracking-[0.14em] opacity-60">
-                  {removedLinks.size > 0 && `−${removedLinks.size} `}
-                  {addedLinks.length > 0 && `+${addedLinks.length} `}
-                  {demandOverrideCount > 0 && `Δ${demandOverrideCount}`}
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                setShowJobModal(true);
+                setJobState("confirming");
+              }}
+              disabled={!hasChanges || simLoading}
+              className="flex-1 rounded-lg bg-cream text-dark font-display text-sm tracking-wide py-3 shadow-lg transition-all hover:bg-cream-80 disabled:opacity-30 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              {hasChanges ? (
+                <span className="flex items-center justify-center gap-2">
+                  Calculate Impact
+                  <span className="text-xs font-mono uppercase tracking-[0.14em] opacity-60">
+                    {removedLinks.size > 0 && `−${removedLinks.size} `}
+                    {addedLinks.length > 0 && `+${addedLinks.length} `}
+                    {demandOverrideCount > 0 && `Δ${demandOverrideCount}`}
+                  </span>
                 </span>
-              </span>
-            ) : (
-              "Calculate Impact"
+              ) : (
+                "Calculate Impact"
+              )}
+            </button>
+            {hasChanges && (
+              <ShareButton className="shrink-0 flex items-center gap-2 rounded-lg border border-cream-15 bg-surface px-4 py-3 text-sm font-display tracking-wide text-cream-60 shadow-lg hover:text-cream hover:border-cream-30 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none" />
             )}
-          </button>
+          </div>
         </div>
       )}
 
@@ -1330,7 +1455,10 @@ export function SimulateTab({
         phase={simPhase}
         percent={simPercent}
         reconnecting={simReconnecting}
-        error={simError}
+        error={displaySimError(simError)}
+        shareButton={
+          <ShareButton className="flex items-center justify-center gap-2 rounded-lg border border-cream-15 px-5 py-2.5 text-sm text-cream-60 hover:text-cream hover:border-cream-30 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none" />
+        }
         changeSummary={{
           removed: removedLinks.size,
           added: addedLinks.length,
@@ -1347,7 +1475,7 @@ export function SimulateTab({
       {/* Error */}
       {simError && (
         <div className="rounded-lg bg-red/5 border border-red/20 px-3 py-2 text-xs text-red">
-          {simError}
+          {displaySimError(simError)}
         </div>
       )}
 

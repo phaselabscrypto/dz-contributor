@@ -1233,8 +1233,26 @@ pub async fn simulate_start(
             .into_response();
     };
 
+    // Serialize the request ONCE up front: this hash keys the S3 result store
+    // and — on a miss — the payload String and the stream entry, so a single
+    // serialization keeps all three addressing the same key. Map the
+    // (practically impossible) failure to 500, same posture as `store_payload`.
+    let payload = match serde_json::to_string(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to serialize simulate request");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "job store unavailable" })),
+            )
+                .into_response();
+        }
+    };
+    let hash = crate::queue::hash_payload(&payload);
+    let hash_hex = format!("{hash:016x}");
+
     // Mint the job (state=running) so a poll right after the 202 already sees
-    // it, then enqueue the payload + stream entry for a worker to consume.
+    // it, then either complete it from S3 or enqueue it for a worker.
     let job_id = match store.create().await {
         Ok(id) => id,
         Err(e) => {
@@ -1247,12 +1265,52 @@ pub async fn simulate_start(
         }
     };
 
-    match store
-        .enqueue(&job_id, crate::queue::JobKind::Simulate, &body)
+    // S3 short-circuit: a previously-solved scenario (results persist forever,
+    // keyed by the request hash) completes the job at submit time, so the
+    // client's first poll returns done — no payload write, no XADD, no solve.
+    if let Some(s3) = &state.s3_cache
+        && let Some(cached) = s3.load_simulate(hash).await
+    {
+        if let Err(e) = store.set_done(&job_id, &cached).await {
+            tracing::error!(error = %e, job_id, "set_done from S3 failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "job store unavailable" })),
+            )
+                .into_response();
+        }
+        tracing::info!(job_id, input_hash = %hash_hex, served_from = "s3",
+            "what-if job completed from S3");
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "job_id": job_id })),
+        )
+            .into_response();
+    }
+
+    // Miss: persist the payload String (store-once) then XADD a tiny reference
+    // entry stamped with the SAME hash, so worker idempotency and the S3 write
+    // address one key. Replaces `store.enqueue(...)` — identical stream entry,
+    // one serialization.
+    let result = match store
+        .store_payload_raw(
+            &crate::queue::payload_key(&job_id),
+            &payload,
+            crate::queue::PAYLOAD_TTL_SECS,
+        )
         .await
     {
-        Ok(input_hash) => {
-            tracing::info!(job_id, input_hash, "what-if job enqueued");
+        Ok(()) => {
+            store
+                .enqueue_ref(&job_id, crate::queue::JobKind::Simulate, &hash_hex)
+                .await
+        }
+        Err(e) => Err(e),
+    };
+
+    match result {
+        Ok(()) => {
+            tracing::info!(job_id, input_hash = %hash_hex, "what-if job enqueued");
             (
                 StatusCode::ACCEPTED,
                 Json(serde_json::json!({ "job_id": job_id })),

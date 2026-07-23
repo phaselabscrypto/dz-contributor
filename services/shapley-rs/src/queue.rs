@@ -17,8 +17,10 @@
 //!                                           SWEEP_PAYLOAD_TTL_SECS (24h), refreshed on child pickup
 //! shapley:whatif:result:{hash}     STRING  serialized SimulateResponse; TTL ~3600s (idempotency cache)
 //! shapley:whatif:state:{job_id}    HASH    {state, coalitions_solved, samples_done, max_samples,
-//!                                           percent, result_ref?, error?, heartbeat_at}; EXPIRE 600s
-//! shapley:whatif:cancel:{job_id}   STRING  "1"; TTL 600s (separate key — cancel-race note)
+//!                                           percent, result_ref?, error?, heartbeat_at}; EXPIRE
+//!                                           JOB_TTL_SECS while running (heartbeat-refreshed),
+//!                                           TERMINAL_TTL_SECS once done/failed/cancelled
+//! shapley:whatif:cancel:{job_id}   STRING  "1"; TTL JOB_TTL_SECS (separate key — cancel-race note)
 //! shapley:linkest:inflight:{hash}  STRING  job_id; SET NX EX INFLIGHT_TTL_SECS (in-flight dedup —
 //!                                           cleared by the worker on terminal states)
 //! ```
@@ -90,13 +92,22 @@ pub const INFLIGHT_TTL_SECS: u64 = 86_400;
 /// TTL (seconds) for the `result:{hash}` idempotency cache.
 pub const RESULT_TTL_SECS: u64 = 3_600;
 
-/// Whole-key EXPIRE (seconds) for the `state:{job_id}` hash and the
-/// `cancel:{job_id}` flag. Mirrors `JOB_TTL_SECS` in `jobs.rs` so the two
-/// phases agree. The state hash is refreshed on every progress/phase heartbeat
+/// Whole-key EXPIRE (seconds) for a RUNNING `state:{job_id}` hash and the
+/// `cancel:{job_id}` flag. Refreshed on every progress/phase heartbeat
 /// (`jobs.rs`), so this must only outlast the worst-case QUEUE wait before a
 /// worker first heartbeats — 600s was too low for a busy fixed pool (a job
-/// queued behind ~15-min solves expired before pickup).
+/// queued behind ~15-min solves expired before pickup). Terminal states get
+/// [`TERMINAL_TTL_SECS`] instead; `jobs.rs` derives its `i64` view from this
+/// constant (not a hand-synced duplicate) so the two can never drift.
 pub const JOB_TTL_SECS: u64 = 1_800;
+
+/// Whole-key EXPIRE (seconds) for a TERMINAL `state:{job_id}` hash
+/// (done/failed/cancelled). A running hash lives [`JOB_TTL_SECS`],
+/// heartbeat-refreshed; once terminal it is no longer refreshed, so this is the
+/// window a finished result stays pollable by job id — 24h so a user can come
+/// back the next day (PSYS-557). Durable retrieval beyond that is the S3 result
+/// store (`cache::S3Cache::load_simulate`), keyed by the request hash.
+pub const TERMINAL_TTL_SECS: u64 = 86_400;
 
 // ── Schema tags ──────────────────────────────────────────────────────────
 

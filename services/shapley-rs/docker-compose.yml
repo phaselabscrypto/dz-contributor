@@ -46,3 +46,26 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  # S3-compatible object store for the durable result cache (baselines,
+  # link-estimates, simulate results). Same shape as the production in-cluster
+  # gateway: custom endpoint + path-style addressing. Optional — without it the
+  # service runs with the S3 layer disabled (Redis-only). See README "Local
+  # async testing" for the env vars and the one-time bucket creation.
+  # No pinned tag upstream worth chasing; MinIO's S3 API surface is stable for
+  # the four calls we make (Get/Put/Head/CreateBucket).
+  minio:
+    image: docker.io/minio/minio:latest
+    container_name: shapley-minio-dev
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: devaccess
+      MINIO_ROOT_PASSWORD: devsecret123
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

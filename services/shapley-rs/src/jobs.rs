@@ -19,16 +19,23 @@ use serde_json::{Value, json};
 // truth shared with the worker role) so api + worker can never drift apart.
 use crate::queue::{self, JobKind, cancel_key, state_key};
 
-/// Whole-key TTL (seconds) for the `state:{id}` hash. Refreshed on every
-/// progress/phase heartbeat (see `set_progress`/`set_phase`) so a running job
-/// never expires out from under an active poll, and re-set on terminal states
-/// so a finished job lingers this long for the client to fetch the result.
-/// Must also exceed the worst-case QUEUE wait (no heartbeats fire until a
-/// worker picks the job up): with a small fixed worker pool a job can wait
-/// behind a couple of ~15-min solves, so 600s was too low — a queued job
-/// expired before pickup. Kept as `i64` because `conn.expire` takes `i64`;
-/// numerically equal to `queue::JOB_TTL_SECS` (`u64`, used with `set_ex`).
-const JOB_TTL_SECS: i64 = 1_800;
+/// Running-job whole-key TTL (seconds) for the `state:{id}` hash. Refreshed on
+/// every progress/phase heartbeat (see `set_progress`/`set_phase`) so a running
+/// job never expires out from under an active poll. Must exceed the worst-case
+/// QUEUE wait (no heartbeats fire until a worker picks the job up): with a small
+/// fixed worker pool a job can wait behind a couple of ~15-min solves, so 600s
+/// was too low — a queued job expired before pickup.
+///
+/// Both TTLs are `i64` because `conn.expire` takes `i64`, and DERIVED from the
+/// `queue` `u64` constants (lossless at these magnitudes) so `queue.rs` stays
+/// the single source of truth — no hand-synced duplicate to drift.
+const JOB_TTL_SECS: i64 = queue::JOB_TTL_SECS as i64;
+
+/// Terminal-job whole-key TTL (seconds), re-set on `set_done`/`set_failed`/
+/// `set_cancelled` so a finished job lingers this long for the client to fetch
+/// the result (24h — come back the next day, PSYS-557). Not heartbeat-refreshed
+/// once terminal; durable retrieval beyond it is the S3 result store.
+const TERMINAL_TTL_SECS: i64 = queue::TERMINAL_TTL_SECS as i64;
 
 /// Live progress counters mirrored to Redis on each bridge tick. The `batch_*`
 /// fields describe the in-flight sampling batch so the snapshot can interpolate
@@ -96,9 +103,24 @@ impl RedisJobStore {
     ) -> anyhow::Result<String> {
         let payload = serde_json::to_string(body)?;
         let input_hash_hex = format!("{:016x}", queue::hash_payload(&payload));
-        let mut conn = self.pool.get().await?;
-        let _: () = conn.set_ex(key, &payload, ttl_secs).await?;
+        self.store_payload_raw(key, &payload, ttl_secs).await?;
         Ok(input_hash_hex)
+    }
+
+    /// Persist an already-serialized payload String under an explicit key + TTL.
+    /// Split out of [`Self::store_payload`] so a handler that must hash the
+    /// payload BEFORE deciding to enqueue (the simulate submit-time S3
+    /// short-circuit) can serialize exactly once and reuse those bytes for both
+    /// the idempotency hash and this write — the two can never disagree.
+    pub async fn store_payload_raw(
+        &self,
+        key: &str,
+        payload_json: &str,
+        ttl_secs: u64,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.pool.get().await?;
+        let _: () = conn.set_ex(key, payload_json, ttl_secs).await?;
+        Ok(())
     }
 
     /// Enqueue a sweep CHILD: XADD an entry whose `payload_key` references the
@@ -346,7 +368,7 @@ impl RedisJobStore {
             .arg(result.to_string())
             .query_async::<()>(&mut conn)
             .await?;
-        let _: () = conn.expire(&key, JOB_TTL_SECS).await?;
+        let _: () = conn.expire(&key, TERMINAL_TTL_SECS).await?;
         Ok(())
     }
 
@@ -361,7 +383,7 @@ impl RedisJobStore {
             .arg(error)
             .query_async::<()>(&mut conn)
             .await?;
-        let _: () = conn.expire(&key, JOB_TTL_SECS).await?;
+        let _: () = conn.expire(&key, TERMINAL_TTL_SECS).await?;
         Ok(())
     }
 
@@ -374,7 +396,7 @@ impl RedisJobStore {
             .arg("cancelled")
             .query_async::<()>(&mut conn)
             .await?;
-        let _: () = conn.expire(&key, JOB_TTL_SECS).await?;
+        let _: () = conn.expire(&key, TERMINAL_TTL_SECS).await?;
         Ok(())
     }
 
@@ -384,7 +406,9 @@ impl RedisJobStore {
         let mut conn = self.pool.get().await?;
         let exists: bool = conn.exists(state_key(id)).await?;
         if exists {
-            let _: () = conn.set_ex(cancel_key(id), 1, JOB_TTL_SECS as u64).await?;
+            // Cancel is meaningless after a terminal state, so the flag keeps the
+            // running TTL (not TERMINAL_TTL_SECS).
+            let _: () = conn.set_ex(cancel_key(id), 1, queue::JOB_TTL_SECS).await?;
         }
         Ok(exists)
     }
@@ -531,6 +555,20 @@ mod tests {
     use super::running_percent;
 
     const EPS: f64 = 1e-9;
+
+    #[test]
+    fn terminal_ttl_outlives_running_ttl_and_agrees_with_queue() {
+        // Finished jobs must linger longer than a running job's heartbeat
+        // window, and the `i64` jobs-side views must equal the `u64` queue-side
+        // source of truth they are derived from (guards the derivation, not
+        // Redis behavior). Const blocks so a broken relationship fails to
+        // compile, not just at test time.
+        const {
+            assert!(super::TERMINAL_TTL_SECS > super::JOB_TTL_SECS);
+            assert!(super::JOB_TTL_SECS as u64 == crate::queue::JOB_TTL_SECS);
+            assert!(super::TERMINAL_TTL_SECS as u64 == crate::queue::TERMINAL_TTL_SECS);
+        }
+    }
 
     #[test]
     fn climbs_smoothly_within_first_batch() {

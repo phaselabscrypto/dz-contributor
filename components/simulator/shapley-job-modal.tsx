@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import {
   Dialog,
   DialogContent,
@@ -75,6 +75,8 @@ export interface ShapleyJobModalProps {
   contributorCode: string;
   avgFeeSol: number;
   feeHistory?: FeeHistory | null;
+  /** Rendered in the results footer — copies the shareable scenario URL. */
+  shareButton?: ReactNode;
 }
 
 /* ─── Helpers ───────────────────────────────────────────────────── */
@@ -107,6 +109,7 @@ export function ShapleyJobModal({
   contributorCode,
   avgFeeSol,
   feeHistory,
+  shareButton,
 }: ShapleyJobModalProps) {
   const isRunning = state === "running";
 
@@ -566,6 +569,7 @@ export function ShapleyJobModal({
             </DialogBody>
 
             <DialogFooter>
+              {shareButton}
               <button
                 onClick={() => onOpenChange(false)}
                 className="rounded-lg bg-cream text-dark font-display text-sm tracking-wide px-6 py-2.5 shadow-lg transition-all hover:bg-cream-80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
