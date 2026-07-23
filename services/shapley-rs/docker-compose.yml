@@ -51,7 +51,7 @@ services:
   # link-estimates, simulate results). Same shape as the production in-cluster
   # gateway: custom endpoint + path-style addressing. Optional — without it the
   # service runs with the S3 layer disabled (Redis-only). See README "Local
-  # async testing" for the env vars and the one-time bucket creation.
+  # S3 testing (durable result cache)" for the env vars and the one-time bucket creation.
   # No pinned tag upstream worth chasing; MinIO's S3 API surface is stable for
   # the four calls we make (Get/Put/Head/CreateBucket).
   minio:

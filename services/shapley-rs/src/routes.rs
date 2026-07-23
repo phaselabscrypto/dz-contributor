@@ -1289,9 +1289,9 @@ pub async fn simulate_start(
     }
 
     // Miss: persist the payload String (store-once) then XADD a tiny reference
-    // entry stamped with the SAME hash, so worker idempotency and the S3 write
-    // address one key. Replaces `store.enqueue(...)` — identical stream entry,
-    // one serialization.
+    // entry stamped with the SAME hash, so the submit S3 read, worker
+    // idempotency, and the worker's S3 write all address one key from a single
+    // serialization.
     let result = match store
         .store_payload_raw(
             &crate::queue::payload_key(&job_id),

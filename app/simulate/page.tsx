@@ -12,7 +12,9 @@ import { LoadingState, ErrorState } from "@/components/ui/states";
 function SimulateInner() {
   const { data: epochs, isLoading: epochsLoading, error: epochsError } = useEpochs();
 
-  const [urlEpoch, setUrlEpoch] = useQueryState("epoch", parseAsInteger);
+  // Read-only here: the epoch is pinned into the URL by the Share button
+  // (see ShareButton in simulate-tab.tsx), not by any picker on this page.
+  const [urlEpoch] = useQueryState("epoch", parseAsInteger);
   const [urlContributor, setUrlContributor] = useQueryState(
     "contributor",
     parseAsString.withDefault(""),
@@ -62,7 +64,6 @@ function SimulateInner() {
       onContributorChange={(code) =>
         setUrlContributor(code === "" ? null : code)
       }
-      onEpochChange={(ep) => setUrlEpoch(ep)}
     />
   );
 }

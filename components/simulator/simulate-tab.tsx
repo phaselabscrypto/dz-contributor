@@ -138,8 +138,6 @@ interface SimulateTabProps {
   initialContributorCode?: string;
   /** Called whenever the user changes the active contributor — wire to URL state for shareable links. */
   onContributorChange?: (code: string) => void;
-  /** Called when the epoch changes — wire to URL state. Currently a passthrough; the page owns epoch UI. */
-  onEpochChange?: (epoch: number) => void;
 }
 
 /**
@@ -160,10 +158,19 @@ function fmtPct(pct: number, decimals = 2): string {
 
 /**
  * Copy the current scenario URL — with `run=1` stamped so it auto-runs on
- * open — to the clipboard, with a transient "Copied" confirmation. The edit
- * params are already live-synced to the URL (nuqs), so we only add the run flag.
+ * open, and the resolved `epoch` pinned — to the clipboard, with a transient
+ * "Copied" confirmation. The edit params are already live-synced to the URL
+ * (nuqs), but `epoch` is not (the page resolves it to `latest` when absent),
+ * so pinning it here is what makes a shared forecast reproduce the same
+ * baseline — and hit the S3 cache — when reopened after epochs have rolled.
  */
-function ShareButton({ className }: { className: string }) {
+function ShareButton({
+  className,
+  epoch,
+}: {
+  className: string;
+  epoch: number | null;
+}) {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
@@ -177,6 +184,7 @@ function ShareButton({ className }: { className: string }) {
     try {
       const url = new URL(window.location.href);
       url.searchParams.set("run", "1");
+      if (epoch != null) url.searchParams.set("epoch", String(epoch));
       await navigator.clipboard.writeText(url.toString());
       setCopied(true);
       if (timerRef.current) clearTimeout(timerRef.current);
@@ -230,11 +238,22 @@ export function SimulateTab({
   // on a loaded snapshot), so the run decision is knowable synchronously — we
   // freeze it once so the job modal can open in its running state via lazy
   // init rather than a setState-in-effect, and a later contributor/epoch change
-  // can't retroactively trigger a run without the modal.
+  // can't retroactively trigger a run without the modal. Also require decodable
+  // edits, mirroring the manual button's `hasChanges` gate — a `run=1` URL with
+  // none would otherwise fire a baseline-vs-baseline no-op solve.
   const [runFlag] = useQueryState("run", parseAsRunFlag);
-  const [autoRunOnMount] = useState(
-    () => runFlag && selectedEpoch != null && contributorCode !== ""
-  );
+  const [autoRunOnMount] = useState(() => {
+    const hasEditsAtMount =
+      removeParam.length > 0 ||
+      addedLinks.length > 0 ||
+      Object.keys(demandOverrides).length > 0;
+    return (
+      runFlag &&
+      selectedEpoch != null &&
+      contributorCode !== "" &&
+      hasEditsAtMount
+    );
+  });
   const [showDemandEditor, setShowDemandEditor] = useState(false);
   const [simResult, setSimResult] = useState<SimulateResponse | null>(null);
   const [simLoading, setSimLoading] = useState(false);
@@ -261,6 +280,21 @@ export function SimulateTab({
       resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }, [simResult]);
+
+  // Clear a displayed result when the scenario changes. The edit handlers below
+  // already do this, but the scenario now lives in the URL, so browser history
+  // navigation (back/forward to a different remove/add/demand set) mutates it
+  // without going through a handler. Reset during render via the previous-value
+  // pattern (not an effect — React's idiom for "derived state changed") so a
+  // stale result never paints over a different scenario. The key is stable
+  // during a run, so this never fires mid-poll or clobbers a just-arrived result.
+  const scenarioKey = JSON.stringify([removeParam, addedLinks, demandOverrides]);
+  const [prevScenarioKey, setPrevScenarioKey] = useState(scenarioKey);
+  if (scenarioKey !== prevScenarioKey) {
+    setPrevScenarioKey(scenarioKey);
+    setSimResult(null);
+    setSimError(null);
+  }
 
   const isNewContributor = contributorCode === NEW_CONTRIBUTOR_VALUE;
   const contributor = isNewContributor
@@ -1439,7 +1473,10 @@ export function SimulateTab({
               )}
             </button>
             {hasChanges && (
-              <ShareButton className="shrink-0 flex items-center gap-2 rounded-lg border border-cream-15 bg-surface px-4 py-3 text-sm font-display tracking-wide text-cream-60 shadow-lg hover:text-cream hover:border-cream-30 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none" />
+              <ShareButton
+                epoch={selectedEpoch}
+                className="shrink-0 flex items-center gap-2 rounded-lg border border-cream-15 bg-surface px-4 py-3 text-sm font-display tracking-wide text-cream-60 shadow-lg hover:text-cream hover:border-cream-30 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              />
             )}
           </div>
         </div>
@@ -1457,7 +1494,10 @@ export function SimulateTab({
         reconnecting={simReconnecting}
         error={displaySimError(simError)}
         shareButton={
-          <ShareButton className="flex items-center justify-center gap-2 rounded-lg border border-cream-15 px-5 py-2.5 text-sm text-cream-60 hover:text-cream hover:border-cream-30 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none" />
+          <ShareButton
+            epoch={selectedEpoch}
+            className="flex items-center justify-center gap-2 rounded-lg border border-cream-15 px-5 py-2.5 text-sm text-cream-60 hover:text-cream hover:border-cream-30 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          />
         }
         changeSummary={{
           removed: removedLinks.size,

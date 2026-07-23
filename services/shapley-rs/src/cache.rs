@@ -75,6 +75,20 @@ pub fn hash_input(input: &crate::model::ShapleyInputIn) -> u64 {
     hasher.finish()
 }
 
+/// Engine-version prefix for every S3 object key. `hash_input`/`hash_payload`
+/// key on inputs only, NOT the engine version or the serialized shape, so any
+/// change to either MUST bump this prefix — results from an older engine are
+/// then never served for identical inputs. Single-sourced here so all key
+/// builders (`cache_key`, `link_estimate_key`, `simulate_key`,
+/// `sweep_marker_key`, and the `S3CacheRef` mirror) move together on a bump.
+///
+/// Note the hashers are std `DefaultHasher` (not stable across Rust
+/// toolchains): a toolchain change rotates the keyspace, causing a
+/// miss-and-recompute — never a wrong-result. This matters most for the
+/// forever-persisted `simulate-`/`link-estimate-` objects (no TTL to age out a
+/// rotated key), but it is a recompute cost, not a correctness risk.
+const CACHE_VERSION_PREFIX: &str = "shapley/v3";
+
 /// S3-backed cache for persisting per-city Shapley values across pod restarts.
 pub struct S3Cache {
     client: aws_sdk_s3::Client,
@@ -123,7 +137,7 @@ impl S3Cache {
     /// the prefix so results computed by an older engine are never served as
     /// valid for identical inputs.
     fn cache_key(input_hash: u64) -> String {
-        format!("shapley/v3/cache-{:016x}.bin", input_hash)
+        format!("{CACHE_VERSION_PREFIX}/cache-{input_hash:016x}.bin")
     }
 
     /// Load a cached epoch from S3, if it exists and deserialises cleanly.
@@ -192,7 +206,7 @@ impl S3Cache {
     /// baseline `cache-` keys. Epoch inputs are immutable, so entries are
     /// valid forever; the `v3` engine-version prefix still applies.
     fn link_estimate_key(payload_hash: u64) -> String {
-        format!("shapley/v3/link-estimate-{payload_hash:016x}.bin")
+        format!("{CACHE_VERSION_PREFIX}/link-estimate-{payload_hash:016x}.bin")
     }
 
     /// Load a cached link-estimate result from S3, if present and clean.
@@ -277,15 +291,21 @@ impl S3Cache {
     /// never collide with the baseline `cache-` or `link-estimate-` keys;
     /// `.json` (not bincode) because the simulate pipeline is kind-agnostic
     /// `serde_json::Value` and bincode cannot round-trip `Value`. Epoch inputs
-    /// are immutable, so entries are valid forever; the `v3` engine-version
-    /// prefix still applies.
+    /// are immutable, so entries persist forever; the [`CACHE_VERSION_PREFIX`]
+    /// engine-version prefix is the sole staleness guard.
     fn simulate_key(payload_hash: u64) -> String {
-        format!("shapley/v3/simulate-{payload_hash:016x}.json")
+        format!("{CACHE_VERSION_PREFIX}/simulate-{payload_hash:016x}.json")
     }
 
-    /// Load a cached simulate result from S3, if present and it parses as JSON.
-    /// A corrupt object is logged and treated as a miss (recompute) — same
-    /// posture as `jobs::RedisJobStore::result_cache_get`.
+    /// Load a cached simulate result from S3, if present and well-formed.
+    ///
+    /// Validates the object deserializes as a [`crate::model::SimulateResponse`]
+    /// and treats any mismatch (wrong shape, partial/corrupt JSON) as a miss so
+    /// the job recomputes rather than republishing garbage to the client. On a
+    /// hit it returns the untyped `Value` parsed from the SAME bytes — never a
+    /// re-serialized typed struct — so a submit-time S3 hit republishes
+    /// byte-identically to a Redis `result:{hash}` cache hit (both re-emit via
+    /// `set_done` → `Value::to_string`).
     pub async fn load_simulate(&self, payload_hash: u64) -> Option<serde_json::Value> {
         let key = Self::simulate_key(payload_hash);
         match self
@@ -298,6 +318,14 @@ impl S3Cache {
         {
             Ok(resp) => {
                 let bytes = resp.body.collect().await.ok()?.into_bytes();
+                // Shape gate: a valid SimulateResponse implies valid JSON, so the
+                // Value parse below then always succeeds — but keep both parses
+                // explicit so a shape mismatch and a raw-JSON error log distinctly.
+                if let Err(e) = serde_json::from_slice::<crate::model::SimulateResponse>(&bytes) {
+                    tracing::warn!(error = %e, %key,
+                        "S3 simulate object is not a valid SimulateResponse — treating as miss");
+                    return None;
+                }
                 match serde_json::from_slice::<serde_json::Value>(&bytes) {
                     Ok(cached) => {
                         tracing::info!(%key, "loaded simulate from S3");
@@ -305,13 +333,20 @@ impl S3Cache {
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, %key,
-                            "failed to deserialize S3 simulate — treating as miss");
+                            "failed to parse S3 simulate as JSON — treating as miss");
                         None
                     }
                 }
             }
             Err(e) => {
-                tracing::debug!(error = %e, %key, "no simulate in S3");
+                // Distinguish the expected miss (NoSuchKey) from a real S3 fault
+                // (transport/auth/config) — an operator debugging a stuck
+                // share-link job needs to tell "not cached yet" from "S3 down".
+                if e.as_service_error().is_some_and(|se| se.is_no_such_key()) {
+                    tracing::debug!(%key, "no simulate in S3 (miss)");
+                } else {
+                    tracing::warn!(error = %e, %key, "S3 get_object failed for simulate");
+                }
                 None
             }
         }
@@ -355,7 +390,7 @@ impl S3Cache {
     /// stored INSIDE the marker object for debuggability.
     fn sweep_marker_key(tag: &str) -> String {
         let hash = crate::queue::hash_payload(tag);
-        format!("shapley/v3/sweep-marker-{hash:016x}.json")
+        format!("{CACHE_VERSION_PREFIX}/sweep-marker-{hash:016x}.json")
     }
 
     /// Whether the "fully swept" marker exists for this tag (epoch inputs are
@@ -418,10 +453,10 @@ pub struct S3CacheRef {
 }
 
 impl S3CacheRef {
-    // Keep in lockstep with `S3Cache::cache_key` (v3 prefix; per-city layout +
-    // linear-uptime engine).
+    // Keep in lockstep with `S3Cache::cache_key` (shares [`CACHE_VERSION_PREFIX`];
+    // per-city layout + linear-uptime engine).
     fn cache_key(input_hash: u64) -> String {
-        format!("shapley/v3/cache-{input_hash:016x}.bin")
+        format!("{CACHE_VERSION_PREFIX}/cache-{input_hash:016x}.bin")
     }
 
     pub async fn store(&self, cache: &EpochCache) {

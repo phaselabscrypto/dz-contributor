@@ -247,7 +247,8 @@ impl RedisJobStore {
     }
 
     /// XADD an entry for a job whose payload was already persisted via
-    /// [`Self::store_payload`] (the sweep handler's store-once path).
+    /// [`Self::store_payload`] / [`Self::store_payload_raw`] — the store-once
+    /// path shared by the sweep handler and the simulate submit short-circuit.
     pub async fn enqueue_ref(
         &self,
         job_id: &str,
