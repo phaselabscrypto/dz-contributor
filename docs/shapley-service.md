@@ -107,6 +107,7 @@ sequenceDiagram
     participant A as API pod
     participant R as Redis
     participant W as Worker pod
+    participant S3 as S3 cache
 
     C->>A: POST /jobs/simulate (or /jobs/link-estimate, /precompute)
     A->>A: validate_dimensions
@@ -114,6 +115,14 @@ sequenceDiagram
     A->>R: SET payload:{id} <JSON>  EX 3600s
     A->>R: XADD shapley:whatif:stream MAXLEN ~10000 * {job_id, payload_key, input_hash, enqueued_at, schema, kind}
     A-->>C: 202 {job_id}
+
+    alt S3 result hit at submit (previously-solved scenario)
+        A->>R: HSET state:{id} state=running  EXPIRE 1800s
+        A->>S3: GET simulate-{input_hash}.json
+        S3-->>A: cached SimulateResponse JSON
+        A->>R: HSET state:{id} state=done result=...  EXPIRE 86400s
+        A-->>C: 202 {job_id}  (first poll already done, no worker)
+    end
 
     C->>A: GET /jobs/{id}
     A->>R: HGETALL state:{id}
@@ -125,7 +134,7 @@ sequenceDiagram
     alt idempotency hit
         W->>R: GET result:{input_hash}
         R-->>W: cached JSON
-        W->>R: HSET state:{id} state=done result=...  EXPIRE 1800s
+        W->>R: HSET state:{id} state=done result=...  EXPIRE 86400s
         W->>R: XACK
     else fresh compute
         W->>W: spawn bridge_control task
@@ -134,22 +143,22 @@ sequenceDiagram
         W->>R: GET payload:{id}  (deserialize SimulateRequest / LinkEstimateRequest)
 
         alt state expired while queued
-            W->>R: HSET state:{id} state=failed  EXPIRE 1800s
+            W->>R: HSET state:{id} state=failed  EXPIRE 86400s
             W->>R: XACK
         else
             W->>W: spawn_blocking → rayon: compute_per_city / network_link_estimate (cancellable)
 
             alt done
                 W->>R: SET result:{input_hash} <JSON>  EX 3600s
-                W->>R: HSET state:{id} state=done result=...  EXPIRE 1800s
+                W->>R: HSET state:{id} state=done result=...  EXPIRE 86400s
                 W->>R: DEL linkest:inflight:{hash}  (link-estimate only)
                 W->>R: XACK shapley:whatif:stream
                 W->>+S3: PUT cache object (background, best-effort)
             else cancelled (cooperative, between cities)
-                W->>R: HSET state:{id} state=cancelled  EXPIRE 1800s
+                W->>R: HSET state:{id} state=cancelled  EXPIRE 86400s
                 W->>R: XACK
             else deterministic failure (ShapleyError)
-                W->>R: HSET state:{id} state=failed error=...  EXPIRE 1800s
+                W->>R: HSET state:{id} state=failed error=...  EXPIRE 86400s
                 W->>R: XACK
             else transient failure (spawn_blocking panic)
                 Note over W: NO XACK — entry stays pending<br/>for XAUTOCLAIM reclaim
@@ -168,7 +177,7 @@ Keys in the diagram are shown without their `shapley:whatif:` / `shapley:linkest
 
 ## Redis keyspace
 
-Source of truth: the **constants** in `src/queue.rs` and `src/jobs.rs`. (The narrative keyspace comment at the top of `src/queue.rs` still shows the original 600 s state/cancel TTLs; the shipped constant `JOB_TTL_SECS = 1800` is what the code uses — the table below reflects the code.)
+Source of truth: the **constants** in `src/queue.rs` and `src/jobs.rs` (`JOB_TTL_SECS` for running states and `TERMINAL_TTL_SECS` for terminal states); the table below reflects the code.
 
 | Key pattern | Type | TTL | Purpose |
 |---|---|---|---|
@@ -176,9 +185,10 @@ Source of truth: the **constants** in `src/queue.rs` and `src/jobs.rs`. (The nar
 | `shapley:whatif:dead` | Stream | — | Dead-letter; poison entries (schema mismatch or delivery count > 3) |
 | `shapley:whatif:payload:{job_id}` | String | 3600 s (sweep payloads: 86400 s) | Serialized request body (store-and-reference; never inlined into the stream). Sweep payloads use a 24 h TTL and are refreshed by the worker on every child pickup so a deep queue cannot outlast the payload. |
 | `shapley:whatif:result:{hash}` | String | 3600 s | Idempotency cache keyed by the whole-request payload hash (hex); prevents recompute on redelivery |
-| `shapley:whatif:state:{job_id}` | Hash | 1800 s | Fields: `state`, `coalitions_solved`, `samples_done`, `max_samples`, `batch_samples`, `batch_total`, `batch_solved`, `phase`, `result` (done), `error` (failed); TTL refreshed on every bridge heartbeat |
-| `shapley:whatif:cancel:{job_id}` | String | 1800 s | Cancel flag (`"1"`); a separate key so progress flushes can never clobber a concurrent cancel (ADR C4 note in `src/queue.rs`) |
+| `shapley:whatif:state:{job_id}` | Hash | 1800 s (running) · 86400 s (terminal) | Fields: `state`, `coalitions_solved`, `samples_done`, `max_samples`, `batch_samples`, `batch_total`, `batch_solved`, `phase`, `result` (done), `error` (failed). Running state TTL is heartbeat-refreshed. Terminal states (done/failed/cancelled) expire at 86400 s so completed results stay pollable for 24 h (PSYS-557); for longer-lived retrieval, load from the S3 result store (see below). |
+| `shapley:whatif:cancel:{job_id}` | String | 1800 s | Cancel flag (`"1"`); a separate key so progress flushes can never clobber a concurrent cancel (ADR C4 note in `src/queue.rs`); only meaningful while a job is running |
 | `shapley:linkest:inflight:{hash}` | String | 86400 s | In-flight dedup claim for link-estimate solves; `SET NX EX`; cleared by the worker on terminal states; TTL is a crash backstop only |
+| `shapley/v3/simulate-{hash}.json` (S3) | JSON | — | Cached simulate result, persisted forever by input hash (hex). Re-running any previously-solved scenario completes at submit time (PSYS-557). Keyed by the whole-request payload hash, identical to the queue entry's `input_hash`. An optional out-of-repo S3 lifecycle rule can expire old results. |
 
 **Stream entry fields** (flat key/value pairs on the stream entry, defined in `src/queue.rs` `field` module):
 
@@ -219,6 +229,7 @@ When `S3_CACHE_ENDPOINT` is set, the AWS SDK client is configured with that URL 
 |---|---|---|
 | `shapley/v3/cache-{hash:016x}.bin` | `shapley/v3/cache-0000abcd1234ef56.bin` | bincode-serialized `EpochCache` (per-city Shapley values + aggregated baseline) |
 | `shapley/v3/link-estimate-{hash:016x}.bin` | `shapley/v3/link-estimate-0000abcd1234ef56.bin` | bincode-serialized `LinkEstimateResponse` |
+| `shapley/v3/simulate-{hash:016x}.json` | `shapley/v3/simulate-0000abcd1234ef56.json` | JSON-serialized `SimulateResponse` (what-if result, persisted forever by whole-request payload hash; PSYS-557) |
 | `shapley/v3/sweep-marker-{hash:016x}.json` | `shapley/v3/sweep-marker-0000abcd1234ef56.json` | JSON `{"tag": "..."}` marker indicating a fully swept epoch; tag is hashed before use as the key suffix |
 
 The `v3` prefix must be bumped on any change to the serialized shape or the engine that produced the values, so results from an older engine are never served for the same input hash.

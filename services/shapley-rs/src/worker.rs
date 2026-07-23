@@ -288,6 +288,20 @@ async fn process_entry(
             {
                 tracing::warn!(error = %e, "result cache_set failed (non-fatal)");
             }
+            // Durable simulate persistence (PSYS-557): a finished what-if is kept
+            // in S3 forever, keyed by the same request hash the submit-time
+            // short-circuit reads. Fire-and-forget inside `store_simulate`; a
+            // parse or PUT failure can never fail the job (S3 is an optimization
+            // layer — the user-facing result is already written above).
+            if entry.kind == JobKind::Simulate
+                && let Some(s3) = &state.s3_cache
+            {
+                match u64::from_str_radix(&entry.input_hash, 16) {
+                    Ok(h) => s3.store_simulate(h, &resp),
+                    Err(e) => tracing::error!(error = %e, hash = %entry.input_hash,
+                        "simulate S3 store skipped — unparseable entry hash"),
+                }
+            }
             clear_inflight_for(store, &entry).await;
             ack(store, entry_id).await?;
         }

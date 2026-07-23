@@ -112,6 +112,13 @@ User picks a contributor → modifies links + demand → POST to
 projections + per-contributor delta. The simulator caches the per-epoch
 baseline so subsequent edits only re-solve the modified scenario.
 
+Completed forecasts are shareable via URL — the scenario params (added/removed
+links, demand overrides) live in the URL as readable query params; the Share
+button copies a link with `run=1` that auto-runs on open, returning instantly
+if the result is cached in Redis/S3. Results persist in S3 forever, keyed by
+the request hash, so a shared forecast reopened days later recomputes
+instantly.
+
 ### On-chain readers (stubs)
 
 `lib/onchain/` has typed RPC client + decoder stubs ready for the DZ

@@ -21,6 +21,7 @@
     "test:canonical": "tsx scripts/test-canonical-parity.ts",
     "test:demand": "tsx scripts/test-demand-overrides.ts",
     "test:links": "tsx scripts/test-link-edits.ts",
+    "test:scenario-url": "tsx scripts/test-scenario-url.ts",
     "test:baseline": "tsx scripts/test-baseline-route.ts",
     "test:onchain": "tsx scripts/decode-live-rewards.ts",
     "test:derive": "tsx scripts/verify-derive-and-decode.ts",

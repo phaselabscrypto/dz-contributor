@@ -95,6 +95,50 @@ Inspect the queue with `redis-cli -p 6390 -a devpass keys 'shapley:whatif:*'`;
 tear down with `docker compose down`. To test just the compute (no Redis/queue),
 hit the synchronous `POST /simulate` on the `api` process instead.
 
+> **Pitfall:** `redis-cli flushall` deletes the Stream **consumer group**, and
+> the worker only creates it at startup — after a flush it spins on
+> `xreadgroup failed; backing off` until restarted. Prefer
+> `scripts/queue-clear.sh --surgical` (recreates the group in place), or
+> restart the worker after a flush.
+
+### Local S3 testing (durable result cache)
+
+The S3 layer (baseline cache, link-estimate results, simulate results — the
+persistence behind shareable forecast URLs) targets any S3-compatible endpoint
+via `S3_CACHE_ENDPOINT` (path-style), so MinIO models production faithfully.
+The compose file includes one (`docker compose up -d minio`); a native
+`brew install minio` binary works identically when Docker isn't available:
+
+```bash
+# one-time: start MinIO + create the bucket
+minio server /tmp/minio-data --address :9000 &          # or: docker compose up -d minio
+AWS_ACCESS_KEY_ID=devaccess AWS_SECRET_ACCESS_KEY=devsecret123 \
+  aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://shapley-cache
+
+# run BOTH roles with the S3 env added (same vars for api and worker):
+S3_CACHE_BUCKET=shapley-cache S3_CACHE_ENDPOINT=http://127.0.0.1:9000 \
+AWS_ACCESS_KEY_ID=devaccess AWS_SECRET_ACCESS_KEY=devsecret123 AWS_REGION=us-east-1 \
+PORT=8099 REDIS_URL=redis://:devpass@127.0.0.1:6390 cargo run -- api
+```
+
+(the native binary needs `MINIO_ROOT_USER=devaccess MINIO_ROOT_PASSWORD=devsecret123`
+exported before `minio server`.)
+
+Durable-result loop to verify end-to-end persistence:
+
+1. Submit a `/jobs/simulate` job and poll to `done` — the worker logs
+   `stored simulate to S3` and `shapley/v3/simulate-{hash}.json` appears in the
+   bucket (`aws --endpoint-url http://127.0.0.1:9000 s3 ls s3://shapley-cache/shapley/v3/`).
+2. Delete every `shapley:whatif:state/result/payload` key in Redis (simulates
+   the 24 h terminal TTL + 1 h result-cache expiry — keep the stream/group,
+   see the flushall pitfall above).
+3. Resubmit the identical payload: the API logs
+   `what-if job completed from S3` and the **first** poll returns `done` —
+   the submit-time short-circuit, no worker involvement.
+
+A corrupt object is treated as a miss (`failed to deserialize S3 simulate`),
+recomputed fresh, and re-stored.
+
 Clear a stuck/backed-up queue with `scripts/queue-clear.sh` (repo root):
 `--surgical` drops queued + pending entries and recreates the consumer group in
 place (worker keeps running; results kept); `--nuke` wipes the whole
