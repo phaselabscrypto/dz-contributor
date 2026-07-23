@@ -1463,49 +1463,6 @@ export function SimulateTab({
         </Card>
       )}
 
-      {/* Step 5: Calculate button — sticky at the bottom of the viewport
-           when there are pending changes and results haven't been computed
-           against the current edit set. */}
-      {showAddLinks && (
-        <div
-          className={
-            hasChanges && !simResult
-              ? "sticky bottom-3 z-30"
-              : ""
-          }
-        >
-          <div className="flex gap-2">
-            <button
-              onClick={() => {
-                setShowJobModal(true);
-                setJobState("confirming");
-              }}
-              disabled={!hasChanges || simLoading}
-              className="flex-1 rounded-lg bg-cream text-dark font-display text-sm tracking-wide py-3 shadow-lg transition-all hover:bg-cream-80 disabled:opacity-30 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-            >
-              {hasChanges ? (
-                <span className="flex items-center justify-center gap-2">
-                  Calculate Impact
-                  <span className="text-xs font-mono uppercase tracking-[0.14em] opacity-60">
-                    {removedLinks.size > 0 && `−${removedLinks.size} `}
-                    {addedLinks.length > 0 && `+${addedLinks.length} `}
-                    {demandOverrideCount > 0 && `Δ${demandOverrideCount}`}
-                  </span>
-                </span>
-              ) : (
-                "Calculate Impact"
-              )}
-            </button>
-            {hasChanges && (
-              <ShareButton
-                epoch={selectedEpoch}
-                className="shrink-0 flex items-center gap-2 rounded-lg border border-cream-15 bg-surface px-4 py-3 text-sm font-display tracking-wide text-cream-60 shadow-lg hover:text-cream hover:border-cream-30 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-              />
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Shapley job confirmation + progress + results modal */}
       <ShapleyJobModal
         open={showJobModal}
@@ -1742,6 +1699,50 @@ export function SimulateTab({
             </p>
           </CardContent>
         </Card>
+      )}
+
+      {/* Step 5: Calculate button — sits below the results so the computed
+           forecast (or a shared link's) is the focus, not the trigger. Sticky
+           at the bottom of the viewport when there are pending changes and
+           results haven't been computed against the current edit set. */}
+      {showAddLinks && (
+        <div
+          className={
+            hasChanges && !simResult
+              ? "sticky bottom-3 z-30"
+              : ""
+          }
+        >
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                setShowJobModal(true);
+                setJobState("confirming");
+              }}
+              disabled={!hasChanges || simLoading}
+              className="flex-1 rounded-lg bg-cream text-dark font-display text-sm tracking-wide py-3 shadow-lg transition-all hover:bg-cream-80 disabled:opacity-30 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              {hasChanges ? (
+                <span className="flex items-center justify-center gap-2">
+                  Calculate Impact
+                  <span className="text-xs font-mono uppercase tracking-[0.14em] opacity-60">
+                    {removedLinks.size > 0 && `−${removedLinks.size} `}
+                    {addedLinks.length > 0 && `+${addedLinks.length} `}
+                    {demandOverrideCount > 0 && `Δ${demandOverrideCount}`}
+                  </span>
+                </span>
+              ) : (
+                "Calculate Impact"
+              )}
+            </button>
+            {hasChanges && (
+              <ShareButton
+                epoch={selectedEpoch}
+                className="shrink-0 flex items-center gap-2 rounded-lg border border-cream-15 bg-surface px-4 py-3 text-sm font-display tracking-wide text-cream-60 shadow-lg hover:text-cream hover:border-cream-30 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              />
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
