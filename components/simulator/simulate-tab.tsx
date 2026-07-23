@@ -236,11 +236,10 @@ export function SimulateTab({
   // `run=1` (stamped only by Share) auto-runs the scenario once on open. Epoch
   // and contributor are already resolved when this tab mounts (the page gates
   // on a loaded snapshot), so the run decision is knowable synchronously — we
-  // freeze it once so the job modal can open in its running state via lazy
-  // init rather than a setState-in-effect, and a later contributor/epoch change
-  // can't retroactively trigger a run without the modal. Also require decodable
-  // edits, mirroring the manual button's `hasChanges` gate — a `run=1` URL with
-  // none would otherwise fire a baseline-vs-baseline no-op solve.
+  // freeze it once so a later contributor/epoch change can't retroactively
+  // trigger a run. Also require decodable edits, mirroring the manual button's
+  // `hasChanges` gate — a `run=1` URL with none would otherwise fire a
+  // baseline-vs-baseline no-op solve.
   const [runFlag] = useQueryState("run", parseAsRunFlag);
   const [autoRunOnMount] = useState(() => {
     const hasEditsAtMount =
@@ -269,7 +268,11 @@ export function SimulateTab({
   const cancelledRef = useRef(false);
   const autoRunFiredRef = useRef(false);
   const resultsRef = useRef<HTMLDivElement>(null);
-  const [showJobModal, setShowJobModal] = useState(autoRunOnMount);
+  // The progress modal starts closed even for an auto-run (shared link): a
+  // cached scenario resolves instantly and should skip straight to inline
+  // results, so handleSimulate reveals the modal lazily only on a cache miss
+  // (see the `deferModal` path).
+  const [showJobModal, setShowJobModal] = useState(false);
   const [jobState, setJobState] = useState<JobState>(
     autoRunOnMount ? "running" : "confirming"
   );
@@ -441,7 +444,7 @@ export function SimulateTab({
     setSimResult(null);
   };
 
-  const handleSimulate = async () => {
+  const handleSimulate = async (opts: { deferModal?: boolean } = {}) => {
     if (!selectedEpoch || !contributorCode) return;
     setSimLoading(true);
     setSimError(null);
@@ -495,10 +498,19 @@ export function SimulateTab({
       // give up after MAX_CONSECUTIVE_POLL_FAILURES, keeping the job reference
       // throughout. A successful poll resets the counter; an explicit terminal
       // state (done/failed/cancelled) ends polling immediately.
+      // For a deferred (shared-link auto-run) start the modal is still closed —
+      // reveal it only if a poll shows the job actually computing, so a cached
+      // shared link lands straight on inline results with no "Computing…" flash.
+      // `modalOpened` is already true for the manual path (the button opened it).
+      let modalOpened = !opts.deferModal;
       let consecutiveFailures = 0;
+      let firstPoll = true;
       for (;;) {
         if (cancelledRef.current) return;
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        // First poll fires immediately — a cache hit is already `done` on the
+        // first GET; only pace SUBSEQUENT polls at POLL_INTERVAL_MS.
+        if (!firstPoll) await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        firstPoll = false;
         if (cancelledRef.current) return;
 
         try {
@@ -549,6 +561,14 @@ export function SimulateTab({
             setSimReconnecting(false);
             return;
           }
+          // Still running (no terminal state matched). Reveal the progress modal
+          // for a deferred run now that we know it's a real compute, not an
+          // instant cache hit.
+          if (!modalOpened) {
+            setShowJobModal(true);
+            setJobState("running");
+            modalOpened = true;
+          }
         } catch (pollErr) {
           // Transport-level failure (HTTP non-ok or network reject) — transient.
           // Keep the job reference and keep polling until the budget is spent.
@@ -593,16 +613,16 @@ export function SimulateTab({
     handleSimulate();
   };
 
-  // Auto-run a shared forecast. The modal is already open in its running state
-  // (lazy-initialised from autoRunOnMount), so this only kicks off the existing
-  // job path — skipping the confirmation. The ref guard keeps it to a single
-  // fire per mount even under Strict-Mode's double-invoked effects; a fresh
-  // mount (reloading the shared link) re-runs and re-shows the forecast —
-  // instant when the result is still cached.
+  // Auto-run a shared forecast. `deferModal` keeps the progress modal closed
+  // until a poll proves the job is actually computing — a cached shared link
+  // resolves `done` on the first poll and lands straight on inline results with
+  // no "Computing…" flash; only a genuine cache miss reveals the modal. The ref
+  // guard keeps it to a single fire per mount even under Strict-Mode's
+  // double-invoked effects; a fresh mount (reloading the link) re-runs.
   useEffect(() => {
     if (autoRunFiredRef.current || !autoRunOnMount) return;
     autoRunFiredRef.current = true;
-    handleSimulate();
+    handleSimulate({ deferModal: true });
     // handleSimulate is intentionally omitted — the ref guard fires this once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRunOnMount]);
