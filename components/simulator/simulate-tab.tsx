@@ -59,6 +59,7 @@ import {
   Plus,
   Share2,
   Check,
+  Loader2,
 } from "lucide-react";
 
 const NEW_CONTRIBUTOR_VALUE = "__new__";
@@ -255,7 +256,10 @@ export function SimulateTab({
   });
   const [showDemandEditor, setShowDemandEditor] = useState(false);
   const [simResult, setSimResult] = useState<SimulateResponse | null>(null);
-  const [simLoading, setSimLoading] = useState(false);
+  // Seed `true` for an auto-run (shared link) so the results-area loader shows
+  // from the first paint — no editor flash before the effect fires the run.
+  // handleSimulate always clears it in its `finally`.
+  const [simLoading, setSimLoading] = useState(autoRunOnMount);
   const [simError, setSimError] = useState<string | null>(null);
   // Async-job UI: progress % (0–100) + the current phase ("baseline" |
   // "modified"), since the bar is per-phase 0–100 and resets at the handoff.
@@ -1537,6 +1541,28 @@ export function SimulateTab({
         <div className="rounded-lg bg-red/5 border border-red/20 px-3 py-2 text-xs text-red">
           {displaySimError(simError)}
         </div>
+      )}
+
+      {/* Shared-link resolve loader: a shared forecast (run=1) resolves with the
+          progress modal deferred, so cover the fetch window with a results-shaped
+          loader instead of a bare editor. Hidden the moment results arrive (cache
+          hit) or the progress modal opens (cache miss). */}
+      {autoRunOnMount && simLoading && !simResult && !showJobModal && (
+        <Card className="bg-cream-5 border-cream-8">
+          <CardHeader>
+            <CardTitle className="font-display text-sm tracking-wide text-cream">
+              Simulation results
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center gap-3 py-8 text-cream-60">
+              <Loader2 className="size-4 animate-spin shrink-0" />
+              <span className="text-xs font-mono uppercase tracking-[0.14em]">
+                Loading shared forecast…
+              </span>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Step 5: Results */}
