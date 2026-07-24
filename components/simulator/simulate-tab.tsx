@@ -71,8 +71,7 @@ const NETWORK_SHAPLEY_REPO_URL =
 
 // Same-metro links earn no reward (that requires connecting specific
 // device-level endpoints), so the tool never stages one. Rendered wherever a
-// user selects an intra-metro pair — the manual form and the map picker — with
-// the wording the DoubleZero Foundation asked for (PSYS-558).
+// user selects an intra-metro pair — the manual form and the map picker.
 function IntraMetroHint({ className }: { className?: string }) {
   return (
     <p
@@ -772,24 +771,6 @@ export function SimulateTab({
             : ""}{". "}
           Fees are denominated in SOL on-chain; we display SOL with a live USD
           conversion from Jupiter. Directional — 2Z payouts are not currently active.
-        </span>
-      </div>
-      {/* Illustrative-figures disclaimer (PSYS-558) */}
-      <div className="flex items-start gap-2 rounded-lg bg-cream-5 border border-cream-15 px-3 py-2 text-xs text-cream-60">
-        <Info className="size-3.5 shrink-0 mt-0.5" />
-        <span>
-          These figures are illustrative. Before making exact or
-          capital-expenditure decisions, consult the official DoubleZero{" "}
-          <a
-            href={NETWORK_SHAPLEY_REPO_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 underline decoration-dotted hover:text-cream"
-          >
-            network-shapley repository
-            <ExternalLink className="size-3" />
-          </a>
-          .
         </span>
       </div>
 
@@ -1772,6 +1753,24 @@ export function SimulateTab({
                 : ""}
               .
             </p>
+            {/* Illustrative-figures disclaimer */}
+            <div className="mt-3 flex items-start gap-2 border-t border-cream-8 pt-3 text-xs text-cream-40">
+              <Info className="size-3.5 shrink-0 mt-0.5" />
+              <span>
+                These figures are illustrative. Before making exact or
+                capital-expenditure decisions, consult the official DoubleZero{" "}
+                <a
+                  href={NETWORK_SHAPLEY_REPO_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 underline decoration-dotted hover:text-cream"
+                >
+                  network-shapley repository
+                  <ExternalLink className="size-3" />
+                </a>
+                .
+              </span>
+            </div>
           </CardContent>
         </Card>
       )}

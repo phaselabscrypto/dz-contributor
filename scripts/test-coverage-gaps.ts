@@ -3,11 +3,10 @@
  * Coverage-gap suggestion invariants test: `findCoverageGaps`
  * (`lib/utils/demand.ts`).
  *
- * Asserts the PSYS-558 properties that make "Suggested routes" useful:
+ * Asserts the properties that make "Suggested routes" useful:
  *  - origins are diversified (one suggestion per origin metro), so the busiest
- *    city no longer becomes the origin of every top-scored pair (item 3);
- *  - intra-metro pairs are never suggested (they earn 0 and 400 on Calculate,
- *    item 2);
+ *    city no longer becomes the origin of every top-scored pair;
+ *  - intra-metro pairs are never suggested (they earn 0 and 400 on Calculate);
  *  - results stay bounded by `limit`, sorted by score desc, and deterministic;
  *  - a top-up pass fills remaining slots when distinct origins < limit.
  *
