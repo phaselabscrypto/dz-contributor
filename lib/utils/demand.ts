@@ -39,10 +39,10 @@ export function estimateNewContributorShare(
  *  - Each pair is oriented so the higher-demand endpoint is `cityA` (the
  *    "origin"), then capped at one suggestion per origin metro. Without this the
  *    single busiest city becomes the origin of every top-scored pair and the
- *    list reads as one repeated origin (PSYS-558 item 3).
+ *    list reads as one repeated origin.
  *  - Intra-metro pairs are skipped entirely: they earn no reward and are
  *    rejected server-side, so suggesting one would stage a link that 400s on
- *    Calculate (PSYS-558 item 2).
+ *    Calculate.
  */
 export function findCoverageGaps(
   cityDemands: CityDemand[],
