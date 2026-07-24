@@ -20,6 +20,7 @@
     "test:borsh": "tsx scripts/test-borsh-registry.ts",
     "test:canonical": "tsx scripts/test-canonical-parity.ts",
     "test:demand": "tsx scripts/test-demand-overrides.ts",
+    "test:coverage-gaps": "tsx scripts/test-coverage-gaps.ts",
     "test:links": "tsx scripts/test-link-edits.ts",
     "test:scenario-url": "tsx scripts/test-scenario-url.ts",
     "test:baseline": "tsx scripts/test-baseline-route.ts",

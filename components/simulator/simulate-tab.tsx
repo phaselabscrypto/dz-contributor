@@ -59,10 +59,42 @@ import {
   Plus,
   Share2,
   Check,
+  ExternalLink,
+  Info,
   Loader2,
 } from "lucide-react";
 
 const NEW_CONTRIBUTOR_VALUE = "__new__";
+
+const NETWORK_SHAPLEY_REPO_URL =
+  "https://github.com/doublezerofoundation/network-shapley-rs";
+
+// Same-metro links earn no reward (that requires connecting specific
+// device-level endpoints), so the tool never stages one. Rendered wherever a
+// user selects an intra-metro pair — the manual form and the map picker — with
+// the wording the DoubleZero Foundation asked for (PSYS-558).
+function IntraMetroHint({ className }: { className?: string }) {
+  return (
+    <p
+      className={`flex items-start gap-1.5 text-xs text-amber${className ? ` ${className}` : ""}`}
+    >
+      <AlertTriangle className="size-3 shrink-0 mt-0.5" />
+      <span>
+        For intra-metro rewards you must connect specific data centers. Consult
+        the{" "}
+        <a
+          href={NETWORK_SHAPLEY_REPO_URL}
+          target="_blank"
+          rel="noreferrer"
+          className="underline decoration-dotted hover:text-cream"
+        >
+          repo
+        </a>{" "}
+        for accurate simulations.
+      </span>
+    </p>
+  );
+}
 
 /**
  * `run=1` marks a shared forecast that should auto-run on open. Only the Share
@@ -232,6 +264,17 @@ export function SimulateTab({
   const [newCityZ, setNewCityZ] = useState("");
   const [newBandwidth, setNewBandwidth] = useState<number>(10);
   const [newLatency, setNewLatency] = useState<number>(10);
+  // Transient hint shown when a same-metro pair is picked on the MAP. The manual
+  // form disables its Add button on the same condition, but a map click isn't
+  // persisted form state, so this is a plain flag that auto-dismisses.
+  const [showMapMetroHint, setShowMapMetroHint] = useState(false);
+  const mapHintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (mapHintTimer.current) clearTimeout(mapHintTimer.current);
+    },
+    []
+  );
   // Metro-keyed (uppercased exchange code, e.g. "FRA") validator-count overrides.
   const [demandOverrides, setDemandOverrides] = useQueryState("demand", parseAsDemandOverrides);
   // `run=1` (stamped only by Share) auto-runs the scenario once on open. Epoch
@@ -406,6 +449,7 @@ export function SimulateTab({
     setNewCityZ("");
     setDemandOverrides(null);
     setShowDemandEditor(false);
+    setShowMapMetroHint(false);
     onContributorChange?.(code);
   };
 
@@ -730,6 +774,24 @@ export function SimulateTab({
           conversion from Jupiter. Directional — 2Z payouts are not currently active.
         </span>
       </div>
+      {/* Illustrative-figures disclaimer (PSYS-558) */}
+      <div className="flex items-start gap-2 rounded-lg bg-cream-5 border border-cream-15 px-3 py-2 text-xs text-cream-60">
+        <Info className="size-3.5 shrink-0 mt-0.5" />
+        <span>
+          These figures are illustrative. Before making exact or
+          capital-expenditure decisions, consult the official DoubleZero{" "}
+          <a
+            href={NETWORK_SHAPLEY_REPO_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 underline decoration-dotted hover:text-cream"
+          >
+            network-shapley repository
+            <ExternalLink className="size-3" />
+          </a>
+          .
+        </span>
+      </div>
 
       {/* Step 1: Audience selector — existing operator vs new contributor */}
       <Card className="bg-cream-5 border-cream-8">
@@ -840,6 +902,22 @@ export function SimulateTab({
               removedLinkPubkeys={removedLinks}
               addedLinks={addedLinks}
               onPairSelect={(a, z) => {
+                // Mirror the manual add-link guard (addLink / draftEndpointsSameMetro):
+                // an intra-metro link earns nothing and is rejected server-side. The
+                // map has no disabled Add button, so a silent no-op reads as a bug —
+                // show a transient hint and stage nothing instead.
+                const metroA = locationToMetro.get(a);
+                const metroZ = locationToMetro.get(z);
+                if (metroA !== undefined && metroA === metroZ) {
+                  setShowMapMetroHint(true);
+                  if (mapHintTimer.current) clearTimeout(mapHintTimer.current);
+                  mapHintTimer.current = setTimeout(
+                    () => setShowMapMetroHint(false),
+                    4000
+                  );
+                  return;
+                }
+                setShowMapMetroHint(false);
                 setAddedLinks((prev) => [
                   ...prev,
                   {
@@ -853,6 +931,7 @@ export function SimulateTab({
               }}
               onLinkClick={(pubkey) => toggleLink(pubkey)}
             />
+            {showMapMetroHint && <IntraMetroHint className="mt-3" />}
           </CardContent>
         </Card>
       )}
@@ -1043,6 +1122,7 @@ export function SimulateTab({
                   setRemoveParam(null);
                   setDemandOverrides(null);
                   setSimResult(null);
+                  setShowMapMetroHint(false);
                 }}
                 disabled={!hasChanges}
                 className="text-xs font-mono px-3 py-1.5 border border-red-500/20 text-red-400 hover:bg-red-500/5 transition-colors disabled:opacity-30 disabled:cursor-not-allowed ml-auto"
@@ -1158,12 +1238,7 @@ export function SimulateTab({
             </div>
 
             {/* Intra-metro draft warning */}
-            {draftEndpointsSameMetro && (
-              <p className="text-xs text-amber flex items-center gap-1.5">
-                <AlertTriangle className="size-3 shrink-0" />
-                Intra-metro links don&apos;t earn rewards — pick locations in two different metros.
-              </p>
-            )}
+            {draftEndpointsSameMetro && <IntraMetroHint />}
 
             {/* Bandwidth + RTT */}
             <div className="grid grid-cols-2 gap-3">
