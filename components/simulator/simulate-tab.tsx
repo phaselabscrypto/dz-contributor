@@ -774,24 +774,6 @@ export function SimulateTab({
           conversion from Jupiter. Directional — 2Z payouts are not currently active.
         </span>
       </div>
-      {/* Illustrative-figures disclaimer (PSYS-558) */}
-      <div className="flex items-start gap-2 rounded-lg bg-cream-5 border border-cream-15 px-3 py-2 text-xs text-cream-60">
-        <Info className="size-3.5 shrink-0 mt-0.5" />
-        <span>
-          These figures are illustrative. Before making exact or
-          capital-expenditure decisions, consult the official DoubleZero{" "}
-          <a
-            href={NETWORK_SHAPLEY_REPO_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 underline decoration-dotted hover:text-cream"
-          >
-            network-shapley repository
-            <ExternalLink className="size-3" />
-          </a>
-          .
-        </span>
-      </div>
 
       {/* Step 1: Audience selector — existing operator vs new contributor */}
       <Card className="bg-cream-5 border-cream-8">
@@ -1772,6 +1754,24 @@ export function SimulateTab({
                 : ""}
               .
             </p>
+            {/* Illustrative-figures disclaimer (PSYS-558) */}
+            <div className="mt-3 flex items-start gap-2 border-t border-cream-8 pt-3 text-xs text-cream-40">
+              <Info className="size-3.5 shrink-0 mt-0.5" />
+              <span>
+                These figures are illustrative. Before making exact or
+                capital-expenditure decisions, consult the official DoubleZero{" "}
+                <a
+                  href={NETWORK_SHAPLEY_REPO_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 underline decoration-dotted hover:text-cream"
+                >
+                  network-shapley repository
+                  <ExternalLink className="size-3" />
+                </a>
+                .
+              </span>
+            </div>
           </CardContent>
         </Card>
       )}
