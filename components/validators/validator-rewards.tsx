@@ -166,7 +166,7 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
         <MetricCard
           label="Validator pool / epoch"
           value={`${formatSolFromSol(rewards.projectedValidatorPoolPerEpochSol)} SOL`}
-          note="45% of total fees"
+          note="45% of total fees (incl. validator clients)"
         />
         <MetricCard
           label="Avg reward / epoch"
@@ -246,7 +246,7 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
         <Card className="bg-cream-5 border-cream-8 overflow-hidden">
           <CardHeader>
             <CardTitle className="font-display text-sm tracking-wide text-cream">
-              Epoch {rewards.epoch} Publishers
+              {formatNumber(rewards.publishingValidatorCount)} Publishers
             </CardTitle>
           </CardHeader>
           <CardContent className="p-0">
@@ -339,7 +339,7 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
       {/* Mobile: Card list */}
       <div className="md:hidden space-y-3 max-h-[600px] overflow-y-auto">
         <p className="font-display text-sm tracking-wide text-cream">
-          Epoch {rewards.epoch} Publishers
+          {formatNumber(rewards.publishingValidatorCount)} Publishers
         </p>
         {filtered.length === 0 && (
           <p className="text-center text-sm text-cream-40 py-8">

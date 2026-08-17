@@ -1,7 +1,7 @@
 "use client";
 
 import { useEconomicHub } from "@/lib/hooks/use-live";
-import { ehNameToCode, getContributorColor } from "@/lib/constants/config";
+import { ehNameToCode, getContributorColor, getContributorDisplayName } from "@/lib/constants/config";
 import { rowsToCsv, downloadCsv } from "@/lib/utils/csv";
 import { Download } from "lucide-react";
 import { EpochRewardHistory } from "@/components/economics/epoch-reward-history";
@@ -83,8 +83,9 @@ export default function EconomicsPageClient() {
       <p className="text-xs text-muted-foreground font-mono leading-relaxed">
         Distributed = 2Z already paid out to contributors. Pending payouts =
         rewards accrued in finalized epochs but not yet sent on-chain. Burned =
-        the 10% share of revenue that&apos;s permanently removed per the
-        45/45/10 split. All values from{" "}
+        the 10% share of revenue that&apos;s permanently removed. The current
+        split is 45% contributors / 29.25% validators / 15.75% validator
+        clients / 10% burned. All values from{" "}
         <a
           href="https://doublezero.xyz/api/economic-hub"
           target="_blank"
@@ -143,7 +144,7 @@ export default function EconomicsPageClient() {
                   "Fiber (km)",
                 ];
                 const rows = data.contributors.map((c) => [
-                  c.name,
+                  getContributorDisplayName(ehNameToCode(c.name)),
                   c.rewardPercentage.toFixed(6),
                   ((c.rewardPercentage / 100) * data.totalDistributed2Z).toFixed(2),
                   ((c.rewardPercentage / 100) * data.totalDistributed2ZUsd).toFixed(2),
@@ -186,7 +187,7 @@ export default function EconomicsPageClient() {
                       style={{ backgroundColor: color }}
                     />
                     <span className="font-medium text-sm truncate">
-                      {c.name}
+                      {getContributorDisplayName(code)}
                     </span>
                   </div>
                   <div className="col-span-12 sm:col-span-4">
@@ -235,12 +236,14 @@ export default function EconomicsPageClient() {
               </tr>
             </thead>
             <tbody>
-              {data.contributors.map((c) => (
+              {data.contributors.map((c) => {
+                const ftCode = ehNameToCode(c.name);
+                return (
                 <tr
                   key={c.name}
                   className="border-b border-border last:border-b-0 hover:bg-surface-2/40"
                 >
-                  <td className="px-3 py-2 font-medium truncate max-w-[180px] sm:max-w-none">{c.name}</td>
+                  <td className="px-3 py-2 font-medium truncate max-w-[180px] sm:max-w-none">{getContributorDisplayName(ftCode)}</td>
                   <td className="hidden sm:table-cell px-3 py-2 text-right tabular-nums font-mono">
                     {c.devices}
                   </td>
@@ -260,7 +263,8 @@ export default function EconomicsPageClient() {
                     {c.rewardPercentage.toFixed(3)}%
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

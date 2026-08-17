@@ -125,10 +125,12 @@ export function shapleyEndpointUrl(
   return base === null ? null : `${base}${endpoint}`;
 }
 
-// Economics — 45/45/10 split
+// Economics — 45 / 29.25 / 15.75 / 10 split
+// Total: 45% contributors, 29.25% validators, 15.75% validator clients, 10% burned.
+// The validator + client shares sum to 45% (split 65/35 via VALIDATOR_TAKE_OF_POOL).
 export const BURN_RATE = 0.10; // 10% of revenue burned
 export const CONTRIBUTOR_SHARE = 0.45; // 45% distributed to contributors (Shapley)
-export const VALIDATOR_SHARE = 0.45; // 45% distributed to validators (stake-weighted)
+export const VALIDATOR_SHARE = 0.45; // 45% combined validator pool (operators + clients)
 
 // Validator/client revenue split inside the 45% validator pool.
 // Confirmed by DZ Foundation: validators must share the pool
