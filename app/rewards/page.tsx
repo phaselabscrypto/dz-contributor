@@ -80,7 +80,7 @@ export default function RewardsPage() {
     <>
       <PageHeader
         title="Fee revenue history"
-        description="DoubleZero protocol fee revenue per Solana epoch. This is the pool that funds the 45 / 45 / 10 split."
+        description="Historical DoubleZero protocol fee revenue per Solana epoch (decommissioned since March 2025). Current revenue comes from shreds. The new split is 45% contributors / 29.25% validators / 15.75% validator clients / 10% burned."
       />
       <div className="flex-1 px-4 sm:px-6 py-4 sm:py-6">
         {error && !feeHistory ? (
@@ -98,9 +98,16 @@ export default function RewardsPage() {
           />
         ) : (
           <div className="space-y-6">
+            {/* Decommissioned notice */}
+            <div className="border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-300 leading-relaxed">
+              This fee-based reward system was decommissioned in March 2025.
+              Current DoubleZero revenue comes from shreds. The data below is
+              historical.
+            </div>
+
             {/* Explainer */}
             <div className="border border-border bg-surface px-4 py-3 text-xs text-cream-60 leading-relaxed">
-              These are protocol fees that fund the DoubleZero reward
+              These are historical protocol fees from the original reward
               distribution: <span className="text-foreground">45%</span> to
               contributors (Shapley-weighted, see{" "}
               <Link
@@ -109,17 +116,18 @@ export default function RewardsPage() {
               >
                 /contributors
               </Link>
-              ), <span className="text-foreground">45%</span> to validators
-              (stake-weighted × 65%, see{" "}
+              ), <span className="text-foreground">29.25%</span> to validators
+              (stake-weighted, see{" "}
               <Link
                 href="/validators"
                 className="underline decoration-dotted hover:text-foreground"
               >
                 /validators
               </Link>
-              ), <span className="text-foreground">10%</span> burned. Values
-              recorded on chain in lamports; this page shows SOL plus a live
-              USD equivalent from Jupiter. Full math:{" "}
+              ), <span className="text-foreground">15.75%</span> to validator
+              clients, <span className="text-foreground">10%</span> burned.
+              Values recorded on chain in lamports; this page shows SOL plus a
+              live USD equivalent from Jupiter. Full math:{" "}
               <Link
                 href="/methodology"
                 className="underline decoration-dotted hover:text-foreground"

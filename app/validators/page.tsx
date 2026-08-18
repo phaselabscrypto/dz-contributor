@@ -43,7 +43,7 @@ export default function ValidatorsPage() {
     <>
       <PageHeader
         title="Validators"
-        description="Publishing validators on DoubleZero — stake-weighted projected SOL share of the 45% validator pool. Quality signals: leader-shred publishing and multicast connection."
+        description="Publishing validators on DoubleZero — stake-weighted projected SOL share of the validator pool (29.25% of total fees, or 32.5% of after-burn fees). Quality signals: leader-shred publishing and multicast connection."
       />
       <div className="flex-1 px-4 py-4 sm:px-6 sm:py-6 space-y-4">
         <Link

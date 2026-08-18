@@ -177,12 +177,13 @@ share(op)   = shapley(op) / Σ_op shapley(op)`}
               <Link href="/contributors" className="underline decoration-dotted hover:text-foreground">
                 /contributors/[code]
               </Link>{" "}
-              we project a forward 2Z payout per epoch. The pool is 45% of
-              total fee revenue per the 45/45/10 split.
+              we project a forward 2Z payout per epoch. The contributor pool
+              is 45% of total fee revenue.
             </p>
             <Formula>
-              {`per_epoch_2Z = current_share × average_2Z_per_epoch × 0.45
-per_year_2Z  = per_epoch_2Z × 144`}
+              {`contributor_pool = average_fee_per_epoch × 0.45
+per_epoch_2Z     = current_share × contributor_pool
+per_year_2Z      = per_epoch_2Z × 144`}
             </Formula>
             <p>
               <code>average_2Z_per_epoch</code> is the mean of historical fee
@@ -198,8 +199,9 @@ per_year_2Z  = per_epoch_2Z × 144`}
               <Link href="/validators" className="underline decoration-dotted hover:text-foreground">
                 /validators
               </Link>{" "}
-              we project SOL share of the 45% validator pool, stake-weighted
-              across eligible publishers. Per DZ Foundation Q12, eligibility
+              we project SOL share of the validator pool (29.25% of total
+              fees, or 32.5% of after-burn fees), stake-weighted across
+              eligible publishers. Per DZ Foundation Q12, eligibility
               requires <code>publishing_leader_shreds = true</code> AND{" "}
               <code>publishing_retransmitted = false</code>. Anyone failing
               either condition receives zero. The pool is split 65/35 between
@@ -207,9 +209,11 @@ per_year_2Z  = per_epoch_2Z × 144`}
               keeps 65% of their stake-weighted share.
             </p>
             <Formula>
-              {`validator_pool_per_epoch = average_fee_per_epoch_SOL × 0.45
+              {`total_validator_pool     = average_fee_per_epoch_SOL × 0.45   (incl. clients)
+validator_pool_per_epoch = total_validator_pool × 0.65          (29.25% of total fees)
+client_pool_per_epoch    = total_validator_pool × 0.35          (15.75% of total fees)
 operator_share           = activated_stake / Σ eligible_stake
-validator_take_per_epoch = operator_share × validator_pool_per_epoch × 0.65`}
+validator_take_per_epoch = operator_share × validator_pool_per_epoch`}
             </Formula>
             <p>
               <code>multicast_connected</code> is shown as a quality signal
@@ -318,9 +322,10 @@ metro_utilisation   = max(in, out) / capacity`}
                 {" "}— raw share of cumulative payout, not pool-weighted.
               </li>
               <li>
-                Validator reward = <code>stake_share × 45% pool × 0.65</code>.
-                Eligibility binary on publishing shreds AND not publishing
-                retransmits. No multicast multiplier.
+                Validator reward = <code>stake_share × validator_pool (29.25% of total fees)</code>.
+                The full 45% pool splits 65/35 between validator operators and
+                their clients (15.75%). Eligibility binary on publishing shreds
+                AND not publishing retransmits. No multicast multiplier.
               </li>
               <li>
                 Public-internet capacity is infinite — only private links
