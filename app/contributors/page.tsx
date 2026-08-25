@@ -19,6 +19,10 @@ import { rowsToCsv, downloadCsv } from "@/lib/utils/csv";
 import { fmtBps } from "@/lib/utils/format";
 import { useLocalStorageState } from "@/lib/hooks/use-local-storage";
 import {
+  makeSortStateValidator,
+  type SortState,
+} from "@/lib/utils/sort-state";
+import {
   LoadingState,
   ErrorState,
   EmptyState,
@@ -37,6 +41,19 @@ type SortKey =
   | "live"
   | "alltime";
 
+const SORT_KEYS: Record<SortKey, true> = {
+  name: true,
+  devices: true,
+  links: true,
+  metros: true,
+  validators: true,
+  bandwidth: true,
+  live: true,
+  alltime: true,
+};
+const DEFAULT_SORT: SortState<SortKey> = { key: "alltime", dir: "desc" };
+const validateSort = makeSortStateValidator(SORT_KEYS);
+
 export default function ContributorsPage() {
   const { data: topology, isLoading, error, mutate } = useLiveTopology();
   const { data: hub } = useEconomicHub();
@@ -45,10 +62,11 @@ export default function ContributorsPage() {
   const baselineReady =
     baseline && !isBaselineWarming(baseline) ? baseline : null;
   const [query, setQuery] = useState("");
-  const [sortState, setSortState] = useLocalStorageState<{
-    key: SortKey;
-    dir: "asc" | "desc";
-  }>("dz.contributors.sort", { key: "alltime", dir: "desc" });
+  const [sortState, setSortState] = useLocalStorageState(
+    "dz.contributors.sort",
+    DEFAULT_SORT,
+    validateSort,
+  );
   const sortKey = sortState.key;
   const sortDir = sortState.dir;
 
