@@ -13,9 +13,9 @@ type RouteErrorPanelProps = {
 };
 
 /**
- * Shared body for a route's `error.tsx`. Keeps the page header so a failed
- * table does not take the whole page down with it. `reset` re-renders the
- * segment, which only helps if the cause was transient.
+ * Shared body for a route's `error.tsx`. Keeps the page header, so a failed
+ * table is scoped to the table area. `reset` re-renders the segment, which
+ * only helps if the cause was transient.
  */
 export function RouteErrorPanel({
   title,

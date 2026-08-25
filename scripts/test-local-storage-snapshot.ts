@@ -5,13 +5,13 @@
  * `useSyncExternalStore` compares snapshots with `Object.is`, so `getSnapshot`
  * must hand React a primitive. Returning a freshly parsed object re-renders
  * without end and throws minified React error #185. These assertions pin the
- * property React actually depends on: `readStoredRaw` returns the raw string,
+ * property React depends on: `readStoredRaw` returns the raw string,
  * and the parse happens downstream in `parseStored`.
  *
  * Also covers the stored-value guard in `lib/utils/sort-state.ts`, which keeps
  * a stale or hand-edited entry from reaching a table comparator.
  *
- * Pure input construction — no storage, no network, no browser, safe anywhere.
+ * Pure input construction against a stubbed storage object. Safe anywhere.
  *
  * Usage:
  *   npx tsx scripts/test-local-storage-snapshot.ts
@@ -41,7 +41,7 @@ function makeFakeStorage(throwOnGet = false): FakeStorage {
 }
 
 let storage = makeFakeStorage();
-// Getter, not a fixed value, so a case can swap the backing store mid-run.
+// A getter, so a case can swap the backing store mid-run.
 globalThis.window = {
   get localStorage() {
     return storage;
@@ -49,7 +49,7 @@ globalThis.window = {
 } as unknown as Window & typeof globalThis;
 
 // Copied verbatim from node_modules/react-dom/cjs/react-dom-client.production.js
-// so the assertions run against React's real comparison, not a paraphrase.
+// so the assertions run against React's real comparison.
 function checkIfSnapshotChanged(inst: {
   value: unknown;
   getSnapshot: () => unknown;
@@ -81,7 +81,6 @@ const validateSort = makeSortStateValidator(SORT_KEYS);
 
 const STORED = '{"key":"bw","dir":"desc"}';
 
-// 1. readStoredRaw never hands back an object.
 console.log("\n1. readStoredRaw returns a primitive");
 for (const [label, stored] of [
   ["absent", null],
@@ -100,7 +99,6 @@ for (const [label, stored] of [
   );
 }
 
-// 2. The #185 guard: identical storage yields an identical snapshot.
 console.log("\n2. repeated reads are Object.is-equal");
 {
   const key = "t2.stable";
@@ -121,7 +119,6 @@ console.log("\n2. repeated reads are Object.is-equal");
   );
 }
 
-// 3. A blocked storage read degrades instead of throwing.
 console.log("\n3. blocked storage");
 {
   const healthy = storage;
@@ -138,7 +135,6 @@ console.log("\n3. blocked storage");
   storage = healthy;
 }
 
-// 4. parseStored fallback behavior.
 console.log("\n4. parseStored");
 {
   const fb = DEFAULT_SORT;
@@ -164,7 +160,6 @@ console.log("\n4. parseStored");
   );
 }
 
-// 5. The stored-value guard itself.
 console.log("\n5. makeSortStateValidator");
 {
   check("good pair accepted", validateSort({ key: "lat", dir: "desc" }) !== null);
@@ -187,7 +182,6 @@ console.log("\n5. makeSortStateValidator");
   );
 }
 
-// 6. React's own consistency check cannot fire on an unchanged store.
 console.log("\n6. React checkIfSnapshotChanged");
 for (const [label, stored] of [
   ["absent", null],

@@ -8,7 +8,7 @@ export function readStoredRaw(key: string): string | null {
   try {
     return window.localStorage.getItem(key);
   } catch {
-    // Storage blocked (private mode, disabled site data) — treat as absent.
+    // Storage blocked (private mode, disabled site data). Treat as absent.
     return null;
   }
 }
@@ -27,7 +27,7 @@ export function parseStored<T>(
   try {
     parsed = JSON.parse(raw);
   } catch {
-    // Corrupt or hand-edited entry — fall back rather than propagate.
+    // A stale or hand-edited entry is expected here, so swallow and fall back.
     return fallback;
   }
   if (parsed === null) return fallback;
@@ -38,8 +38,8 @@ export function parseStored<T>(
 /**
  * useState that mirrors itself to localStorage, SSR-safe and shared across
  * every component reading the same key. A write that storage refuses has no
- * persisted effect. Pass `validate` to reject a stored value that no longer
- * fits `T`, and hoist it and `initial` to module scope so the returned value
+ * persisted effect. Pass `validate` to reject a stored value that does not
+ * fit `T`, and hoist it and `initial` to module scope so the returned value
  * keeps a stable identity across renders.
  */
 export function useLocalStorageState<T>(
@@ -60,8 +60,8 @@ export function useLocalStorageState<T>(
   );
 
   // The snapshot stays the raw string. useSyncExternalStore compares snapshots
-  // with Object.is, so a freshly parsed object would never compare equal and
-  // would re-render until React gives up.
+  // with Object.is, so a freshly parsed object never compares equal and
+  // re-renders until React throws.
   const getSnapshot = useCallback(
     (): string | null => readStoredRaw(key),
     [key],
@@ -84,7 +84,7 @@ export function useLocalStorageState<T>(
       try {
         window.localStorage.setItem(key, serialized);
       } catch {
-        // Quota or blocked storage — nothing persisted, so nothing to announce.
+        // Quota or blocked storage. Nothing persisted, so nothing to announce.
         return;
       }
       // `storage` only fires in other tabs; dispatch so this one re-reads too.
