@@ -1,6 +1,11 @@
 "use client";
 
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 /** The raw stored string, or null when absent, unreadable, or server-side. */
 export function readStoredRaw(key: string): string | null {
@@ -37,21 +42,25 @@ export function parseStored<T>(
 
 /**
  * useState that mirrors itself to localStorage, SSR-safe and shared across
- * every component reading the same key. A write that storage refuses has no
- * persisted effect. Pass `validate` to reject a stored value that does not
- * fit `T`, and hoist it and `initial` to module scope so the returned value
- * keeps a stable identity across renders.
+ * every component reading the same key. When storage refuses a write the value
+ * is held in memory for the session instead, so the control still responds.
+ * Pass `validate` to reject a stored value that does not fit `T`, and hoist it
+ * and `initial` to module scope so the returned value keeps a stable identity
+ * across renders.
  */
 export function useLocalStorageState<T>(
   key: string,
   initial: T,
   validate?: (parsed: unknown) => T | null,
 ): [T, (next: T | ((prev: T) => T)) => void] {
+  const [override, setOverride] = useState<{ value: T } | null>(null);
+
   const subscribe = useCallback(
     (onStoreChange: () => void) => {
       if (typeof window === "undefined") return () => {};
       const handler = (e: StorageEvent) => {
-        if (e.key === key) onStoreChange();
+        // A clear() in another tab reports a null key and drops every entry.
+        if (e.key === key || e.key === null) onStoreChange();
       };
       window.addEventListener("storage", handler);
       return () => window.removeEventListener("storage", handler);
@@ -70,29 +79,34 @@ export function useLocalStorageState<T>(
 
   const raw = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
-  const value = useMemo(
+  const stored = useMemo(
     () => parseStored(raw, initial, validate),
     [raw, initial, validate],
   );
+  const value = override ? override.value : stored;
 
   const set = useCallback(
     (next: T | ((prev: T) => T)) => {
-      const prev = parseStored(readStoredRaw(key), initial, validate);
+      const prev = override
+        ? override.value
+        : parseStored(readStoredRaw(key), initial, validate);
       const resolved =
         typeof next === "function" ? (next as (p: T) => T)(prev) : next;
       const serialized = JSON.stringify(resolved);
       try {
         window.localStorage.setItem(key, serialized);
       } catch {
-        // Quota or blocked storage. Nothing persisted, so nothing to announce.
+        // Storage refused the write, so hold the value for this session only.
+        setOverride({ value: resolved });
         return;
       }
+      setOverride(null);
       // `storage` only fires in other tabs; dispatch so this one re-reads too.
       window.dispatchEvent(
         new StorageEvent("storage", { key, newValue: serialized }),
       );
     },
-    [key, initial, validate],
+    [key, initial, validate, override],
   );
 
   return [value, set];
