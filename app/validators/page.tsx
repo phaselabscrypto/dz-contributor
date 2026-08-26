@@ -7,6 +7,7 @@ import { ValidatorRewards } from "@/components/validators/validator-rewards";
 import { usePublishers } from "@/lib/hooks/use-publishers";
 import { useFees } from "@/lib/hooks/use-fees";
 import { useLiveTopology } from "@/lib/hooks/use-live";
+import { useEpochRate } from "@/lib/hooks/use-epoch-rate";
 import { computeValidatorRewards } from "@/lib/utils/reward-estimator";
 
 export default function ValidatorsPage() {
@@ -14,6 +15,7 @@ export default function ValidatorsPage() {
     usePublishers();
   const { data: feeHistory, isLoading: feeLoading } = useFees();
   const { data: topology } = useLiveTopology();
+  const epochs = useEpochRate();
 
   // device_code → contributor_code join from the live topology, so we can
   // surface "Validator runs on Galaxy's frankfurt device" without making
@@ -34,8 +36,13 @@ export default function ValidatorsPage() {
     // paid in SOL. Fall back to 0 (not lamports) when the value is missing —
     // a lamport fallback would silently inflate the pool by 1e9×.
     const avgFeeSol = feeHistory?.averageFeeSol ?? 0;
-    return computeValidatorRewards(publishers, avgFeeSol, deviceToContrib);
-  }, [publishers, feeHistory, deviceToContrib]);
+    return computeValidatorRewards(
+      publishers,
+      avgFeeSol,
+      epochs,
+      deviceToContrib,
+    );
+  }, [publishers, feeHistory, epochs, deviceToContrib]);
 
   const isLoading = pubLoading || feeLoading;
 

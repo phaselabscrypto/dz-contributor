@@ -3,10 +3,9 @@ import {
   CONTRIBUTOR_SHARE,
   VALIDATOR_SHARE,
   BURN_RATE,
-  EPOCHS_PER_MONTH,
-  EPOCHS_PER_YEAR,
   SHAPLEY_PARAMS,
 } from "@/lib/constants/config";
+import { getEpochRate } from "@/lib/utils/epoch-rate";
 
 /**
  * GET /api/methodology
@@ -20,8 +19,12 @@ import {
  * formula change so consumers can diff.
  */
 export async function GET() {
+  const epochs = await getEpochRate();
   return NextResponse.json({
-    version: "1.0.0",
+    // 1.1.0: epoch_cadence is measured from the chain rather than assumed,
+    // so epochs_per_month_approx moved from 13 to ~16.4 and
+    // epochs_per_year_approx from 166 to ~199.5. No key was removed.
+    version: "1.1.0",
     name: "dz-contributor",
     description:
       "DoubleZero contributor rewards simulator and analytics. " +
@@ -105,9 +108,16 @@ export async function GET() {
         sum: CONTRIBUTOR_SHARE + VALIDATOR_SHARE + BURN_RATE,
       },
       epoch_cadence: {
-        epochs_per_month_approx: EPOCHS_PER_MONTH,
-        epochs_per_year_approx: EPOCHS_PER_YEAR,
-        notes: "Solana epochs are ~2-3 days; rough averages.",
+        epochs_per_month_approx: epochs.perMonth,
+        epochs_per_year_approx: epochs.perYear,
+        slot_ms: epochs.slotMs,
+        epoch_hours: epochs.epochMs / 3_600_000,
+        source: epochs.source,
+        notes:
+          "Measured from the chain, not assumed. Slot time is sampled across " +
+          "a 432,000-slot window and cached; `source` is \"fallback\" when the " +
+          "RPC read failed. These were previously the fixed 13 and 166, which " +
+          "assumed a 2.2-day epoch and understated monthly figures by ~21%.",
       },
       shapley: SHAPLEY_PARAMS,
     },

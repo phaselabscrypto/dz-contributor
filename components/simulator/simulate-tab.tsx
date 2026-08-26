@@ -23,10 +23,9 @@ import {
   getContributorDisplayName,
   getContributorColor,
   CONTRIBUTOR_SHARE,
-  EPOCHS_PER_MONTH,
-  EPOCHS_PER_YEAR,
   NEW_CONTRIBUTOR_SIM_CODE,
 } from "@/lib/constants/config";
+import { useEpochRate } from "@/lib/hooks/use-epoch-rate";
 import dynamic from "next/dynamic";
 import { findCoverageGaps } from "@/lib/utils/demand";
 import { ShapleyJobModal, type JobState } from "./shapley-job-modal";
@@ -435,6 +434,7 @@ export function SimulateTab({
   // a lamports value, which would inflate by 1e9×.
   const avgFeeSol = feeHistory?.averageFeeSol ?? 0;
   const solUsd = feeHistory?.solUsdPrice ?? 0;
+  const epochs = useEpochRate();
 
   const handleContributorChange = (code: string) => {
     setContributorCode(code);
@@ -724,16 +724,17 @@ export function SimulateTab({
       beforeSolEpoch,
       afterSolEpoch,
       deltaSolEpoch,
-      beforeSolMonth: beforeSolEpoch * EPOCHS_PER_MONTH,
-      afterSolMonth: afterSolEpoch * EPOCHS_PER_MONTH,
-      beforeSolYear: beforeSolEpoch * EPOCHS_PER_YEAR,
-      afterSolYear: afterSolEpoch * EPOCHS_PER_YEAR,
+      beforeSolMonth: beforeSolEpoch * epochs.perMonth,
+      afterSolMonth: afterSolEpoch * epochs.perMonth,
+      beforeSolYear: beforeSolEpoch * epochs.perYear,
+      afterSolYear: afterSolEpoch * epochs.perYear,
       // Optional USD pegs for context (used only if SOL/USD is loaded)
       afterSolEpochUsd: solUsd > 0 ? afterSolEpoch * solUsd : null,
       deltaSolEpochUsd: solUsd > 0 ? deltaSolEpoch * solUsd : null,
-      afterSolYearUsd: solUsd > 0 ? afterSolEpoch * EPOCHS_PER_YEAR * solUsd : null,
+      afterSolYearUsd:
+        solUsd > 0 ? afterSolEpoch * epochs.perYear * solUsd : null,
     };
-  }, [simResult, avgFeeSol, solUsd]);
+  }, [simResult, avgFeeSol, solUsd, epochs]);
 
   const showExistingLinks = contributor && !isNewContributor;
   const showAddLinks = contributorCode !== "";
