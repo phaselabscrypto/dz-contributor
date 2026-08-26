@@ -1,16 +1,17 @@
 /**
  * Thin Solana JSON-RPC client with retry + in-memory cache.
  *
- * ⚠️ Used ONLY by `topology.ts` (scaffolding). The live on-chain paths
- * (`rewards.ts`, `contributor-directory.ts`) use `@solana/web3.js`
- * `Connection` directly. This module exists as a stop-gap so the
- * topology stubs can fetch program accounts without pulling in the
- * full web3.js bundle for code that doesn't execute in production.
+ * Live in production. `getSlot`, `getBlockTime` and `getEpochInfo` back the
+ * measured epoch rate in `lib/utils/epoch-rate.ts`, which feeds every monthly
+ * and yearly SOL projection in the app. `getProgramAccounts` and
+ * `getAccountInfo` are still only used by `topology.ts` (scaffolding); the
+ * live on-chain reward paths (`rewards.ts`, `contributor-directory.ts`) use
+ * `@solana/web3.js` `Connection` directly.
  *
- * When the DZ registry IDL lands and `topology.ts` activates, this
- * client will likely be replaced by `@solana/web3.js` Connection too —
- * at that point the bundle-size argument disappears since we're
- * already paying for web3.js elsewhere.
+ * Raw JSON-RPC rather than `Connection` is a requirement, not a preference:
+ * web3.js 1.98.4 declares `getVoteAccounts(commitment?)` with no `votePubkey`
+ * filter and no `keepUnstakedDelinquents` flag, so it cannot express the
+ * single-validator query. `rpc()` passes an arbitrary config object.
  *
  * See `lib/onchain/README.md` for the live-vs-stub matrix.
  */
@@ -147,6 +148,22 @@ export async function getAccountInfo(
     { ttlMs: 60_000 },
   );
   return result.value;
+}
+
+/** Latest slot the node considers final. */
+export async function getSlot(): Promise<number> {
+  return rpc<number>("getSlot", [{ commitment: "finalized" }], {
+    ttlMs: 30_000,
+  });
+}
+
+/**
+ * Unix timestamp of a slot, in whole seconds, or null when the node has no
+ * block for it. The one-second resolution is why callers must sample across a
+ * wide slot window rather than differencing adjacent slots.
+ */
+export async function getBlockTime(slot: number): Promise<number | null> {
+  return rpc<number | null>("getBlockTime", [slot], { ttlMs: 6 * 60 * 60_000 });
 }
 
 export async function getEpochInfo(): Promise<{
