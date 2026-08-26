@@ -11,6 +11,10 @@
  * Also covers the stored-value guard in `lib/utils/sort-state.ts`, which keeps
  * a stale or hand-edited entry from reaching a table comparator.
  *
+ * Scope: the pure helpers, not the hook. `useLocalStorageState` needs a React
+ * renderer, so nothing here catches a regression that moves the parse back
+ * inside the hook's own `getSnapshot`. Read that wiring by eye when changing it.
+ *
  * Pure input construction against a stubbed storage object. Safe anywhere.
  *
  * Usage:
@@ -180,6 +184,19 @@ console.log("\n5. makeSortStateValidator");
     "non-string key rejected",
     validateSort({ key: 7, dir: "asc" }) === null,
   );
+  for (const proto of [
+    "toString",
+    "constructor",
+    "hasOwnProperty",
+    "valueOf",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+  ]) {
+    check(
+      `Object.prototype key "${proto}" rejected`,
+      validateSort({ key: proto, dir: "asc" }) === null,
+    );
+  }
 }
 
 console.log("\n6. React checkIfSnapshotChanged");
