@@ -2,6 +2,10 @@
 
 import { useMemo } from "react";
 import { useLocalStorageState } from "@/lib/hooks/use-local-storage";
+import {
+  makeSortStateValidator,
+  type SortState,
+} from "@/lib/utils/sort-state";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useLiveTopology, useLiveStatus } from "@/lib/hooks/use-live";
@@ -28,15 +32,29 @@ function fmtMs(us: number): string {
 
 type SortKey = "code" | "sideA" | "sideZ" | "type" | "bw" | "lat" | "tier" | "status";
 
+const SORT_KEYS: Record<SortKey, true> = {
+  code: true,
+  sideA: true,
+  sideZ: true,
+  type: true,
+  bw: true,
+  lat: true,
+  tier: true,
+  status: true,
+};
+const DEFAULT_SORT: SortState<SortKey> = { key: "tier", dir: "desc" };
+const validateSort = makeSortStateValidator(SORT_KEYS);
+
 export default function ContributorLinksPage() {
   const params = useParams();
   const code = params.code as string;
   const { data: topology, isLoading, error, mutate } = useLiveTopology();
   const { data: status } = useLiveStatus();
-  const [sortState, setSortState] = useLocalStorageState<{
-    key: SortKey;
-    dir: "asc" | "desc";
-  }>("dz.contributor-links.sort", { key: "tier", dir: "desc" });
+  const [sortState, setSortState] = useLocalStorageState(
+    "dz.contributor-links.sort",
+    DEFAULT_SORT,
+    validateSort,
+  );
   const sort = sortState.key;
   const dir = sortState.dir;
 

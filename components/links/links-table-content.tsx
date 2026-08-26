@@ -11,6 +11,10 @@ import { Search, Download } from "lucide-react";
 import { rowsToCsv, downloadCsv } from "@/lib/utils/csv";
 import { LoadingState, ErrorState } from "@/components/ui/states";
 import { useLocalStorageState } from "@/lib/hooks/use-local-storage";
+import {
+  makeSortStateValidator,
+  type SortState,
+} from "@/lib/utils/sort-state";
 
 function fmtBps(bps: number): string {
   if (bps >= 1e12) return `${(bps / 1e12).toFixed(1)}T`;
@@ -34,16 +38,32 @@ type SortKey =
   | "util"
   | "status";
 
+const SORT_KEYS: Record<SortKey, true> = {
+  code: true,
+  contributor: true,
+  sideA: true,
+  sideZ: true,
+  type: true,
+  bw: true,
+  lat: true,
+  loss: true,
+  util: true,
+  status: true,
+};
+const DEFAULT_SORT: SortState<SortKey> = { key: "contributor", dir: "asc" };
+const validateSort = makeSortStateValidator(SORT_KEYS);
+
 export default function LinksTableContent() {
   const { data: topology, isLoading, error, mutate } = useLiveTopology();
   const { data: status } = useLiveStatus();
   const [query, setQuery] = useState("");
   const [filterType, setFilterType] = useState<string>("all");
   const [filterContributor, setFilterContributor] = useState<string>("all");
-  const [sortState, setSortState] = useLocalStorageState<{
-    key: SortKey;
-    dir: "asc" | "desc";
-  }>("dz.links.sort", { key: "contributor", dir: "asc" });
+  const [sortState, setSortState] = useLocalStorageState(
+    "dz.links.sort",
+    DEFAULT_SORT,
+    validateSort,
+  );
   const sort = sortState.key;
   const dir = sortState.dir;
 

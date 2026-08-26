@@ -3,6 +3,10 @@
 import { useState, useMemo } from "react";
 import type { ValidatorRewardsSummary } from "@/lib/types/publisher";
 import { useLocalStorageState } from "@/lib/hooks/use-local-storage";
+import {
+  makeSortStateValidator,
+  type SortState,
+} from "@/lib/utils/sort-state";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
@@ -30,6 +34,17 @@ import { rowsToCsv, downloadCsv } from "@/lib/utils/csv";
 
 type SortKey = "name" | "stake" | "share" | "slots" | "rewardEpoch" | "rewardMonth";
 type SortDir = "asc" | "desc";
+
+const SORT_KEYS: Record<SortKey, true> = {
+  name: true,
+  stake: true,
+  share: true,
+  slots: true,
+  rewardEpoch: true,
+  rewardMonth: true,
+};
+const DEFAULT_SORT: SortState<SortKey> = { key: "stake", dir: "desc" };
+const validateSort = makeSortStateValidator(SORT_KEYS);
 
 interface ValidatorRewardsProps {
   rewards: ValidatorRewardsSummary | null;
@@ -60,10 +75,11 @@ function StatusBadge({ publishing, backup }: { publishing: boolean; backup: bool
 
 export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) {
   const [search, setSearch] = useState("");
-  const [sortState, setSortState] = useLocalStorageState<{
-    key: SortKey;
-    dir: SortDir;
-  }>("dz.validators.sort", { key: "stake", dir: "desc" });
+  const [sortState, setSortState] = useLocalStorageState(
+    "dz.validators.sort",
+    DEFAULT_SORT,
+    validateSort,
+  );
   const sortKey = sortState.key;
   const sortDir = sortState.dir;
 
