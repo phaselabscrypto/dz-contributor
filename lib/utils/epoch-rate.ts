@@ -53,17 +53,56 @@ const CACHE_TTL_MS = 6 * 60 * 60 * 1_000;
 const MS_PER_MONTH = 30 * 86_400_000;
 const MS_PER_YEAR = 365 * 86_400_000;
 
-export interface EpochRate {
+/**
+ * The two multipliers a projection needs. Consumers take this rather than the
+ * full `EpochRate` so neither the internal diagnostics nor the public wire
+ * shape is load-bearing for the arithmetic.
+ */
+export interface EpochProjectionRate {
+  perMonth: number;
+  perYear: number;
+}
+
+/**
+ * Internal measurement, including diagnostics. `source` and `measuredAt`
+ * describe our own read and cache behaviour, so they are server-side only and
+ * must not be serialised to a client. Use `toPublicEpochRate` at any route
+ * boundary.
+ */
+export interface EpochRate extends EpochProjectionRate {
   /** Measured mean slot time in milliseconds. */
   slotMs: number;
   /** Epoch duration in milliseconds. */
   epochMs: number;
-  perMonth: number;
-  perYear: number;
   /** Epoch the measurement was taken in. Null on the fallback. */
   epoch: number | null;
   source: "measured" | "fallback";
   measuredAt: string;
+}
+
+/**
+ * Wire shape. Carries only chain facts, which are readable from any public RPC
+ * and are what an external auditor needs to check the arithmetic. Deliberately
+ * omits `source` and `measuredAt`: whether our own read succeeded, and when it
+ * last ran, are internal state. The figures are correct either way, because
+ * the fallback is a real measurement rather than a stale constant.
+ */
+export interface PublicEpochRate extends EpochProjectionRate {
+  slotMs: number;
+  epochHours: number;
+  epoch: number | null;
+}
+
+/** Map a measurement to its wire shape. Field by field, so a field added to
+ *  `EpochRate` cannot reach a client by default. */
+export function toPublicEpochRate(rate: EpochRate): PublicEpochRate {
+  return {
+    perMonth: rate.perMonth,
+    perYear: rate.perYear,
+    slotMs: rate.slotMs,
+    epochHours: rate.epochMs / 3_600_000,
+    epoch: rate.epoch,
+  };
 }
 
 function rateFromSlotMs(
@@ -123,6 +162,21 @@ async function measureSlotMs(anchorSlot: number): Promise<number | null> {
 }
 
 /**
+ * Coarse error category. Mirrors `app/api/health/route.ts`, which discards raw
+ * error text for the same reason: fetch and AbortSignal messages routinely
+ * echo the request URL, credentials included.
+ */
+function categorize(err: unknown): "timeout" | "network" | "parse" | "unknown" {
+  if (err instanceof Error) {
+    if (err.name === "AbortError" || err.name === "TimeoutError")
+      return "timeout";
+    if (err.name === "TypeError") return "network";
+    if (err.name === "SyntaxError") return "parse";
+  }
+  return "unknown";
+}
+
+/**
  * Current epoch rate, measured from the chain and cached for six hours.
  *
  * Never throws and never rejects. Any failure reports the error and returns
@@ -174,7 +228,12 @@ export async function getEpochRate(): Promise<EpochRate> {
       cached = { rate, ts: Date.now() };
       return rate;
     } catch (err) {
-      reportError(err, { source: "lib/utils/epoch-rate#getEpochRate" });
+      // Categorised, not logged verbatim. `rpc()` builds its HTTP error
+      // message from the upstream response body, and SOLANA_RPC_URL can carry
+      // a provider API key in its query string.
+      reportError(new Error(`epoch-rate read failed: ${categorize(err)}`), {
+        source: "lib/utils/epoch-rate#getEpochRate",
+      });
       return FALLBACK_EPOCH_RATE;
     } finally {
       inFlight = null;

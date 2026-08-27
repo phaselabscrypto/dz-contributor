@@ -2,7 +2,7 @@ import {
   VALIDATOR_SHARE,
   VALIDATOR_TAKE_OF_POOL,
 } from "@/lib/constants/config";
-import type { EpochRate } from "@/lib/utils/epoch-rate";
+import type { EpochProjectionRate } from "@/lib/utils/epoch-rate";
 import type { FeeHistory } from "@/lib/types/fees";
 import type {
   PublisherCheckResponse,
@@ -57,7 +57,7 @@ export function computeFeeTrend(feeHistory: FeeHistory): {
 export function computeValidatorRewards(
   publisherData: PublisherCheckResponse,
   averageFeeSolPerEpoch: number,
-  epochs: EpochRate,
+  epochs: EpochProjectionRate,
   deviceCodeToContributor?: Map<string, string>,
 ): ValidatorRewardsSummary {
   const validatorPoolPerEpoch = averageFeeSolPerEpoch * VALIDATOR_SHARE;

@@ -5,7 +5,7 @@ import {
   BURN_RATE,
   SHAPLEY_PARAMS,
 } from "@/lib/constants/config";
-import { getEpochRate } from "@/lib/utils/epoch-rate";
+import { getEpochRate, toPublicEpochRate } from "@/lib/utils/epoch-rate";
 
 /**
  * GET /api/methodology
@@ -19,7 +19,8 @@ import { getEpochRate } from "@/lib/utils/epoch-rate";
  * formula change so consumers can diff.
  */
 export async function GET() {
-  const epochs = await getEpochRate();
+  // Public shape only: whether our own RPC read succeeded is internal state.
+  const epochCadence = toPublicEpochRate(await getEpochRate());
   return NextResponse.json({
     // 1.1.0: epoch_cadence is measured from the chain rather than assumed,
     // so epochs_per_month_approx moved from 13 to ~16.4 and
@@ -108,16 +109,15 @@ export async function GET() {
         sum: CONTRIBUTOR_SHARE + VALIDATOR_SHARE + BURN_RATE,
       },
       epoch_cadence: {
-        epochs_per_month_approx: epochs.perMonth,
-        epochs_per_year_approx: epochs.perYear,
-        slot_ms: epochs.slotMs,
-        epoch_hours: epochs.epochMs / 3_600_000,
-        source: epochs.source,
+        epochs_per_month_approx: epochCadence.perMonth,
+        epochs_per_year_approx: epochCadence.perYear,
+        slot_ms: epochCadence.slotMs,
+        epoch_hours: epochCadence.epochHours,
         notes:
-          "Measured from the chain, not assumed. Slot time is sampled across " +
-          "a 432,000-slot window and cached; `source` is \"fallback\" when the " +
-          "RPC read failed. These were previously the fixed 13 and 166, which " +
-          "assumed a 2.2-day epoch and understated monthly figures by ~21%.",
+          "Derived from observed mainnet slot time rather than a fixed " +
+          "assumption, so the cadence tracks protocol changes. Monthly uses a " +
+          "30-day month and yearly a 365-day year. Prior manifest versions " +
+          "published a fixed 13 and 166, which assumed a 2.2-day epoch.",
       },
       shapley: SHAPLEY_PARAMS,
     },
