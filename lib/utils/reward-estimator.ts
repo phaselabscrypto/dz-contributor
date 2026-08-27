@@ -1,54 +1,14 @@
 import {
-  CONTRIBUTOR_SHARE,
   VALIDATOR_SHARE,
   VALIDATOR_TAKE_OF_POOL,
-  EPOCHS_PER_MONTH,
-  EPOCHS_PER_YEAR,
 } from "@/lib/constants/config";
+import type { EpochProjectionRate } from "@/lib/utils/epoch-rate";
 import type { FeeHistory } from "@/lib/types/fees";
 import type {
   PublisherCheckResponse,
   ValidatorRewardProjection,
   ValidatorRewardsSummary,
 } from "@/lib/types/publisher";
-
-/**
- * Estimate the SOL reward a contributor earns in one epoch given their
- * Shapley share and the average per-epoch fee revenue (in SOL).
- *
- * Pool math: contributors collectively receive CONTRIBUTOR_SHARE (45%)
- * of the per-epoch fee pool. Each contributor's slice is their Shapley
- * share of that 45%.
- */
-export function estimateEpochRewardSol(
-  contributorShare: number,
-  averageFeeSolPerEpoch: number,
-): number {
-  return contributorShare * averageFeeSolPerEpoch * CONTRIBUTOR_SHARE;
-}
-
-/**
- * Project monthly and yearly earnings (in SOL) from a contributor's
- * Shapley share and the fee history. Solana epochs are ~2-3 days, so
- * roughly 10-15 per month.
- */
-export function projectEarnings(
-  contributorShare: number,
-  feeHistory: FeeHistory,
-): {
-  perEpochSol: number;
-  monthlySol: number;
-  yearlySol: number;
-} {
-  const avgFeeSol = feeHistory.averageFeeSol ?? 0;
-  const perEpoch = estimateEpochRewardSol(contributorShare, avgFeeSol);
-
-  return {
-    perEpochSol: perEpoch,
-    monthlySol: perEpoch * EPOCHS_PER_MONTH,
-    yearlySol: perEpoch * EPOCHS_PER_YEAR,
-  };
-}
 
 /**
  * Compute a fee trend (simple linear regression over lamport totals).
@@ -97,6 +57,7 @@ export function computeFeeTrend(feeHistory: FeeHistory): {
 export function computeValidatorRewards(
   publisherData: PublisherCheckResponse,
   averageFeeSolPerEpoch: number,
+  epochs: EpochProjectionRate,
   deviceCodeToContributor?: Map<string, string>,
 ): ValidatorRewardsSummary {
   const validatorPoolPerEpoch = averageFeeSolPerEpoch * VALIDATOR_SHARE;
@@ -141,8 +102,8 @@ export function computeValidatorRewards(
         multicastConnected: p.multicast_connected,
         contributorCode: deviceCodeToContributor?.get(p.dz_device_code),
         projectedRewardPerEpochSol: perEpoch,
-        projectedRewardMonthlySol: perEpoch * EPOCHS_PER_MONTH,
-        projectedRewardYearlySol: perEpoch * EPOCHS_PER_YEAR,
+        projectedRewardMonthlySol: perEpoch * epochs.perMonth,
+        projectedRewardYearlySol: perEpoch * epochs.perYear,
       };
     },
   );

@@ -3,14 +3,13 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { PageHeader } from "@/components/ui/page-header";
+import { useEpochRate } from "@/lib/hooks/use-epoch-rate";
 import { usePublishers } from "@/lib/hooks/use-publishers";
 import { useFees } from "@/lib/hooks/use-fees";
 import {
   LAMPORTS_PER_SOL,
   VALIDATOR_SHARE,
   VALIDATOR_TAKE_OF_POOL,
-  EPOCHS_PER_MONTH,
-  EPOCHS_PER_YEAR,
 } from "@/lib/constants/config";
 import { LoadingState, EmptyState, ErrorState } from "@/components/ui/states";
 import { Search, ArrowRight } from "lucide-react";
@@ -25,6 +24,7 @@ function fmtSol(n: number, digits = 4): string {
 export default function ValidatorCalculatorPage() {
   const { data: publishers, isLoading, error, mutate } = usePublishers();
   const { data: feeHistory } = useFees();
+  const epochs = useEpochRate();
   const [pubkeyQuery, setPubkeyQuery] = useState("");
   const [overridePublishing, setOverridePublishing] = useState<boolean | null>(
     null,
@@ -287,13 +287,13 @@ export default function ValidatorCalculatorPage() {
               />
               <Stat
                 label="Per month"
-                value={`${fmtSol(projectedSolPerEpoch * EPOCHS_PER_MONTH, 2)} SOL`}
-                sub={`${EPOCHS_PER_MONTH} epochs`}
+                value={`${fmtSol(projectedSolPerEpoch * epochs.perMonth, 2)} SOL`}
+                sub={`${epochs.perMonth.toFixed(1)} epochs`}
               />
               <Stat
                 label="Per year"
-                value={`${fmtSol(projectedSolPerEpoch * EPOCHS_PER_YEAR, 2)} SOL`}
-                sub={`${EPOCHS_PER_YEAR} epochs`}
+                value={`${fmtSol(projectedSolPerEpoch * epochs.perYear, 2)} SOL`}
+                sub={`${epochs.perYear.toFixed(0)} epochs`}
               />
             </div>
 

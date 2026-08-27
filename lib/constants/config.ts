@@ -141,12 +141,12 @@ export const VALIDATOR_SHARE = 0.45; // 45% combined validator pool (operators +
 export const VALIDATOR_TAKE_OF_POOL = 0.65;
 export const CLIENT_TAKE_OF_POOL = 0.35;
 export const LAMPORTS_PER_SOL = 1_000_000_000;
-// Solana epochs are ~2.2 days on current mainnet config — 30 / 2.2 ≈ 13.6.
-// Rounded to 13 to stay conservative for forward projections. Bump if
-// epoch length changes (e.g. shred-rate proposals); the projection routes
-// surface this constant rather than baking the number inline.
-export const EPOCHS_PER_MONTH = 13;
-export const EPOCHS_PER_YEAR = 166; // 13 × 12.77 ≈ 166 epochs/year
+// Epoch cadence is NOT a constant here. It lived here as
+// EPOCHS_PER_MONTH = 13 / EPOCHS_PER_YEAR = 166, derived from a 2.2-day
+// epoch, and went stale when mainnet slot time dropped to ~366ms (a 43.9h
+// epoch, so ~16.4 and ~199.5). That understated every monthly projection by
+// ~21%. See `lib/utils/epoch-rate.ts`, which measures it, and
+// `lib/hooks/use-epoch-rate.ts` for the client entry point.
 
 // Shapley tuning parameters used by the fallback input builder
 // (`shapley-input-builder.ts`). These MUST mirror the

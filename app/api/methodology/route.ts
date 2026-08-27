@@ -3,10 +3,9 @@ import {
   CONTRIBUTOR_SHARE,
   VALIDATOR_SHARE,
   BURN_RATE,
-  EPOCHS_PER_MONTH,
-  EPOCHS_PER_YEAR,
   SHAPLEY_PARAMS,
 } from "@/lib/constants/config";
+import { getEpochRate, toPublicEpochRate } from "@/lib/utils/epoch-rate";
 
 /**
  * GET /api/methodology
@@ -20,8 +19,13 @@ import {
  * formula change so consumers can diff.
  */
 export async function GET() {
+  // Public shape only: whether our own RPC read succeeded is internal state.
+  const epochCadence = toPublicEpochRate(await getEpochRate());
   return NextResponse.json({
-    version: "1.0.0",
+    // 1.1.0: epoch_cadence is measured from the chain rather than assumed,
+    // so epochs_per_month_approx moved from 13 to ~16.4 and
+    // epochs_per_year_approx from 166 to ~199.5. No key was removed.
+    version: "1.1.0",
     name: "dz-contributor",
     description:
       "DoubleZero contributor rewards simulator and analytics. " +
@@ -105,9 +109,15 @@ export async function GET() {
         sum: CONTRIBUTOR_SHARE + VALIDATOR_SHARE + BURN_RATE,
       },
       epoch_cadence: {
-        epochs_per_month_approx: EPOCHS_PER_MONTH,
-        epochs_per_year_approx: EPOCHS_PER_YEAR,
-        notes: "Solana epochs are ~2-3 days; rough averages.",
+        epochs_per_month_approx: epochCadence.perMonth,
+        epochs_per_year_approx: epochCadence.perYear,
+        slot_ms: epochCadence.slotMs,
+        epoch_hours: epochCadence.epochHours,
+        notes:
+          "Derived from observed mainnet slot time rather than a fixed " +
+          "assumption, so the cadence tracks protocol changes. Monthly uses a " +
+          "30-day month and yearly a 365-day year. Prior manifest versions " +
+          "published a fixed 13 and 166, which assumed a 2.2-day epoch.",
       },
       shapley: SHAPLEY_PARAMS,
     },
