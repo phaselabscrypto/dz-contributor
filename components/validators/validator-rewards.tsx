@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useMemo } from "react";
 import type { ValidatorRewardsSummary } from "@/lib/types/publisher";
 import { useLocalStorageState } from "@/lib/hooks/use-local-storage";
+import { parseAsString, useQueryState } from "@/lib/hooks/use-url-state";
 import {
   makeSortStateValidator,
   type SortState,
@@ -74,7 +75,10 @@ function StatusBadge({ publishing, backup }: { publishing: boolean; backup: bool
 }
 
 export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) {
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useQueryState(
+    "q",
+    parseAsString.withDefault("").withOptions({ clearOnDefault: true }),
+  );
   const [sortState, setSortState] = useLocalStorageState(
     "dz.validators.sort",
     DEFAULT_SORT,
@@ -280,6 +284,7 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
                     <TableHead className="text-cream-40">Quality</TableHead>
                     <SortableHead label="Est. / Epoch" sortKey="rewardEpoch" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                     <SortableHead label="Est. / Month" sortKey="rewardMonth" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
+                    <TableHead className="text-cream-40">Estimate</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -337,6 +342,16 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
                       </TableCell>
                       <TableCell className="text-right text-cream-60 tabular-nums">
                         {v.publishingLeaderShreds ? `${formatSolFromSol(v.projectedRewardMonthlySol)} SOL` : "-"}
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        <Link
+                          href={`/validators/calculator?vote=${v.votePubkey}`}
+                          aria-label={`Estimate earnings for ${v.validatorName || shortenPubkey(v.votePubkey)}`}
+                          className="text-cream-60 hover:text-cream underline decoration-dotted underline-offset-2"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          Estimate
+                        </Link>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -426,6 +441,13 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
                   </span>
                 </div>
               )}
+              <Link
+                href={`/validators/calculator?vote=${v.votePubkey}`}
+                aria-label={`Estimate earnings for ${v.validatorName || shortenPubkey(v.votePubkey)}`}
+                className="mt-2 inline-block text-xs text-cream-60 underline decoration-dotted underline-offset-2"
+              >
+                Estimate earnings
+              </Link>
             </CardContent>
           </Card>
         ))}

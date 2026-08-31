@@ -1,18 +1,25 @@
 "use client";
 
-import { useMemo } from "react";
+import { Suspense, useMemo } from "react";
 import Link from "next/link";
 import { PageHeader } from "@/components/ui/page-header";
+import { ErrorState } from "@/components/ui/states";
 import { ValidatorRewards } from "@/components/validators/validator-rewards";
 import { usePublishers } from "@/lib/hooks/use-publishers";
 import { useFees } from "@/lib/hooks/use-fees";
 import { useLiveTopology } from "@/lib/hooks/use-live";
 import { useEpochRate } from "@/lib/hooks/use-epoch-rate";
+import { parseAsString, useQueryState } from "@/lib/hooks/use-url-state";
+import { validatePubkey } from "@/lib/utils/pubkey";
 import { computeValidatorRewards } from "@/lib/utils/reward-estimator";
 
-export default function ValidatorsPage() {
-  const { data: publishers, isLoading: pubLoading, error: pubError } =
-    usePublishers();
+function ValidatorsInner() {
+  const {
+    data: publishers,
+    isLoading: pubLoading,
+    error: pubError,
+    mutate,
+  } = usePublishers();
   const { data: feeHistory, isLoading: feeLoading } = useFees();
   const { data: topology } = useLiveTopology();
   const epochs = useEpochRate();
@@ -46,6 +53,16 @@ export default function ValidatorsPage() {
 
   const isLoading = pubLoading || feeLoading;
 
+  // Hand the table's search to the calculator only when it is already a valid
+  // pubkey. The search is fuzzy over names, metros and pubkey prefixes, so
+  // piping it through unconditionally would usually land the calculator on an
+  // invalid-input error, which is worse than passing nothing.
+  const [tableSearch] = useQueryState("q", parseAsString.withDefault(""));
+  const parsedSearch = validatePubkey(tableSearch);
+  const calculatorHref = parsedSearch.ok
+    ? `/validators/calculator?vote=${parsedSearch.pubkey}`
+    : "/validators/calculator";
+
   return (
     <>
       <PageHeader
@@ -54,19 +71,29 @@ export default function ValidatorsPage() {
       />
       <div className="flex-1 px-4 py-4 sm:px-6 sm:py-6 space-y-4">
         <Link
-          href="/validators/calculator"
+          href={calculatorHref}
           className="inline-flex items-center gap-2 text-xs font-mono uppercase tracking-[0.12em] border border-cream-15 hover:border-cream-30 hover:bg-cream-8 px-3 py-1.5 transition-colors"
         >
-          ⚡ Earnings calculator — paste a vote pubkey
+          ⚡ Estimate earnings for any vote account
         </Link>
         {pubError ? (
-          <div className="border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-400">
-            Failed to load publisher data: {(pubError as Error).message}
-          </div>
+          <ErrorState
+            title="Couldn't load publishers"
+            message="The DoubleZero publisher feed did not respond."
+            onRetry={() => mutate()}
+          />
         ) : (
           <ValidatorRewards rewards={rewards} isLoading={isLoading} />
         )}
       </div>
     </>
+  );
+}
+
+export default function ValidatorsPage() {
+  return (
+    <Suspense fallback={null}>
+      <ValidatorsInner />
+    </Suspense>
   );
 }
