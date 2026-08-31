@@ -4,7 +4,8 @@ import {
   shapleyEndpointUrl,
 } from "@/lib/constants/config";
 import { SOLANA_RPC_URL } from "@/lib/onchain/program-ids";
-import type { SourceHealth, SourceErrorCode } from "@/lib/types/health";
+import { categorizeError } from "@/lib/observability";
+import type { SourceHealth } from "@/lib/types/health";
 
 /**
  * GET /api/health
@@ -41,19 +42,6 @@ function hostOnly(url: string): string {
   } catch {
     return "(invalid)";
   }
-}
-
-/** Map an unknown error into a coarse category. The raw message is
- *  intentionally discarded — error texts from fetch/AbortSignal often
- *  echo the URL (including credentials). */
-function categorize(err: unknown): SourceErrorCode {
-  if (err instanceof Error) {
-    const name = err.name;
-    if (name === "AbortError" || name === "TimeoutError") return "timeout";
-    if (name === "TypeError") return "network";
-    if (name === "SyntaxError") return "parse";
-  }
-  return "unknown";
 }
 
 async function probe(
@@ -94,7 +82,7 @@ async function probe(
       host,
       status: "down",
       latencyMs: null,
-      errorCode: categorize(err),
+      errorCode: categorizeError(err),
     };
   }
 }

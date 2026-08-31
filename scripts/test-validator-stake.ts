@@ -8,11 +8,14 @@
  * agrees byte-for-byte with the existing `pubkeyBytes` decoder on valid keys
  * so the repo does not end up with two subtly different base58 decoders.
  *
- * A live section for vote-account resolution arrives with
- * `lib/onchain/vote-stake.ts`.
+ * The live section resolves real vote accounts against an RPC endpoint, so it
+ * is opt-in.
  *
  * Usage:
  *   npx tsx scripts/test-validator-stake.ts
+ *
+ *   # Include the live RPC assertions:
+ *   LIVE=1 SOLANA_RPC_URL=https://... npx tsx scripts/test-validator-stake.ts
  *
  * Exits non-zero on any failed assertion.
  */
@@ -21,6 +24,14 @@ import bs58 from "bs58";
 
 import { validatePubkey, isValidPubkey } from "../lib/utils/pubkey";
 import { pubkeyBytes } from "../lib/utils/canonical-input-builder";
+
+const LIVE = process.env.LIVE === "1";
+
+// Highest-staked mainnet validator that is NOT in the DoubleZero publisher
+// feed, verified against both the Foundation export and the malbec feed. The
+// case this ticket exists for.
+const HELIUS_VOTE = "he1iusunGwqrNtafDtLdhsUQDFvo13z9sUa36PauBtk";
+const HELIUS_IDENTITY = "HEL1USMZKAL2odpNBj2oCjffnFGaYwmbGmyewGv1e2TU";
 
 // Real 32-byte base58 keys already committed to this repo, so the pure
 // section needs no network and no fixture file.
@@ -172,8 +183,96 @@ function pureSection() {
 }
 
 async function liveSection() {
-  // Vote-account resolution assertions land with `lib/onchain/vote-stake.ts`.
-  skip("live vote-account resolution (not implemented yet)");
+  if (!LIVE) {
+    skip("live vote-account resolution (set LIVE=1 to run)");
+    return;
+  }
+  const { resolveVoteAccountStake, clearVoteStakeCache } = await import(
+    "../lib/onchain/vote-stake"
+  );
+  const { getVoteAccounts } = await import("../lib/onchain/client");
+  clearVoteStakeCache();
+
+  const hit = await resolveVoteAccountStake(HELIUS_VOTE);
+  check(
+    "a non-DoubleZero mainnet vote account resolves",
+    hit.status === "found",
+    hit.status,
+  );
+  if (hit.status === "found") {
+    check("matched on the vote pubkey", hit.matchedBy === "vote", hit.matchedBy);
+    check(
+      "the returned entry is the one asked for",
+      hit.entry.votePubkey === HELIUS_VOTE,
+      hit.entry.votePubkey,
+    );
+    check(
+      "activated stake is positive",
+      hit.entry.activatedStake > 0,
+      String(hit.entry.activatedStake),
+    );
+    console.log(
+      `       stake=${(hit.entry.activatedStake / 1e9).toFixed(0)} SOL ` +
+        `delinquent=${hit.entry.delinquent} commission=${hit.entry.commission}%`,
+    );
+  }
+
+  const byIdentity = await resolveVoteAccountStake(HELIUS_IDENTITY);
+  check(
+    "the node identity resolves to the same vote account",
+    byIdentity.status === "found" &&
+      byIdentity.entry.votePubkey === HELIUS_VOTE,
+    byIdentity.status,
+  );
+  if (byIdentity.status === "found") {
+    check(
+      "the identity match is labelled as such",
+      byIdentity.matchedBy === "identity",
+      byIdentity.matchedBy,
+    );
+  }
+
+  // A DoubleZero program ID: valid 32-byte base58, certainly not a vote
+  // account. Distinguishes not-found from unavailable, which the route maps
+  // to 404 and 502 respectively.
+  const miss = await resolveVoteAccountStake(REAL_KEYS[1]);
+  check(
+    "a program ID is not-found, not unavailable",
+    miss.status === "not-found",
+    miss.status,
+  );
+
+  // Provider property, not a code defect: the resolver guards against a
+  // provider that ignores the filter, so warn rather than fail.
+  const filtered = await getVoteAccounts({
+    votePubkey: HELIUS_VOTE,
+    keepUnstakedDelinquents: true,
+    ttlMs: 0,
+  });
+  const returned = filtered.current.length + filtered.delinquent.length;
+  if (returned > 1) {
+    console.log(
+      `  warn the endpoint ignored votePubkey and returned ${returned} entries;` +
+        " the identity fallback is load-bearing here",
+    );
+  } else {
+    check("the endpoint honours the votePubkey filter", returned <= 1);
+  }
+
+  // Pins the keepUnstakedDelinquents decision: without it, an unstaked
+  // delinquent account is absent from both arrays and looks identical to a
+  // pubkey that is not a vote account.
+  const kept = await getVoteAccounts({ keepUnstakedDelinquents: true, ttlMs: 0 });
+  const dropped = await getVoteAccounts({
+    keepUnstakedDelinquents: false,
+    ttlMs: 0,
+  });
+  const keptN = kept.current.length + kept.delinquent.length;
+  const droppedN = dropped.current.length + dropped.delinquent.length;
+  check(
+    `keepUnstakedDelinquents:true returns a superset (${keptN} >= ${droppedN})`,
+    keptN >= droppedN,
+  );
 }
 
 async function main() {

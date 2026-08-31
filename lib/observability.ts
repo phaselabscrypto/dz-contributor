@@ -13,6 +13,28 @@
  *      a fallback if the vendor pipeline is degraded.
  */
 
+/** Coarse error category. Matches `SourceErrorCode` in `lib/types/health.ts`. */
+export type ErrorCategory = "timeout" | "network" | "parse" | "unknown";
+
+/**
+ * Map an unknown error to a coarse category, discarding its message.
+ *
+ * Use this instead of passing a caught error straight to `reportError` when
+ * the error can originate from a `fetch` against a configured upstream. Fetch
+ * and AbortSignal messages routinely echo the request URL, and a URL can carry
+ * a provider API key in its query string. A resolved URL embedding a key
+ * leaked a live Alchemy key publicly once already (see `lib/onchain/rewards.ts`).
+ */
+export function categorizeError(err: unknown): ErrorCategory {
+  if (err instanceof Error) {
+    const name = err.name;
+    if (name === "AbortError" || name === "TimeoutError") return "timeout";
+    if (name === "TypeError") return "network";
+    if (name === "SyntaxError") return "parse";
+  }
+  return "unknown";
+}
+
 interface ErrorContext {
   /** Where the error happened — route, component, API path. */
   source: string;
