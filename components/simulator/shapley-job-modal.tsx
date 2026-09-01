@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   Dialog,
   DialogContent,
@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import type { SimulateResponse } from "@/lib/types/shapley";
 import type { FeeHistory } from "@/lib/types/fees";
-import { formatSolFromSol, formatUsd } from "@/lib/utils/format";
+import { formatElapsed, formatSolFromSol, formatUsd } from "@/lib/utils/format";
 import {
   getContributorDisplayName,
   getContributorColor,
@@ -77,6 +77,16 @@ export interface ShapleyJobModalProps {
   feeHistory?: FeeHistory | null;
   /** Rendered in the results footer — copies the shareable scenario URL. */
   shareButton?: ReactNode;
+  /** "about 6 min left", or null while the estimator has no estimate. */
+  etaLabel?: string | null;
+  /** Milliseconds since the run was submitted from this browser. */
+  elapsedMs?: number | null;
+  /** Live counter for the current phase. */
+  coalitions?: { solved: number; total: number } | null;
+  /** True when the baseline came from cache (inferred by the tab), null until known. */
+  baselineCacheHit?: boolean | null;
+  /** One line of copy on how long a run usually takes. */
+  runtimeHint: string;
 }
 
 /* ─── Helpers ───────────────────────────────────────────────────── */
@@ -110,16 +120,40 @@ export function ShapleyJobModal({
   avgFeeSol,
   feeHistory,
   shareButton,
+  etaLabel = null,
+  elapsedMs = null,
+  coalitions = null,
+  baselineCacheHit = null,
+  runtimeHint,
 }: ShapleyJobModalProps) {
   const isRunning = state === "running";
+  // Before the first poll returns a phase, the job is queued or the solver is
+  // still priming its counters. Either way there is nothing to measure yet.
+  const isStarting = isRunning && phase === null && percent === 0;
 
-  // Unified progress: baseline = 0-50%, modified = 50-100%
+  // Unified progress. A cached baseline costs nothing, so the whole bar is the
+  // what-if; otherwise baseline = 0-50%, modified = 50-100%.
   const unifiedPercent = useMemo(() => {
     if (state === "done") return 100;
     if (state !== "running") return 0;
-    if (phase === "modified") return 50 + percent / 2;
+    if (phase === "modified") {
+      return baselineCacheHit ? percent : 50 + percent / 2;
+    }
     return percent / 2; // baseline or unknown phase
-  }, [state, phase, percent]);
+  }, [state, phase, percent, baselineCacheHit]);
+
+  // The bar never moves backwards. At the phase flip the worker resets its
+  // counters before the store catches up, so one poll can report the old
+  // phase's 99% under the new label.
+  const [peakPercent, setPeakPercent] = useState(0);
+  if (isRunning && unifiedPercent > peakPercent) {
+    setPeakPercent(unifiedPercent);
+  } else if (!isRunning && peakPercent !== 0) {
+    setPeakPercent(0);
+  }
+  const shownPercent = isRunning
+    ? Math.max(peakPercent, unifiedPercent)
+    : unifiedPercent;
 
   const handleOpenChange = (nextOpen: boolean) => {
     // Block close during computation — only the Cancel button exits
@@ -169,7 +203,7 @@ export function ShapleyJobModal({
                   </p>
                   <div className="flex items-center gap-2 text-xs text-cream-40">
                     <Clock className="size-3.5 shrink-0" />
-                    <span>This can take up to 15 minutes to compute</span>
+                    <span>{runtimeHint}</span>
                   </div>
                 </div>
 
@@ -233,7 +267,9 @@ export function ShapleyJobModal({
                 Computing Shapley Values
               </DialogTitle>
               <DialogDescription>
-                Analysing coalition contributions across the network
+                {isStarting
+                  ? "Waiting for the solver to start"
+                  : "Analysing coalition contributions across the network"}
               </DialogDescription>
             </DialogHeader>
 
@@ -267,8 +303,15 @@ export function ShapleyJobModal({
                             : "text-cream-40"
                       }`}
                     >
-                      Computing baseline values
+                      {baselineCacheHit
+                        ? "Baseline loaded from cache"
+                        : "Computing baseline values"}
                     </span>
+                    {isStarting && (
+                      <span className="text-xs font-mono text-cream-40 ml-auto">
+                        starting
+                      </span>
+                    )}
                     {phase === "baseline" && (
                       <span className="text-xs font-mono text-cream-40 ml-auto tabular-nums">
                         {Math.round(percent)}%
@@ -276,7 +319,7 @@ export function ShapleyJobModal({
                     )}
                     {phase === "modified" && (
                       <span className="text-xs font-mono text-green ml-auto">
-                        done
+                        {baselineCacheHit ? "instant" : "done"}
                       </span>
                     )}
                   </div>
@@ -311,6 +354,12 @@ export function ShapleyJobModal({
                       </span>
                     )}
                   </div>
+                  {phase === "modified" && coalitions && (
+                    <div className="pl-10 -mt-2 text-xs font-mono text-cream-40 tabular-nums">
+                      {coalitions.solved.toLocaleString()} of{" "}
+                      {coalitions.total.toLocaleString()} coalitions
+                    </div>
+                  )}
                 </div>
 
                 {/* Unified progress bar */}
@@ -320,20 +369,20 @@ export function ShapleyJobModal({
                       Overall progress
                     </span>
                     <span className="text-cream font-mono tabular-nums">
-                      {Math.round(unifiedPercent)}%
+                      {Math.round(shownPercent)}%
                     </span>
                   </div>
                   <div
                     className="h-2.5 w-full overflow-hidden rounded-full bg-cream/10"
                     role="progressbar"
-                    aria-valuenow={Math.round(unifiedPercent)}
+                    aria-valuenow={Math.round(shownPercent)}
                     aria-valuemin={0}
                     aria-valuemax={100}
                   >
                     <div
                       className="h-full rounded-full bg-cream transition-[width] duration-500 ease-out relative overflow-hidden"
                       style={{
-                        width: `${Math.max(2, Math.min(100, unifiedPercent))}%`,
+                        width: `${Math.max(2, Math.min(100, shownPercent))}%`,
                       }}
                     >
                       {/* Shimmer overlay */}
@@ -343,6 +392,14 @@ export function ShapleyJobModal({
                       />
                     </div>
                   </div>
+                  {(elapsedMs !== null || etaLabel) && (
+                    <div className="flex items-center justify-between text-xs font-mono text-cream-40 tabular-nums">
+                      <span>
+                        {elapsedMs !== null ? `${formatElapsed(elapsedMs)} elapsed` : ""}
+                      </span>
+                      <span>{etaLabel ?? ""}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Transient connection-loss hint — the job keeps running in

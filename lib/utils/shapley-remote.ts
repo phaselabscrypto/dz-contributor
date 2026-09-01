@@ -248,15 +248,32 @@ export async function simulateShapleyRemote(
 // the bearer token) start a job, poll it, and cancel it. The Next.js job
 // routes proxy these so the browser can drive a progress bar + cancel button.
 
+/** Timing and reuse telemetry the Rust service attaches to a finished simulate. */
+export type SimulateStatsWire = RustSimulateResponse["stats"];
+
+/**
+ * Live counters the Rust job store emits while a job runs (mirrors the
+ * `progress` object built in `jobs.rs::snapshot`). `percent` is per phase
+ * (0-99) and `coalitions_total` is the phase's denominator, so a client can
+ * derive a rate from `coalitions_solved` across polls.
+ */
+export interface SimulateJobProgress {
+  /** "baseline" while the baseline solves, "modified" for the what-if, null before pickup. */
+  phase?: string | null;
+  coalitions_solved?: number;
+  coalitions_total?: number;
+  samples_done?: number;
+  max_samples?: number;
+  batch_samples?: number;
+  batch_total?: number;
+  batch_solved?: number;
+  percent: number;
+}
+
 /** State + progress of an async simulate job (mirrors Rust `GET /jobs/{id}`). */
 export interface SimulateJobStatus {
   state: "running" | "done" | "failed" | "cancelled";
-  progress?: {
-    coalitions_solved: number;
-    samples_done: number;
-    max_samples: number;
-    percent: number;
-  };
+  progress?: SimulateJobProgress;
   result?: SimulateRemoteResult;
   error?: string;
 }

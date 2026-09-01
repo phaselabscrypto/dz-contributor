@@ -29,6 +29,19 @@ import { useEpochRate } from "@/lib/hooks/use-epoch-rate";
 import dynamic from "next/dynamic";
 import { findCoverageGaps } from "@/lib/utils/demand";
 import { ShapleyJobModal, type JobState } from "./shapley-job-modal";
+import { useLocalStorageState } from "@/lib/hooks/use-local-storage";
+import {
+  advanceEta,
+  etaLabel,
+  INITIAL_ETA_STATE,
+  type EtaState,
+} from "@/lib/utils/eta";
+import {
+  pushRun,
+  typicalRuntimeLabel,
+  RUN_HISTORY_KEY,
+  type RunRecord,
+} from "@/lib/utils/run-history";
 
 // Defer the map's d3-projection chain to first paint. The simulator
 // is a deep funnel; users land on the contributor picker first and
@@ -128,6 +141,8 @@ function displaySimError(error: string | null): string | null {
 // only surface an error after this many CONSECUTIVE failures (~seconds of lost
 // contact at the 1s cadence) — or the instant the job reports a terminal state.
 const POLL_INTERVAL_MS = 1000;
+// Stable `initial` for useLocalStorageState (it is a hook dependency).
+const EMPTY_RUN_HISTORY: RunRecord[] = [];
 const MAX_CONSECUTIVE_POLL_FAILURES = 20;
 
 // Cancellation is idempotent end-to-end, so retry the request a few times to be
@@ -309,6 +324,25 @@ export function SimulateTab({
   // True while polls are transiently failing but we're still retrying (the job
   // is presumed alive in the worker) — surfaced as a soft "reconnecting" hint.
   const [simReconnecting, setSimReconnecting] = useState(false);
+  // Legibility of the running modal: elapsed since submit, live coalition
+  // counter, rolling ETA, and whether the baseline came from cache. The
+  // service only reports the cache hit in the final result, so it is inferred
+  // here: a cold baseline reports progress on every poll, a cached one never.
+  const [simStartedAt, setSimStartedAt] = useState<number | null>(null);
+  const [simElapsedMs, setSimElapsedMs] = useState<number | null>(null);
+  const [simCoalitions, setSimCoalitions] = useState<{
+    solved: number;
+    total: number;
+  } | null>(null);
+  const [simBaselineCacheHit, setSimBaselineCacheHit] = useState<boolean | null>(null);
+  const [simEtaLabel, setSimEtaLabel] = useState<string | null>(null);
+  const etaStateRef = useRef<EtaState>(INITIAL_ETA_STATE);
+  const sawBaselineProgressRef = useRef(false);
+  const [runHistory, setRunHistory] = useLocalStorageState<RunRecord[]>(
+    RUN_HISTORY_KEY,
+    EMPTY_RUN_HISTORY
+  );
+  const runtimeHint = typicalRuntimeLabel(runHistory);
   const jobIdRef = useRef<string | null>(null);
   const cancelledRef = useRef(false);
   const autoRunFiredRef = useRef(false);
@@ -321,6 +355,14 @@ export function SimulateTab({
   const [jobState, setJobState] = useState<JobState>(
     autoRunOnMount ? "running" : "confirming"
   );
+
+  useEffect(() => {
+    if (jobState !== "running" || simStartedAt === null) return;
+    const tick = () => setSimElapsedMs(Date.now() - simStartedAt);
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [jobState, simStartedAt]);
 
   // Scroll to results when they arrive
   useEffect(() => {
@@ -497,6 +539,14 @@ export function SimulateTab({
     setSimError(null);
     setSimResult(null);
     setSimPercent(0);
+    setSimPhase(null);
+    setSimStartedAt(Date.now());
+    setSimElapsedMs(0);
+    setSimCoalitions(null);
+    setSimBaselineCacheHit(null);
+    setSimEtaLabel(null);
+    etaStateRef.current = INITIAL_ETA_STATE;
+    sawBaselineProgressRef.current = false;
     setSimReconnecting(false);
     cancelledRef.current = false;
     jobIdRef.current = null;
@@ -579,8 +629,52 @@ export function SimulateTab({
           if (typeof data?.progress?.phase === "string") {
             setSimPhase(data.progress.phase);
           }
+          const progress = data?.progress ?? {};
+          const pollPhase: string | null =
+            typeof progress.phase === "string" ? progress.phase : null;
+          if (
+            pollPhase === "baseline" &&
+            typeof progress.percent === "number" &&
+            progress.percent > 0
+          ) {
+            sawBaselineProgressRef.current = true;
+          }
+          if (pollPhase === "modified") {
+            // Decided by the first modified poll, then held for the run.
+            setSimBaselineCacheHit((prev) => prev ?? !sawBaselineProgressRef.current);
+          }
+          if (
+            typeof progress.coalitions_solved === "number" &&
+            typeof progress.coalitions_total === "number" &&
+            progress.coalitions_total > 0
+          ) {
+            const solved: number = progress.coalitions_solved;
+            const total: number = progress.coalitions_total;
+            setSimCoalitions({ solved, total });
+            etaStateRef.current = advanceEta(etaStateRef.current, {
+              phase: pollPhase,
+              nowMs: performance.now(),
+              solved,
+              total,
+            });
+            setSimEtaLabel(etaLabel(etaStateRef.current));
+          }
           if (data.state === "done") {
             setSimPercent(100);
+            const stats = data?.stats;
+            if (
+              typeof stats?.baseline_ms === "number" &&
+              typeof stats?.modified_ms === "number"
+            ) {
+              setRunHistory((prev) =>
+                pushRun(prev, {
+                  totalMs: stats.baseline_ms + stats.modified_ms,
+                  baselineCacheHit: Boolean(stats.baseline_cache_hit),
+                  epoch: Number(selectedEpoch),
+                  finishedAt: new Date().toISOString(),
+                })
+              );
+            }
             setSimPhase(null);
             setSimReconnecting(false);
             setSimResult({
@@ -1530,6 +1624,11 @@ export function SimulateTab({
         phase={simPhase}
         percent={simPercent}
         reconnecting={simReconnecting}
+        etaLabel={simEtaLabel}
+        elapsedMs={simElapsedMs}
+        coalitions={simCoalitions}
+        baselineCacheHit={simBaselineCacheHit}
+        runtimeHint={runtimeHint}
         error={displaySimError(simError)}
         shareButton={
           <ShareButton
@@ -1817,6 +1916,9 @@ export function SimulateTab({
               />
             )}
           </div>
+          {hasChanges && (
+            <p className="mt-2 text-center text-xs text-cream-40">{runtimeHint}</p>
+          )}
         </div>
       )}
     </div>
