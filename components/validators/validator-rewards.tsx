@@ -3,7 +3,6 @@
 import { useMemo } from "react";
 import type { ValidatorRewardsSummary } from "@/lib/types/publisher";
 import { useLocalStorageState } from "@/lib/hooks/use-local-storage";
-import { parseAsString, useQueryState } from "@/lib/hooks/use-url-state";
 import {
   makeSortStateValidator,
   type SortState,
@@ -30,7 +29,7 @@ import {
   getContributorColor,
 } from "@/lib/constants/config";
 import Link from "next/link";
-import { Search, Loader2, ArrowUpDown, ArrowUp, ArrowDown, Download } from "lucide-react";
+import { Loader2, ArrowUpDown, ArrowUp, ArrowDown, Download } from "lucide-react";
 import { rowsToCsv, downloadCsv } from "@/lib/utils/csv";
 
 type SortKey = "name" | "stake" | "share" | "slots" | "rewardEpoch" | "rewardMonth";
@@ -50,6 +49,13 @@ const validateSort = makeSortStateValidator(SORT_KEYS);
 interface ValidatorRewardsProps {
   rewards: ValidatorRewardsSummary | null;
   isLoading: boolean;
+  /** Current query, owned by the page since it also drives the estimate. */
+  search: string;
+  /** Row click. Fills the page search, which surfaces the estimate above. */
+  onSelect: (votePubkey: string) => void;
+  /** Silence the table's own "no matches" line when the page has already
+   *  answered the query with an estimate panel above it. */
+  suppressEmptyMessage?: boolean;
 }
 
 function StatusBadge({ publishing, backup }: { publishing: boolean; backup: boolean }) {
@@ -74,11 +80,14 @@ function StatusBadge({ publishing, backup }: { publishing: boolean; backup: bool
   );
 }
 
-export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) {
-  const [search, setSearch] = useQueryState(
-    "q",
-    parseAsString.withDefault("").withOptions({ clearOnDefault: true }),
-  );
+export function ValidatorRewards({
+  rewards,
+  isLoading,
+  search,
+  onSelect,
+  suppressEmptyMessage = false,
+}: ValidatorRewardsProps) {
+
   const [sortState, setSortState] = useLocalStorageState(
     "dz.validators.sort",
     DEFAULT_SORT,
@@ -195,19 +204,8 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
         />
       </div>
 
-      {/* Search + CSV */}
-      <div className="flex items-center gap-2">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-cream-30" />
-          <input
-            type="text"
-            aria-label="Search validators"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by validator name, pubkey, or metro..."
-            className="w-full rounded-lg bg-cream-5 border border-cream-8 pl-10 pr-4 py-2.5 text-sm text-cream placeholder:text-cream-30 focus:outline-none focus:border-cream-20 transition-colors"
-          />
-        </div>
+      {/* CSV export. The search lives on the page, above the estimate. */}
+      <div className="flex items-center justify-end gap-2">
         <button
           type="button"
           onClick={() => {
@@ -284,14 +282,23 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
                     <TableHead className="text-cream-40">Quality</TableHead>
                     <SortableHead label="Est. / Epoch" sortKey="rewardEpoch" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                     <SortableHead label="Est. / Month" sortKey="rewardMonth" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
-                    <TableHead className="text-cream-40">Estimate</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {filtered.map((v) => (
                     <TableRow
                       key={v.nodePubkey}
-                      className={`border-cream-8 hover:bg-cream-5 transition-colors ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Estimate earnings for ${v.validatorName || shortenPubkey(v.votePubkey)}`}
+                      onClick={() => onSelect(v.votePubkey)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onSelect(v.votePubkey);
+                        }
+                      }}
+                      className={`border-cream-8 cursor-pointer hover:bg-cream-8 focus-visible:bg-cream-8 focus-visible:outline-none transition-colors ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
                     >
                       <TableCell className="text-cream">
                         <div>
@@ -343,23 +350,15 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
                       <TableCell className="text-right text-cream-60 tabular-nums">
                         {v.publishingLeaderShreds ? `${formatSolFromSol(v.projectedRewardMonthlySol)} SOL` : "-"}
                       </TableCell>
-                      <TableCell className="text-xs">
-                        <Link
-                          href={`/validators/calculator?vote=${v.votePubkey}`}
-                          aria-label={`Estimate earnings for ${v.validatorName || shortenPubkey(v.votePubkey)}`}
-                          className="text-cream-60 hover:text-cream underline decoration-dotted underline-offset-2"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          Estimate
-                        </Link>
-                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
               {filtered.length === 0 && (
                 <p className="text-center text-sm text-cream-40 py-8">
-                  No validators match your search.
+                  {suppressEmptyMessage
+                    ? "Not a connected validator — see the estimate above."
+                    : "No validators match your search."}
                 </p>
               )}
             </div>
@@ -374,13 +373,25 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
         </p>
         {filtered.length === 0 && (
           <p className="text-center text-sm text-cream-40 py-8">
-            No validators match your search.
+            {suppressEmptyMessage
+              ? "Not a connected validator — see the estimate above."
+              : "No validators match your search."}
           </p>
         )}
         {filtered.map((v) => (
           <Card
             key={v.nodePubkey}
-            className={`bg-cream-5 border-cream-8 ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
+            role="button"
+            tabIndex={0}
+            aria-label={`Estimate earnings for ${v.validatorName || shortenPubkey(v.votePubkey)}`}
+            onClick={() => onSelect(v.votePubkey)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSelect(v.votePubkey);
+              }
+            }}
+            className={`bg-cream-5 border-cream-8 cursor-pointer active:bg-cream-8 focus-visible:bg-cream-8 focus-visible:outline-none ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
           >
             <CardContent className="pt-4 pb-4 space-y-3">
               <div className="flex items-start justify-between">
@@ -441,13 +452,6 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
                   </span>
                 </div>
               )}
-              <Link
-                href={`/validators/calculator?vote=${v.votePubkey}`}
-                aria-label={`Estimate earnings for ${v.validatorName || shortenPubkey(v.votePubkey)}`}
-                className="mt-2 inline-block text-xs text-cream-60 underline decoration-dotted underline-offset-2"
-              >
-                Estimate earnings
-              </Link>
             </CardContent>
           </Card>
         ))}
