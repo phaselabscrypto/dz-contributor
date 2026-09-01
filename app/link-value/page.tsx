@@ -41,7 +41,7 @@ function Inner() {
     if (!topology) return [];
     return [...topology.contributors]
       .filter((c) => c.linkCount > 0)
-      .sort((a, b) => b.linkCount - a.linkCount);
+      .sort((a, b) => b.focusLinkCount - a.focusLinkCount);
   }, [topology]);
 
   const selected = useMemo(
@@ -129,7 +129,7 @@ function Inner() {
           <option value="">Choose a contributor…</option>
           {contributors.map((c) => (
             <option key={c.code} value={c.code}>
-              {getContributorDisplayName(c.code)} · {c.linkCount} links
+              {getContributorDisplayName(c.code)} · {c.focusLinkCount} links
             </option>
           ))}
         </select>
@@ -145,9 +145,11 @@ function Inner() {
       {contributor && overLinkCap && selected && (
         <EmptyState
           title="Per-link breakdown unavailable"
-          message={`A per-link breakdown isn't available for ${getContributorDisplayName(
+          message={`A per-link breakdown is an exact calculation with one player per link, so the cost doubles with every link. ${getContributorDisplayName(
             contributor,
-          )} — it connects to too many links to value individually.`}
+          )} touches ${selected.focusLinkCount} links, which is 2^${
+            selected.focusLinkCount + 1
+          } coalitions to solve. The practical ceiling is ${MAX_BREAKDOWN_FOCUS_LINKS} links. Above that a single operator takes longer than one epoch to solve, so the answer would be stale before it finished. Results for every operator under the ceiling are precomputed every 6 hours, which is why they load instantly.`}
         />
       )}
 
