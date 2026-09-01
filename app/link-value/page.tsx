@@ -41,7 +41,7 @@ function Inner() {
     if (!topology) return [];
     return [...topology.contributors]
       .filter((c) => c.linkCount > 0)
-      .sort((a, b) => b.linkCount - a.linkCount);
+      .sort((a, b) => b.focusLinkCount - a.focusLinkCount);
   }, [topology]);
 
   const selected = useMemo(
@@ -129,7 +129,7 @@ function Inner() {
           <option value="">Choose a contributor…</option>
           {contributors.map((c) => (
             <option key={c.code} value={c.code}>
-              {getContributorDisplayName(c.code)} · {c.linkCount} links
+              {getContributorDisplayName(c.code)}
             </option>
           ))}
         </select>
@@ -145,9 +145,9 @@ function Inner() {
       {contributor && overLinkCap && selected && (
         <EmptyState
           title="Per-link breakdown unavailable"
-          message={`A per-link breakdown isn't available for ${getContributorDisplayName(
+          message={`${getContributorDisplayName(
             contributor,
-          )} — it connects to too many links to value individually.`}
+          )} connects to too many links to calculate a per-link breakdown.`}
         />
       )}
 
