@@ -19,7 +19,12 @@
  * stale one, so an RPC outage degrades to a right answer.
  */
 
-import { getBlockTime, getEpochInfo, getSlot } from "@/lib/onchain/client";
+import {
+  categorizeRpcError,
+  getBlockTime,
+  getEpochInfo,
+  getSlot,
+} from "@/lib/onchain/client";
 import { reportError } from "@/lib/observability";
 
 /** Slots per epoch on mainnet. Used only for the fallback and as the
@@ -162,21 +167,6 @@ async function measureSlotMs(anchorSlot: number): Promise<number | null> {
 }
 
 /**
- * Coarse error category. Mirrors `app/api/health/route.ts`, which discards raw
- * error text for the same reason: fetch and AbortSignal messages routinely
- * echo the request URL, credentials included.
- */
-function categorize(err: unknown): "timeout" | "network" | "parse" | "unknown" {
-  if (err instanceof Error) {
-    if (err.name === "AbortError" || err.name === "TimeoutError")
-      return "timeout";
-    if (err.name === "TypeError") return "network";
-    if (err.name === "SyntaxError") return "parse";
-  }
-  return "unknown";
-}
-
-/**
  * Current epoch rate, measured from the chain and cached for six hours.
  *
  * Never throws and never rejects. Any failure reports the error and returns
@@ -228,10 +218,8 @@ export async function getEpochRate(): Promise<EpochRate> {
       cached = { rate, ts: Date.now() };
       return rate;
     } catch (err) {
-      // Categorised, not logged verbatim. `rpc()` builds its HTTP error
-      // message from the upstream response body, and SOLANA_RPC_URL can carry
-      // a provider API key in its query string.
-      reportError(new Error(`epoch-rate read failed: ${categorize(err)}`), {
+      // Categorised, not logged verbatim: see categorizeRpcError.
+      reportError(new Error(`epoch-rate read failed: ${categorizeRpcError(err)}`), {
         source: "lib/utils/epoch-rate#getEpochRate",
       });
       return FALLBACK_EPOCH_RATE;
