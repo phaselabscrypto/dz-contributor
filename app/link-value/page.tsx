@@ -147,7 +147,7 @@ function Inner() {
           title="Per-link breakdown unavailable"
           message={`${getContributorDisplayName(
             contributor,
-          )} has too many connected links to value one at a time. The cost of that calculation doubles with each link, and at this size it would take longer than an epoch to finish.`}
+          )} connects to too many links to calculate a per-link breakdown.`}
         />
       )}
 
