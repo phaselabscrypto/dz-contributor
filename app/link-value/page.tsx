@@ -129,7 +129,7 @@ function Inner() {
           <option value="">Choose a contributor…</option>
           {contributors.map((c) => (
             <option key={c.code} value={c.code}>
-              {getContributorDisplayName(c.code)} · {c.focusLinkCount} links
+              {getContributorDisplayName(c.code)}
             </option>
           ))}
         </select>
@@ -145,11 +145,9 @@ function Inner() {
       {contributor && overLinkCap && selected && (
         <EmptyState
           title="Per-link breakdown unavailable"
-          message={`A per-link breakdown is an exact calculation with one player per link, so the cost doubles with every link. ${getContributorDisplayName(
+          message={`${getContributorDisplayName(
             contributor,
-          )} touches ${selected.focusLinkCount} links, which is 2^${
-            selected.focusLinkCount + 1
-          } coalitions to solve. The practical ceiling is ${MAX_BREAKDOWN_FOCUS_LINKS} links. Above that a single operator takes longer than one epoch to solve, so the answer would be stale before it finished. Results for every operator under the ceiling are precomputed every 6 hours, which is why they load instantly.`}
+          )} has too many connected links to value one at a time. The cost of that calculation doubles with each link, and at this size it would take longer than an epoch to finish.`}
         />
       )}
 
