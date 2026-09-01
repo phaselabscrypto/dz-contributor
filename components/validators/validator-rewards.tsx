@@ -288,23 +288,16 @@ export function ValidatorRewards({
                   {filtered.map((v) => (
                     <TableRow
                       key={v.nodePubkey}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Estimate earnings for ${v.validatorName || shortenPubkey(v.votePubkey)}`}
                       onClick={() => onSelect(v.votePubkey)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          onSelect(v.votePubkey);
-                        }
-                      }}
-                      className={`border-cream-8 cursor-pointer hover:bg-cream-8 focus-visible:bg-cream-8 focus-visible:outline-none transition-colors ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
+                      className={`border-cream-8 cursor-pointer hover:bg-cream-8 transition-colors ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
                     >
                       <TableCell className="text-cream">
-                        <div>
-                          <span className="font-medium">{v.validatorName || "Unknown"}</span>
-                          <span className="block text-xs text-cream-30">{shortenPubkey(v.nodePubkey)}</span>
-                        </div>
+                        <SelectValidatorButton
+                          name={v.validatorName}
+                          votePubkey={v.votePubkey}
+                          onSelect={onSelect}
+                        />
+                        <span className="block text-xs text-cream-30">{shortenPubkey(v.nodePubkey)}</span>
                       </TableCell>
                       <TableCell className="text-xs">
                         {v.contributorCode ? (
@@ -381,28 +374,23 @@ export function ValidatorRewards({
         {filtered.map((v) => (
           <Card
             key={v.nodePubkey}
-            role="button"
-            tabIndex={0}
-            aria-label={`Estimate earnings for ${v.validatorName || shortenPubkey(v.votePubkey)}`}
             onClick={() => onSelect(v.votePubkey)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onSelect(v.votePubkey);
-              }
-            }}
-            className={`bg-cream-5 border-cream-8 cursor-pointer active:bg-cream-8 focus-visible:bg-cream-8 focus-visible:outline-none ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
+            className={`bg-cream-5 border-cream-8 cursor-pointer active:bg-cream-8 ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
           >
             <CardContent className="pt-4 pb-4 space-y-3">
               <div className="flex items-start justify-between">
                 <div>
-                  <p className="text-sm font-medium text-cream">
-                    {v.validatorName || "Unknown"}
-                  </p>
+                  <SelectValidatorButton
+                    name={v.validatorName}
+                    votePubkey={v.votePubkey}
+                    onSelect={onSelect}
+                    className="block text-sm text-cream"
+                  />
                   <p className="text-xs text-cream-30">{shortenPubkey(v.nodePubkey)}</p>
                   {v.contributorCode && (
                     <Link
                       href={`/contributors/${v.contributorCode}`}
+                      onClick={(e) => e.stopPropagation()}
                       className="mt-1 inline-flex items-center gap-1.5 text-xs text-cream-60"
                     >
                       <span
@@ -457,6 +445,37 @@ export function ValidatorRewards({
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * The one focusable control in a row. The row itself takes pointer clicks
+ * only: a row with role="button" loses its row semantics for screen readers
+ * and turns the contributor link inside it into a control nested in a control.
+ */
+function SelectValidatorButton({
+  name,
+  votePubkey,
+  onSelect,
+  className = "",
+}: {
+  name: string;
+  votePubkey: string;
+  onSelect: (votePubkey: string) => void;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect(votePubkey);
+      }}
+      className={`text-left font-medium hover:underline decoration-dotted rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${className}`}
+    >
+      {name || "Unknown"}
+      <span className="sr-only">, estimate earnings</span>
+    </button>
   );
 }
 

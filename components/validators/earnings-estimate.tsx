@@ -142,7 +142,9 @@ export function EarningsEstimate({
         <Stat
           label="Stake share"
           value={`${sharePct}%`}
-          sub={`of ${formatNumber(estimate.eligibleStakeLamports / LAMPORTS_PER_SOL, 0)} SOL`}
+          // A counterfactual denominator differs from the table's, and the
+          // grid has to say so on its own, in a screenshot of just the tiles.
+          sub={`of ${formatNumber(estimate.eligibleStakeLamports / LAMPORTS_PER_SOL, 0)} SOL${isCounterfactual ? " incl. this validator" : ""}`}
         />
         <Stat
           label="Per epoch"

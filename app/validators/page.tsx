@@ -121,9 +121,11 @@ function ValidatorsInner() {
 
   // Two failure modes: the request fails, or a 200 carries a null average.
   // Either way the SOL figures must not render as 0, which is
-  // indistinguishable from a genuinely unstaked validator.
+  // indistinguishable from a genuinely unstaked validator. A request still in
+  // flight is neither, so it shows the skeleton below rather than this banner.
   const averageFeeSol = feeHistory?.averageFeeSol ?? null;
-  const feesUnavailable = Boolean(feesError) || averageFeeSol === null;
+  const feesUnavailable =
+    Boolean(feesError) || (!feeLoading && averageFeeSol === null);
   const contributorCode = publisher
     ? deviceToContrib.get(publisher.dz_device_code)
     : undefined;
@@ -212,7 +214,7 @@ function ValidatorsInner() {
                     pubkey={parsed.pubkey}
                     onRetry={() => mutateStake()}
                   />
-                ) : stakeLoading || !stake || !publishers ? (
+                ) : stakeLoading || feeLoading || !stake || !publishers ? (
                   <div className="space-y-4">
                     <SectionSkeleton />
                     <StatRowSkeleton />

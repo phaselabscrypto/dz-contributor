@@ -14,8 +14,12 @@
  * while operators routinely paste a node identity.
  */
 
-import { getVoteAccounts, type VoteAccountInfo } from "./client";
-import { categorizeError, reportError } from "@/lib/observability";
+import {
+  categorizeRpcError,
+  getVoteAccounts,
+  type VoteAccountInfo,
+} from "./client";
+import { reportError } from "@/lib/observability";
 
 /** Trimmed vote-account record. `epochCredits` and `rootSlot` are dropped
  *  because the index holds ~1500 of these and neither is used. */
@@ -43,8 +47,15 @@ export type VoteStakeResult =
  *  five minutes is ample and keeps the expensive call rare. */
 const INDEX_TTL_MS = 5 * 60 * 1_000;
 
-const FILTERED_OPTS = { retries: 2, timeoutMs: 4_000 } as const;
-const SNAPSHOT_OPTS = { retries: 1, timeoutMs: 10_000 } as const;
+// ttlMs 0 on both. The route caches hits and misses itself, and the shared
+// 64-entry rpc cache is sized for a fixed set of callers, not one entry per
+// pubkey; with it, a provider that ignores the filter would park its full
+// payload there once per lookup.
+const FILTERED_OPTS = { retries: 2, timeoutMs: 4_000, ttlMs: 0 } as const;
+const SNAPSHOT_OPTS = { retries: 1, timeoutMs: 10_000, ttlMs: 0 } as const;
+
+type FetchVoteAccounts = typeof getVoteAccounts;
+let fetchVoteAccounts: FetchVoteAccounts = getVoteAccounts;
 
 function compact(v: VoteAccountInfo, delinquent: boolean): CompactVoteEntry {
   return {
@@ -114,8 +125,7 @@ async function getIdentityIndex(): Promise<Map<string, CompactVoteEntry>> {
       // identity to vote pubkey. The consequence is that an identity whose
       // only vote account is both unstaked and delinquent misses, which the
       // filtered vote-pubkey path handles correctly anyway.
-      // ttlMs 0 keeps this out of the shared 64-entry cache.
-      const res = await getVoteAccounts({ ttlMs: 0, ...SNAPSHOT_OPTS });
+      const res = await fetchVoteAccounts(SNAPSHOT_OPTS);
       return cacheIndex(flatten(res));
     } finally {
       indexInFlight = null;
@@ -139,7 +149,7 @@ export async function resolveVoteAccountStake(
   pubkey: string,
 ): Promise<VoteStakeResult> {
   try {
-    const res = await getVoteAccounts({
+    const res = await fetchVoteAccounts({
       votePubkey: pubkey,
       keepUnstakedDelinquents: true,
       ...FILTERED_OPTS,
@@ -158,7 +168,7 @@ export async function resolveVoteAccountStake(
     // Categorised, not logged verbatim: rpc() builds its HTTP error message
     // from the upstream response body, and SOLANA_RPC_URL can carry a
     // provider API key.
-    reportError(new Error(`filtered lookup: ${categorizeError(err)}`), {
+    reportError(new Error(`filtered lookup: ${categorizeRpcError(err)}`), {
       source: "lib/onchain/vote-stake",
     });
     return { status: "unavailable" };
@@ -170,7 +180,7 @@ export async function resolveVoteAccountStake(
     if (hit) return { status: "found", entry: hit, matchedBy: "identity" };
     return { status: "not-found" };
   } catch (err) {
-    reportError(new Error(`identity index: ${categorizeError(err)}`), {
+    reportError(new Error(`identity index: ${categorizeRpcError(err)}`), {
       source: "lib/onchain/vote-stake",
     });
     return { status: "unavailable" };
@@ -182,3 +192,18 @@ export function clearVoteStakeCache() {
   index = null;
   indexInFlight = null;
 }
+
+/**
+ * Test seam. Swaps the RPC call so the resolver, and the route above it, run
+ * against canned payloads with no network. Returns a function that restores
+ * the live call.
+ */
+export const __testing = {
+  setFetchVoteAccounts(fn: FetchVoteAccounts): () => void {
+    const prev = fetchVoteAccounts;
+    fetchVoteAccounts = fn;
+    return () => {
+      fetchVoteAccounts = prev;
+    };
+  },
+};

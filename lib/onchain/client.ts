@@ -17,6 +17,7 @@
  */
 
 import { SOLANA_RPC_URL } from "./program-ids";
+import { categorizeError, type ErrorCategory } from "@/lib/observability";
 
 interface JsonRpcOk<T> {
   jsonrpc: "2.0";
@@ -29,6 +30,36 @@ interface JsonRpcErr {
   error: { code: number; message: string };
 }
 type JsonRpcResp<T> = JsonRpcOk<T> | JsonRpcErr;
+
+/**
+ * A failure the upstream reported, as opposed to one the fetch raised. `kind`
+ * and `code` are safe to log; the message may quote the response body, so
+ * report `categorizeRpcError(err)` instead of it.
+ */
+export class RpcError extends Error {
+  readonly kind: "http" | "jsonrpc";
+  readonly code: number;
+  constructor(kind: "http" | "jsonrpc", code: number, message: string) {
+    super(message);
+    this.name = "RpcError";
+    this.kind = kind;
+    this.code = code;
+  }
+}
+
+export type RpcErrorTag =
+  | ErrorCategory
+  | `http:${number}`
+  | `jsonrpc:${number}`;
+
+/**
+ * `categorizeError` plus the integers an `RpcError` carries, so a log line can
+ * tell a provider 5xx from a rejected parameter from a timeout.
+ */
+export function categorizeRpcError(err: unknown): RpcErrorTag {
+  if (err instanceof RpcError) return `${err.kind}:${err.code}`;
+  return categorizeError(err);
+}
 
 interface CacheEntry<T> {
   value: T;
@@ -92,11 +123,19 @@ async function rpc<T>(
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (!response.ok) {
-        throw new Error(`RPC HTTP ${response.status}: ${await response.text()}`);
+        throw new RpcError(
+          "http",
+          response.status,
+          `RPC HTTP ${response.status}: ${await response.text()}`,
+        );
       }
       const body = (await response.json()) as JsonRpcResp<T>;
       if ("error" in body) {
-        throw new Error(`RPC error ${body.error.code}: ${body.error.message}`);
+        throw new RpcError(
+          "jsonrpc",
+          body.error.code,
+          `RPC error ${body.error.code}: ${body.error.message}`,
+        );
       }
       if (useCache) cacheSet(cacheKey, body.result, ttl);
       return body.result;

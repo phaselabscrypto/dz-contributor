@@ -19,8 +19,13 @@
  * stale one, so an RPC outage degrades to a right answer.
  */
 
-import { getBlockTime, getEpochInfo, getSlot } from "@/lib/onchain/client";
-import { categorizeError, reportError } from "@/lib/observability";
+import {
+  categorizeRpcError,
+  getBlockTime,
+  getEpochInfo,
+  getSlot,
+} from "@/lib/onchain/client";
+import { reportError } from "@/lib/observability";
 
 /** Slots per epoch on mainnet. Used only for the fallback and as the
  *  preferred sampling window; the live value comes from `getEpochInfo`. */
@@ -213,8 +218,8 @@ export async function getEpochRate(): Promise<EpochRate> {
       cached = { rate, ts: Date.now() };
       return rate;
     } catch (err) {
-      // Categorised, not logged verbatim: see categorizeError.
-      reportError(new Error(`epoch-rate read failed: ${categorizeError(err)}`), {
+      // Categorised, not logged verbatim: see categorizeRpcError.
+      reportError(new Error(`epoch-rate read failed: ${categorizeRpcError(err)}`), {
         source: "lib/utils/epoch-rate#getEpochRate",
       });
       return FALLBACK_EPOCH_RATE;
