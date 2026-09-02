@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useMemo } from "react";
 import type { ValidatorRewardsSummary } from "@/lib/types/publisher";
 import { useLocalStorageState } from "@/lib/hooks/use-local-storage";
 import {
@@ -29,7 +29,7 @@ import {
   getContributorColor,
 } from "@/lib/constants/config";
 import Link from "next/link";
-import { Search, Loader2, ArrowUpDown, ArrowUp, ArrowDown, Download } from "lucide-react";
+import { Loader2, ArrowUpDown, ArrowUp, ArrowDown, Download } from "lucide-react";
 import { rowsToCsv, downloadCsv } from "@/lib/utils/csv";
 
 type SortKey = "name" | "stake" | "share" | "slots" | "rewardEpoch" | "rewardMonth";
@@ -49,6 +49,13 @@ const validateSort = makeSortStateValidator(SORT_KEYS);
 interface ValidatorRewardsProps {
   rewards: ValidatorRewardsSummary | null;
   isLoading: boolean;
+  /** Current query, owned by the page since it also drives the estimate. */
+  search: string;
+  /** Row click. Fills the page search, which surfaces the estimate above. */
+  onSelect: (votePubkey: string) => void;
+  /** Silence the table's own "no matches" line when the page has already
+   *  answered the query with an estimate panel above it. */
+  suppressEmptyMessage?: boolean;
 }
 
 function StatusBadge({ publishing, backup }: { publishing: boolean; backup: boolean }) {
@@ -73,8 +80,14 @@ function StatusBadge({ publishing, backup }: { publishing: boolean; backup: bool
   );
 }
 
-export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) {
-  const [search, setSearch] = useState("");
+export function ValidatorRewards({
+  rewards,
+  isLoading,
+  search,
+  onSelect,
+  suppressEmptyMessage = false,
+}: ValidatorRewardsProps) {
+
   const [sortState, setSortState] = useLocalStorageState(
     "dz.validators.sort",
     DEFAULT_SORT,
@@ -191,19 +204,8 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
         />
       </div>
 
-      {/* Search + CSV */}
-      <div className="flex items-center gap-2">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-cream-30" />
-          <input
-            type="text"
-            aria-label="Search validators"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by validator name, pubkey, or metro..."
-            className="w-full rounded-lg bg-cream-5 border border-cream-8 pl-10 pr-4 py-2.5 text-sm text-cream placeholder:text-cream-30 focus:outline-none focus:border-cream-20 transition-colors"
-          />
-        </div>
+      {/* CSV export. The search lives on the page, above the estimate. */}
+      <div className="flex items-center justify-end gap-2">
         <button
           type="button"
           onClick={() => {
@@ -286,13 +288,16 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
                   {filtered.map((v) => (
                     <TableRow
                       key={v.nodePubkey}
-                      className={`border-cream-8 hover:bg-cream-5 transition-colors ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
+                      onClick={() => onSelect(v.votePubkey)}
+                      className={`border-cream-8 cursor-pointer hover:bg-cream-8 transition-colors ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
                     >
                       <TableCell className="text-cream">
-                        <div>
-                          <span className="font-medium">{v.validatorName || "Unknown"}</span>
-                          <span className="block text-xs text-cream-30">{shortenPubkey(v.nodePubkey)}</span>
-                        </div>
+                        <SelectValidatorButton
+                          name={v.validatorName}
+                          votePubkey={v.votePubkey}
+                          onSelect={onSelect}
+                        />
+                        <span className="block text-xs text-cream-30">{shortenPubkey(v.nodePubkey)}</span>
                       </TableCell>
                       <TableCell className="text-xs">
                         {v.contributorCode ? (
@@ -344,7 +349,9 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
               </Table>
               {filtered.length === 0 && (
                 <p className="text-center text-sm text-cream-40 py-8">
-                  No validators match your search.
+                  {suppressEmptyMessage
+                    ? "Not a connected validator — see the estimate above."
+                    : "No validators match your search."}
                 </p>
               )}
             </div>
@@ -359,24 +366,31 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
         </p>
         {filtered.length === 0 && (
           <p className="text-center text-sm text-cream-40 py-8">
-            No validators match your search.
+            {suppressEmptyMessage
+              ? "Not a connected validator — see the estimate above."
+              : "No validators match your search."}
           </p>
         )}
         {filtered.map((v) => (
           <Card
             key={v.nodePubkey}
-            className={`bg-cream-5 border-cream-8 ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
+            onClick={() => onSelect(v.votePubkey)}
+            className={`bg-cream-5 border-cream-8 cursor-pointer active:bg-cream-8 ${!v.publishingLeaderShreds ? "opacity-40" : ""}`}
           >
             <CardContent className="pt-4 pb-4 space-y-3">
               <div className="flex items-start justify-between">
                 <div>
-                  <p className="text-sm font-medium text-cream">
-                    {v.validatorName || "Unknown"}
-                  </p>
+                  <SelectValidatorButton
+                    name={v.validatorName}
+                    votePubkey={v.votePubkey}
+                    onSelect={onSelect}
+                    className="block text-sm text-cream"
+                  />
                   <p className="text-xs text-cream-30">{shortenPubkey(v.nodePubkey)}</p>
                   {v.contributorCode && (
                     <Link
                       href={`/contributors/${v.contributorCode}`}
+                      onClick={(e) => e.stopPropagation()}
                       className="mt-1 inline-flex items-center gap-1.5 text-xs text-cream-60"
                     >
                       <span
@@ -431,6 +445,37 @@ export function ValidatorRewards({ rewards, isLoading }: ValidatorRewardsProps) 
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * The one focusable control in a row. The row itself takes pointer clicks
+ * only: a row with role="button" loses its row semantics for screen readers
+ * and turns the contributor link inside it into a control nested in a control.
+ */
+function SelectValidatorButton({
+  name,
+  votePubkey,
+  onSelect,
+  className = "",
+}: {
+  name: string;
+  votePubkey: string;
+  onSelect: (votePubkey: string) => void;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect(votePubkey);
+      }}
+      className={`text-left font-medium hover:underline decoration-dotted rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${className}`}
+    >
+      {name || "Unknown"}
+      <span className="sr-only">, estimate earnings</span>
+    </button>
   );
 }
 

@@ -17,6 +17,7 @@
  */
 
 import { SOLANA_RPC_URL } from "./program-ids";
+import { categorizeError, type ErrorCategory } from "@/lib/observability";
 
 interface JsonRpcOk<T> {
   jsonrpc: "2.0";
@@ -29,6 +30,36 @@ interface JsonRpcErr {
   error: { code: number; message: string };
 }
 type JsonRpcResp<T> = JsonRpcOk<T> | JsonRpcErr;
+
+/**
+ * A failure the upstream reported, as opposed to one the fetch raised. `kind`
+ * and `code` are safe to log; the message may quote the response body, so
+ * report `categorizeRpcError(err)` instead of it.
+ */
+export class RpcError extends Error {
+  readonly kind: "http" | "jsonrpc";
+  readonly code: number;
+  constructor(kind: "http" | "jsonrpc", code: number, message: string) {
+    super(message);
+    this.name = "RpcError";
+    this.kind = kind;
+    this.code = code;
+  }
+}
+
+export type RpcErrorTag =
+  | ErrorCategory
+  | `http:${number}`
+  | `jsonrpc:${number}`;
+
+/**
+ * `categorizeError` plus the integers an `RpcError` carries, so a log line can
+ * tell a provider 5xx from a rejected parameter from a timeout.
+ */
+export function categorizeRpcError(err: unknown): RpcErrorTag {
+  if (err instanceof RpcError) return `${err.kind}:${err.code}`;
+  return categorizeError(err);
+}
 
 interface CacheEntry<T> {
   value: T;
@@ -62,13 +93,19 @@ async function rpc<T>(
   const ttl = opts.ttlMs ?? DEFAULT_TTL_MS;
   const retries = opts.retries ?? 3;
   const timeoutMs = opts.timeoutMs ?? 15_000;
+  // ttl <= 0 bypasses the cache in both directions. The map is capped at 64
+  // entries sized for a fixed set of callers, so a large or caller-keyed
+  // payload must be able to stay out of it rather than evict the rest.
+  const useCache = ttl > 0;
   const cacheKey = `${method}:${JSON.stringify(params)}`;
-  const cached = cache.get(cacheKey);
-  if (cached && cached.expires > Date.now()) {
-    // Refresh LRU position on hit.
-    cache.delete(cacheKey);
-    cache.set(cacheKey, cached);
-    return cached.value as T;
+  if (useCache) {
+    const cached = cache.get(cacheKey);
+    if (cached && cached.expires > Date.now()) {
+      // Refresh LRU position on hit.
+      cache.delete(cacheKey);
+      cache.set(cacheKey, cached);
+      return cached.value as T;
+    }
   }
 
   let lastErr: unknown = null;
@@ -86,13 +123,21 @@ async function rpc<T>(
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (!response.ok) {
-        throw new Error(`RPC HTTP ${response.status}: ${await response.text()}`);
+        throw new RpcError(
+          "http",
+          response.status,
+          `RPC HTTP ${response.status}: ${await response.text()}`,
+        );
       }
       const body = (await response.json()) as JsonRpcResp<T>;
       if ("error" in body) {
-        throw new Error(`RPC error ${body.error.code}: ${body.error.message}`);
+        throw new RpcError(
+          "jsonrpc",
+          body.error.code,
+          `RPC error ${body.error.code}: ${body.error.message}`,
+        );
       }
-      cacheSet(cacheKey, body.result, ttl);
+      if (useCache) cacheSet(cacheKey, body.result, ttl);
       return body.result;
     } catch (err) {
       lastErr = err;
@@ -148,6 +193,81 @@ export async function getAccountInfo(
     { ttlMs: 60_000 },
   );
   return result.value;
+}
+
+export interface VoteAccountInfo {
+  votePubkey: string;
+  nodePubkey: string;
+  /** Lamports. Stays a `number` to match Publisher.activated_stake; the
+   *  precision loss above 2^53 lamports is ~1e-14 relative, eleven orders of
+   *  magnitude below anything displayed. */
+  activatedStake: number;
+  /** False when the account holds no stake at the epoch boundary. */
+  epochVoteAccount: boolean;
+  commission: number;
+  lastVote: number;
+  rootSlot: number;
+  /** [epoch, credits, previousCredits] triples, oldest first. */
+  epochCredits: Array<[number, number, number]>;
+}
+
+export interface VoteAccountsResponse {
+  current: VoteAccountInfo[];
+  delinquent: VoteAccountInfo[];
+}
+
+export interface GetVoteAccountsOpts {
+  /**
+   * Restrict the result to one vote account. Cuts the response from megabytes
+   * to a few hundred bytes. Matches the VOTE pubkey only, never the node
+   * identity.
+   */
+  votePubkey?: string;
+  /**
+   * Keep delinquent vote accounts that hold no stake.
+   *
+   * REQUIRED when probing a single key. At the RPC default of false, an
+   * unstaked delinquent account is absent from both arrays, so its response is
+   * byte-identical to that of a pubkey which is not a vote account at all.
+   * That collapses "exists with no stake" into "does not exist", and those
+   * have to be distinguishable.
+   */
+  keepUnstakedDelinquents?: boolean;
+  /** Pass 0 to bypass the module cache. */
+  ttlMs?: number;
+  retries?: number;
+  timeoutMs?: number;
+}
+
+/**
+ * Vote accounts, optionally filtered to one.
+ *
+ * Raw JSON-RPC because `@solana/web3.js` 1.98.4 declares
+ * `getVoteAccounts(commitment?)` and exposes neither config field, so it
+ * cannot express a single-validator query and would pull the whole cluster on
+ * every lookup.
+ */
+export async function getVoteAccounts(
+  opts: GetVoteAccountsOpts = {},
+): Promise<VoteAccountsResponse> {
+  const { votePubkey, keepUnstakedDelinquents, ttlMs, retries, timeoutMs } =
+    opts;
+  return rpc<VoteAccountsResponse>(
+    "getVoteAccounts",
+    [
+      {
+        commitment: "confirmed",
+        // Conditional spreads, not `votePubkey: undefined`: the cache key is
+        // JSON.stringify(params), and an explicit undefined serialises
+        // differently from an omitted field, splitting one logical entry.
+        ...(votePubkey ? { votePubkey } : {}),
+        ...(keepUnstakedDelinquents !== undefined
+          ? { keepUnstakedDelinquents }
+          : {}),
+      },
+    ],
+    { ttlMs: ttlMs ?? DEFAULT_TTL_MS, retries, timeoutMs },
+  );
 }
 
 /** Latest slot the node considers final. */
