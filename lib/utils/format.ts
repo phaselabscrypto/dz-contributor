@@ -98,3 +98,29 @@ export function shortenPubkey(pubkey: string, chars = 4): string {
   if (pubkey.length <= chars * 2 + 3) return pubkey;
   return pubkey.slice(0, chars) + "..." + pubkey.slice(-chars);
 }
+
+/**
+ * Human-scale duration for progress copy: "under a minute", "about 4 min",
+ * "about 1h 12m". Minutes round up so an estimate never reads shorter than
+ * the time left.
+ */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "under a minute";
+  if (ms < 60_000) return "under a minute";
+  const totalMinutes = Math.ceil(ms / 60_000);
+  if (totalMinutes < 60) return `about ${totalMinutes} min`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `about ${hours}h ${minutes}m`;
+}
+
+/** Compact elapsed-time readout for a running job: "42s", "4m 12s", "1h 04m". */
+export function formatElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "0s";
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
+  const hours = Math.floor(totalMinutes / 60);
+  return `${hours}h ${String(totalMinutes % 60).padStart(2, "0")}m`;
+}

@@ -29,6 +29,26 @@ import { useEpochRate } from "@/lib/hooks/use-epoch-rate";
 import dynamic from "next/dynamic";
 import { findCoverageGaps } from "@/lib/utils/demand";
 import { ShapleyJobModal, type JobState } from "./shapley-job-modal";
+import { useLocalStorageState } from "@/lib/hooks/use-local-storage";
+import {
+  advanceEta,
+  etaLabel,
+  INITIAL_ETA_STATE,
+  type EtaState,
+} from "@/lib/utils/eta";
+import {
+  pushRun,
+  typicalRuntimeLabel,
+  validateRunHistory,
+  RUN_HISTORY_KEY,
+  type RunRecord,
+} from "@/lib/utils/run-history";
+import {
+  applyPoll,
+  INITIAL_SIM_PROGRESS,
+  type SimProgress,
+} from "@/lib/utils/sim-progress";
+import type { SimulateJobProgress, SimulateStatsWire } from "@/lib/utils/shapley-remote";
 
 // Defer the map's d3-projection chain to first paint. The simulator
 // is a deep funnel; users land on the contributor picker first and
@@ -129,6 +149,21 @@ function displaySimError(error: string | null): string | null {
 // contact at the 1s cadence) — or the instant the job reports a terminal state.
 const POLL_INTERVAL_MS = 1000;
 const MAX_CONSECUTIVE_POLL_FAILURES = 20;
+
+// Stable `initial` for useLocalStorageState (it is a hook dependency).
+const EMPTY_RUN_HISTORY: RunRecord[] = [];
+
+/** Shape of `GET /api/shapley/jobs/[id]` as the browser sees it. */
+interface SimulateJobPoll {
+  state: string;
+  progress?: SimulateJobProgress | null;
+  error?: string | null;
+  stats?: Partial<SimulateStatsWire>;
+  before?: SimulateResponse["before"];
+  after?: SimulateResponse["after"];
+  delta?: SimulateResponse["delta"];
+  allContributors?: SimulateResponse["allContributors"];
+}
 
 // Cancellation is idempotent end-to-end, so retry the request a few times to be
 // sure it reaches the server even through a transient client-side blip — a
@@ -302,13 +337,23 @@ export function SimulateTab({
   // handleSimulate always clears it in its `finally`.
   const [simLoading, setSimLoading] = useState(autoRunOnMount);
   const [simError, setSimError] = useState<string | null>(null);
-  // Async-job UI: progress % (0–100) + the current phase ("baseline" |
-  // "modified"), since the bar is per-phase 0–100 and resets at the handoff.
-  const [simPercent, setSimPercent] = useState(0);
-  const [simPhase, setSimPhase] = useState<string | null>(null);
+  // Async-job UI: phase, per-phase percent, coalition counter, and the
+  // cache-hit inference, folded from each poll by `applyPoll`.
+  const [simProgress, setSimProgress] = useState<SimProgress>(INITIAL_SIM_PROGRESS);
   // True while polls are transiently failing but we're still retrying (the job
   // is presumed alive in the worker) — surfaced as a soft "reconnecting" hint.
   const [simReconnecting, setSimReconnecting] = useState(false);
+  const [simStartedAt, setSimStartedAt] = useState<number | null>(null);
+  const [simElapsedMs, setSimElapsedMs] = useState<number | null>(null);
+  const [simEtaLabel, setSimEtaLabel] = useState<string | null>(null);
+  const etaStateRef = useRef<EtaState>(INITIAL_ETA_STATE);
+  const progressRef = useRef<SimProgress>(INITIAL_SIM_PROGRESS);
+  const [runHistory, setRunHistory] = useLocalStorageState<RunRecord[]>(
+    RUN_HISTORY_KEY,
+    EMPTY_RUN_HISTORY,
+    validateRunHistory
+  );
+  const runtimeHint = typicalRuntimeLabel(runHistory);
   const jobIdRef = useRef<string | null>(null);
   const cancelledRef = useRef(false);
   const autoRunFiredRef = useRef(false);
@@ -321,6 +366,14 @@ export function SimulateTab({
   const [jobState, setJobState] = useState<JobState>(
     autoRunOnMount ? "running" : "confirming"
   );
+
+  useEffect(() => {
+    if (jobState !== "running" || simStartedAt === null) return;
+    const tick = () => setSimElapsedMs(Date.now() - simStartedAt);
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [jobState, simStartedAt]);
 
   // Scroll to results when they arrive
   useEffect(() => {
@@ -496,7 +549,12 @@ export function SimulateTab({
     setSimLoading(true);
     setSimError(null);
     setSimResult(null);
-    setSimPercent(0);
+    setSimProgress(INITIAL_SIM_PROGRESS);
+    progressRef.current = INITIAL_SIM_PROGRESS;
+    setSimStartedAt(Date.now());
+    setSimElapsedMs(0);
+    setSimEtaLabel(null);
+    etaStateRef.current = INITIAL_ETA_STATE;
     setSimReconnecting(false);
     cancelledRef.current = false;
     jobIdRef.current = null;
@@ -551,6 +609,7 @@ export function SimulateTab({
       // `modalOpened` is already true for the manual path (the button opened it).
       let modalOpened = !opts.deferModal;
       let consecutiveFailures = 0;
+      let isFirstPoll = true;
       let firstPoll = true;
       for (;;) {
         if (cancelledRef.current) return;
@@ -567,21 +626,28 @@ export function SimulateTab({
           if (!pollRes.ok) {
             throw new Error(`poll ${pollRes.status}: ${await pollRes.text()}`);
           }
-          const data = await pollRes.json();
+          const data = (await pollRes.json()) as SimulateJobPoll;
+          const isFirstPollResult = isFirstPoll;
+          isFirstPoll = false;
 
           // Poll succeeded — clear any transient-failure state.
           consecutiveFailures = 0;
           if (!cancelledRef.current) setSimReconnecting(false);
 
-          if (typeof data?.progress?.percent === "number") {
-            setSimPercent(data.progress.percent);
-          }
-          if (typeof data?.progress?.phase === "string") {
-            setSimPhase(data.progress.phase);
+          const applied = applyPoll(progressRef.current, data.progress);
+          progressRef.current = applied.next;
+          setSimProgress(applied.next);
+          if (!applied.isPhaseFlip && applied.next.coalitions) {
+            etaStateRef.current = advanceEta(etaStateRef.current, {
+              phase: applied.next.phase,
+              nowMs: performance.now(),
+              solved: applied.next.coalitions.solved,
+              total: applied.next.coalitions.total,
+            });
+            setSimEtaLabel(etaLabel(etaStateRef.current));
           }
           if (data.state === "done") {
-            setSimPercent(100);
-            setSimPhase(null);
+            setSimProgress((p) => ({ ...p, phase: null, percent: 100 }));
             setSimReconnecting(false);
             setSimResult({
               epoch: selectedEpoch,
@@ -592,6 +658,29 @@ export function SimulateTab({
               allContributors: data.allContributors,
             } as SimulateResponse);
             setJobState("done");
+            // A first-poll "done" is a cached scenario: its stats describe
+            // the run that filled the cache, not this one. Never let this
+            // hint block or fail the result that is already committed.
+            const stats = data.stats;
+            if (
+              !isFirstPollResult &&
+              typeof stats?.baseline_ms === "number" &&
+              typeof stats?.modified_ms === "number"
+            ) {
+              const totalMs = stats.baseline_ms + stats.modified_ms;
+              try {
+                setRunHistory((prev) =>
+                  pushRun(prev, {
+                    totalMs,
+                    baselineCacheHit: Boolean(stats.baseline_cache_hit),
+                    epoch: Number(selectedEpoch),
+                    finishedAt: new Date().toISOString(),
+                  })
+                );
+              } catch (historyErr) {
+                console.warn("[simulate] run history not saved", historyErr);
+              }
+            }
             return;
           }
           if (data.state === "failed") {
@@ -1527,9 +1616,14 @@ export function SimulateTab({
         onConfirm={handleConfirm}
         onCancel={handleModalCancel}
         state={jobState}
-        phase={simPhase}
-        percent={simPercent}
+        phase={simProgress.phase}
+        percent={simProgress.percent}
         reconnecting={simReconnecting}
+        etaLabel={simEtaLabel}
+        elapsedMs={simElapsedMs}
+        coalitions={simProgress.coalitions}
+        baselineCacheHit={simProgress.baselineCacheHit}
+        runtimeHint={runtimeHint}
         error={displaySimError(simError)}
         shareButton={
           <ShareButton
@@ -1817,6 +1911,9 @@ export function SimulateTab({
               />
             )}
           </div>
+          {hasChanges && (
+            <p className="mt-2 text-center text-xs text-cream-40">{runtimeHint}</p>
+          )}
         </div>
       )}
     </div>
