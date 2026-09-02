@@ -28,7 +28,7 @@
     "test:derive": "tsx scripts/verify-derive-and-decode.ts",
     "test:directory": "tsx scripts/verify-contributor-directory.ts",
     "test:epoch-rate": "tsx scripts/test-epoch-rate.ts",
-    "test:simulate-eta": "tsx scripts/test-simulate-eta.ts"
+    "test:simulate-eta": "tsx scripts/test-simulate-eta.ts",
     "test:stake": "tsx scripts/test-validator-stake.ts",
     "test:estimate": "tsx scripts/test-validator-estimate.ts"
   },
