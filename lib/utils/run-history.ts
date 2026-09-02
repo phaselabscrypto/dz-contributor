@@ -6,7 +6,7 @@ import { formatDuration } from "./format";
  * the simulate tab under `RUN_HISTORY_KEY` via `useLocalStorageState`.
  */
 
-export const RUN_HISTORY_KEY = "dz:simulate:run-history";
+export const RUN_HISTORY_KEY = "dz.simulate.run-history";
 export const RUN_HISTORY_MAX = 5;
 
 /** Shown when the browser has no completed runs yet. */
@@ -21,9 +21,30 @@ export interface RunRecord {
   finishedAt: string;
 }
 
+function isRunRecord(value: unknown): value is RunRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const r = value as Record<string, unknown>;
+  return (
+    typeof r.totalMs === "number" &&
+    typeof r.baselineCacheHit === "boolean" &&
+    typeof r.epoch === "number" &&
+    typeof r.finishedAt === "string"
+  );
+}
+
+/**
+ * Validator for `useLocalStorageState`: accepts an array of well-formed
+ * records (dropping malformed entries), rejects anything else.
+ */
+export function validateRunHistory(parsed: unknown): RunRecord[] | null {
+  if (!Array.isArray(parsed)) return null;
+  return parsed.filter(isRunRecord).slice(0, RUN_HISTORY_MAX);
+}
+
 /** Prepend a record and keep the newest `RUN_HISTORY_MAX`. Does not mutate. */
-export function pushRun(history: RunRecord[], record: RunRecord): RunRecord[] {
-  return [record, ...history].slice(0, RUN_HISTORY_MAX);
+export function pushRun(history: unknown, record: RunRecord): RunRecord[] {
+  const prior = validateRunHistory(history) ?? [];
+  return [record, ...prior].slice(0, RUN_HISTORY_MAX);
 }
 
 function median(values: number[]): number {

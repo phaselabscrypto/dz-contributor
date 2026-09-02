@@ -17,6 +17,8 @@ export const ETA_MIN_PROGRESS_FRACTION = 0.02;
 export const ETA_MIN_ELAPSED_MS = 5_000;
 /** Weight of the newest measured rate in the smoothed rate. */
 export const ETA_SMOOTHING_ALPHA = 0.3;
+/** Samples the rate is measured over. A step in the counter leaves the estimate once it ages out. */
+export const ETA_WINDOW_SAMPLES = 30;
 
 export interface EtaSample {
   phase: string | null;
@@ -30,6 +32,8 @@ export interface EtaState {
   phase: string | null;
   total: number;
   anchor: { t: number; solved: number } | null;
+  /** Most recent accepted samples, oldest first, at most `ETA_WINDOW_SAMPLES`. */
+  window: Array<{ t: number; solved: number }>;
   /** Units solved per millisecond since the anchor, EWMA-smoothed. */
   smoothedRatePerMs: number | null;
   smoothedRemainingMs: number | null;
@@ -39,6 +43,7 @@ export const INITIAL_ETA_STATE: EtaState = {
   phase: null,
   total: 0,
   anchor: null,
+  window: [],
   smoothedRatePerMs: null,
   smoothedRemainingMs: null,
 };
@@ -60,6 +65,7 @@ export function advanceEta(state: EtaState, sample: EtaSample): EtaState {
         phase,
         total,
         anchor: null,
+        window: [],
         smoothedRatePerMs: null,
         smoothedRemainingMs: null,
       }
@@ -69,20 +75,29 @@ export function advanceEta(state: EtaState, sample: EtaSample): EtaState {
     return base;
   }
 
+  const point = { t: nowMs, solved };
   if (base.anchor === null) {
-    return { ...base, anchor: { t: nowMs, solved } };
+    return { ...base, anchor: point, window: [point] };
   }
 
-  const progressed = solved - base.anchor.solved;
-  const elapsed = nowMs - base.anchor.t;
-  const hasEnoughProgress = progressed >= ETA_MIN_PROGRESS_FRACTION * total;
-  const hasEnoughTime = elapsed >= ETA_MIN_ELAPSED_MS;
-  if (!hasEnoughProgress || !hasEnoughTime || progressed <= 0 || elapsed <= 0) {
-    return base;
+  const window = [...base.window, point].slice(-ETA_WINDOW_SAMPLES);
+  const sinceAnchor = solved - base.anchor.solved;
+  const timeSinceAnchor = nowMs - base.anchor.t;
+  const hasEnoughProgress = sinceAnchor >= ETA_MIN_PROGRESS_FRACTION * total;
+  const hasEnoughTime = timeSinceAnchor >= ETA_MIN_ELAPSED_MS;
+  if (!hasEnoughProgress || !hasEnoughTime) {
+    return { ...base, window };
   }
 
-  // Smooth the rate, not the remaining time. On steady progress the rate is
-  // constant, so the smoothed value converges and the estimate stays exact.
+  // Rate over the trailing window, so a step from a reused city inflates the
+  // estimate only until it ages out. Smooth the rate, not the remaining time:
+  // on steady progress the rate is constant and the estimate stays exact.
+  const oldest = window[0];
+  const progressed = solved - oldest.solved;
+  const elapsed = nowMs - oldest.t;
+  if (progressed <= 0 || elapsed <= 0) {
+    return { ...base, window };
+  }
   const rawRatePerMs = progressed / elapsed;
   const smoothedRatePerMs =
     base.smoothedRatePerMs === null
@@ -91,7 +106,7 @@ export function advanceEta(state: EtaState, sample: EtaSample): EtaState {
         (1 - ETA_SMOOTHING_ALPHA) * base.smoothedRatePerMs;
   const smoothedRemainingMs = (total - solved) / smoothedRatePerMs;
 
-  return { ...base, smoothedRatePerMs, smoothedRemainingMs };
+  return { ...base, window, smoothedRatePerMs, smoothedRemainingMs };
 }
 
 /** "about 6 min left", or null while the estimator has no estimate yet. */

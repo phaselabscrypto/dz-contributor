@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import {
   Dialog,
   DialogContent,
@@ -141,19 +141,6 @@ export function ShapleyJobModal({
     }
     return percent / 2; // baseline or unknown phase
   }, [state, phase, percent, baselineCacheHit]);
-
-  // The bar never moves backwards. At the phase flip the worker resets its
-  // counters before the store catches up, so one poll can report the old
-  // phase's 99% under the new label.
-  const [peakPercent, setPeakPercent] = useState(0);
-  if (isRunning && unifiedPercent > peakPercent) {
-    setPeakPercent(unifiedPercent);
-  } else if (!isRunning && peakPercent !== 0) {
-    setPeakPercent(0);
-  }
-  const shownPercent = isRunning
-    ? Math.max(peakPercent, unifiedPercent)
-    : unifiedPercent;
 
   const handleOpenChange = (nextOpen: boolean) => {
     // Block close during computation — only the Cancel button exits
@@ -369,20 +356,20 @@ export function ShapleyJobModal({
                       Overall progress
                     </span>
                     <span className="text-cream font-mono tabular-nums">
-                      {Math.round(shownPercent)}%
+                      {Math.round(unifiedPercent)}%
                     </span>
                   </div>
                   <div
                     className="h-2.5 w-full overflow-hidden rounded-full bg-cream/10"
                     role="progressbar"
-                    aria-valuenow={Math.round(shownPercent)}
+                    aria-valuenow={Math.round(unifiedPercent)}
                     aria-valuemin={0}
                     aria-valuemax={100}
                   >
                     <div
                       className="h-full rounded-full bg-cream transition-[width] duration-500 ease-out relative overflow-hidden"
                       style={{
-                        width: `${Math.max(2, Math.min(100, shownPercent))}%`,
+                        width: `${Math.max(2, Math.min(100, unifiedPercent))}%`,
                       }}
                     >
                       {/* Shimmer overlay */}

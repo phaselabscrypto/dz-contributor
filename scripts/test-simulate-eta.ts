@@ -27,10 +27,12 @@ import { formatDuration, formatElapsed } from "../lib/utils/format";
 import {
   pushRun,
   typicalRuntimeLabel,
+  validateRunHistory,
   RUNTIME_FALLBACK_LABEL,
   RUN_HISTORY_MAX,
   type RunRecord,
 } from "../lib/utils/run-history";
+import { applyPoll, INITIAL_SIM_PROGRESS } from "../lib/utils/sim-progress";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail?: string) {
@@ -127,6 +129,24 @@ console.log("advanceEta");
   s = feed(s, [[11000, 120, 2000]]);
   check("total change re-anchors", s.smoothedRemainingMs === null && s.total === 2000);
 
+  // Mid-phase step from a reused city: 10 units/s, +300 at t=20s, then 10/s.
+  // Once the step ages out of the window the estimate is exact again.
+  s = INITIAL_ETA_STATE;
+  let solved = 10;
+  for (let i = 0; i <= 80; i++) {
+    if (i === 20) solved += 300;
+    s = feed(s, [[i * 1000, solved, 2000]]);
+    solved += 10;
+  }
+  const finalSolved = solved - 10;
+  const wantStep = ((2000 - finalSolved) / 10) * 1000;
+  check(
+    "mid-phase step ages out of the window",
+    s.smoothedRemainingMs !== null &&
+      Math.abs(s.smoothedRemainingMs - wantStep) / wantStep < 0.01,
+    `got ${s.smoothedRemainingMs}, want ${wantStep}`,
+  );
+
   // Completion clears nothing but stops updating.
   s = INITIAL_ETA_STATE;
   for (let i = 0; i <= 10; i++) s = feed(s, [[i * 1000, 10 + i * 10, 1000]]);
@@ -145,7 +165,7 @@ console.log("formatDuration");
 {
   check("59s", formatDuration(59_000) === "under a minute");
   check("60s", formatDuration(60_000) === "about 1 min");
-  check("59.5 min rounds up", formatDuration(59.5 * 60_000) === "about 60 min" || formatDuration(59.5 * 60_000) === "about 1h 0m");
+  check("59.5 min rounds up", formatDuration(59.5 * 60_000) === "about 1h 0m");
   check("61 min", formatDuration(61 * 60_000) === "about 1h 1m");
   check("negative is safe", formatDuration(-5) === "under a minute");
   check("NaN is safe", formatDuration(Number.NaN) === "under a minute");
@@ -182,11 +202,44 @@ console.log("run history");
     typicalRuntimeLabel([rec(2 * 60_000), rec(10 * 60_000)]) ===
       "Recent runs took about 6 min",
   );
+  check("validator rejects non-array", validateRunHistory({}) === null && validateRunHistory("x") === null);
+  check(
+    "validator drops malformed entries",
+    validateRunHistory([rec(60_000), { totalMs: "9" }, null, 5])?.length === 1,
+  );
+  check("pushRun tolerates garbage history", pushRun({ bad: true }, rec(60_000)).length === 1);
   check(
     "ignores bad durations",
     typicalRuntimeLabel([rec(0), rec(Number.NaN), rec(3 * 60_000)]) ===
       "Recent runs took about 3 min",
   );
+}
+
+console.log("applyPoll");
+{
+  // Cache hit: first poll already in "modified" with no baseline progress seen.
+  let a = applyPoll(INITIAL_SIM_PROGRESS, { phase: "modified", percent: 3 });
+  check("cache hit inferred", a.next.baselineCacheHit === true && !a.isPhaseFlip && a.next.percent === 3);
+
+  // Cold baseline: progress seen, then the flip poll carries stale counters.
+  a = applyPoll(INITIAL_SIM_PROGRESS, { phase: "baseline", percent: 40, coalitions_solved: 400, coalitions_total: 1000 });
+  a = applyPoll(a.next, { phase: "baseline", percent: 99, coalitions_solved: 990, coalitions_total: 1000 });
+  const flip = applyPoll(a.next, { phase: "modified", percent: 99, coalitions_solved: 990, coalitions_total: 1000 });
+  check("flip poll is flagged", flip.isPhaseFlip);
+  check("flip poll clamps percent to 0", flip.next.percent === 0);
+  check("flip poll drops stale coalitions", flip.next.coalitions === null);
+  check("cold baseline is not a cache hit", flip.next.baselineCacheHit === false);
+  const after = applyPoll(flip.next, { phase: "modified", percent: 2, coalitions_solved: 20, coalitions_total: 1000 });
+  check("next poll is live", !after.isPhaseFlip && after.next.percent === 2 && after.next.coalitions?.solved === 20);
+
+  // Within a phase the percent never moves backwards.
+  a = applyPoll(INITIAL_SIM_PROGRESS, { phase: "modified", percent: 30 });
+  a = applyPoll(a.next, { phase: "modified", percent: 25 });
+  check("monotonic within phase", a.next.percent === 30);
+
+  // A poll with no progress object keeps the previous state.
+  a = applyPoll(a.next, null);
+  check("null progress keeps state", a.next.percent === 30 && a.next.phase === "modified");
 }
 
 if (failures > 0) {
