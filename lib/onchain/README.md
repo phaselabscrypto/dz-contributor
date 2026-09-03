@@ -1,7 +1,7 @@
 # On-chain reader status
 
 This directory contains DZ ledger / Solana mainnet readers. **Not all
-files are live** — the pieces below describe which paths are bit-
+files are live**: the pieces below describe which paths are bit-
 verified against on-chain data and which are scaffolding awaiting
 DZ Foundation work.
 
@@ -17,7 +17,7 @@ into production API routes and the site UI depends on them.
 | `contributor-directory.ts` | All `AccountType::Contributor` accounts from the DZ serviceability program | Cross-checked against the gist's known reward keys. All 14 contributors resolve correctly. |
 
 These modules use `@solana/web3.js Connection` directly, require
-`DZ_LEDGER_RPC_URL` to be set, and surface clear errors when it's not.
+`DZ_LEDGER_RPC_URL` to be set, and show clear errors when it's not.
 
 ## ⚠️ Scaffolding (stubbed, pending DZ IDL)
 
@@ -28,14 +28,14 @@ Every call currently throws `OnchainNotConfigured` or returns
 
 | Module | What it would read | What's blocking |
 |---|---|---|
-| `decoders.ts` | Metro / Device / Link / Contributor records via Anchor IDL | DZ Q6 — needs the IDL JSON dropped at `lib/onchain/idl/dz-registry.json` and `idl-registry.ts` swapped from `stubRegistry` → `anchorRegistry`. |
-| `topology.ts` | Full network topology from on-chain registry | Same — depends on `decoders.ts`. |
-| `validators.ts` | Per-epoch validator payout history (SOL) | DZ Q6 — needs `DZ_REWARDS_PROGRAM_ID` set + the rewards-program IDL. |
+| `decoders.ts` | Metro / Device / Link / Contributor records via Anchor IDL | Blocked on the Foundation's program IDL, not yet published: needs the IDL JSON dropped at `lib/onchain/idl/dz-registry.json` and `idl-registry.ts` swapped from `stubRegistry` → `anchorRegistry`. |
+| `topology.ts` | Full network topology from on-chain registry | Same: depends on `decoders.ts`. |
+| `validators.ts` | Per-epoch validator payout history (SOL) | Blocked on the Foundation's program IDL, not yet published: needs `DZ_REWARDS_PROGRAM_ID` set and the rewards-program IDL. |
 | `client.ts` | Hand-rolled JSON-RPC client used only by `topology.ts` | Kept thin until the IDL lands; will likely be replaced by `@solana/web3.js` at that point. |
 
 API routes that consume these modules (`/api/onchain/topology`,
 `/api/onchain/validators`) are gated behind `ONCHAIN_ENABLED` env var
-and return **503 with a stable shape** when the flag is off — frontend
+and return **503 with a stable shape** when the flag is off. Frontend
 treats them as soft-disabled.
 
 ## Activation checklist (when DZ ships the IDL)

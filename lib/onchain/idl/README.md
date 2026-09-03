@@ -1,8 +1,8 @@
 # DZ on-chain IDL drop point
 
-When DZ Foundation publishes the program IDL (Q6), drop the file here as
-`dz-registry.idl.json` and `dz-rewards.idl.json`. Then in
-`lib/onchain/decoders.ts`:
+The Foundation's program IDL is not yet published. When it publishes the
+program IDL, drop the file here as `dz-registry.idl.json` and
+`dz-rewards.idl.json`. Then in `lib/onchain/decoders.ts`:
 
 ```ts
 // Replace the stub registry import:
