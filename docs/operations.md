@@ -63,11 +63,20 @@ docker run --env-file .env dz-shapley-service diff-backfill
 
 Run one or more `api` replicas behind a load balancer and one or more `worker` replicas consuming from the shared Redis stream. The job queue design and horizontal scaling rationale are documented in [adr/0001-async-compute-queue.md](adr/0001-async-compute-queue.md).
 
-The `worker` role also runs the snapshot diff poller: every 15 minutes it discovers the latest published epoch and ingests every epoch missing from the `diff/v1/` index in the result-cache bucket. Each ingest streams about 3.7 MB from the public snapshot bucket, so the cluster must allow HTTPS egress to `doublezero-contributor-rewards-mn-beta-snapshots.s3.us-east-1.amazonaws.com`. Ingests are idempotent across replicas. See [shapley-service.md](shapley-service.md#snapshot-diff-index) and [adr/0002-snapshot-diff-index.md](adr/0002-snapshot-diff-index.md).
+The `worker` role also runs the snapshot diff poller: every 15 minutes it discovers the latest published epoch and ingests every epoch missing from the `diff/v1/` index in the result-cache bucket. Each ingest streams about 3.7 MB from the public snapshot bucket, so the cluster must allow HTTPS egress to `doublezero-contributor-rewards-mn-beta-snapshots.s3.us-east-1.amazonaws.com`. Ingests are idempotent across replicas. An epoch that fails to ingest, including one whose shape was extracted but could not be written, is retried on a doubling backoff from 15 minutes up to 24 hours, so a permanently unreadable epoch costs about one attempt a day rather than 96. The tick summary logs `deferred` alongside `ingested`, `missing` and `failed`. See [shapley-service.md](shapley-service.md#snapshot-diff-index) and [adr/0002-snapshot-diff-index.md](adr/0002-snapshot-diff-index.md).
 
 ### diff-backfill
 
-`diff-backfill` runs the same fill the poller runs, once, and exits. Use it for the initial fill after the first deploy, or after a `DIFF_SHAPE_VERSION_PREFIX` bump, so the fill can be watched from a terminal instead of inferred from worker logs. It needs the same `S3_CACHE_*` and `AWS_*` variables as the worker; `REDIS_URL` is not required. With `S3_CACHE_BUCKET` unset there is no durable persistence, so the role exits non-zero at once without reading any snapshot. The process exits `0` when every epoch is persisted and non-zero with the count of failed epochs otherwise. The initial fill of about 165 epochs takes 2 to 5 minutes.
+`diff-backfill` runs the same fill the poller runs, once, and exits. Use it for the initial fill after the first deploy, or after a `DIFF_SHAPE_VERSION_PREFIX` bump, so the fill can be watched from a terminal instead of inferred from worker logs. It needs the same `S3_CACHE_*` and `AWS_*` variables as the worker; `REDIS_URL` is not required. With `S3_CACHE_BUCKET` unset there is no durable persistence, so the role exits non-zero at once without reading any snapshot. The process exits `0` when no epoch failed and `1` otherwise; the failure count and the failed epoch numbers are in the final log line. An epoch whose snapshot the bucket does not carry is reported as missing, which is a hole in the published range rather than a failure. The initial fill of about 165 epochs takes 2 to 5 minutes. This role attempts every missing epoch, including ones the poller has backed off.
+
+### Clearing a bad diff shape
+
+A persisted shape is trusted for the life of the process: `DiffStore` keeps
+every shape it has read in memory with no TTL, so deleting
+`diff/v1/shape-{epoch:06}.json` from the result-cache bucket does not clear it
+from a running `api` pod. To retire a shape, delete the object and restart the
+pods that hold it, or bump `DIFF_SHAPE_VERSION_PREFIX` and refill when every
+shape is suspect.
 
 ### REDIS_URL
 
@@ -188,8 +197,8 @@ Per-instance, in-memory rate limiting is implemented in `lib/utils/rate-limit.ts
 
 | Preset | Limit | Window | Status |
 |---|---|---|---|
-| `RATE_LIMIT_HEAVY` | 10 req | 60 s | **Wired** to the six compute routes (`shapley`, `shapley/simulate`, `shapley/baseline`, `shapley/tracking`, `shapley/jobs`, `link-value/jobs`) |
-| `RATE_LIMIT_STANDARD` | 60 req | 60 s | **Wired** to the two diff proxy routes (`diff`, `diff/contributor/[code]`), which forward to the Rust service and do no CPU-bound work |
+| `RATE_LIMIT_HEAVY` | 10 req | 60 s | **Wired** to the seven compute routes (`shapley`, `shapley/simulate`, `shapley/baseline`, `shapley/tracking`, `shapley/jobs`, `shapley/precompute`, `link-value/jobs`) |
+| `RATE_LIMIT_STANDARD` | 60 req | 60 s | **Wired** to `diff`, `diff/contributor/[code]` and `validators/stake`. The diff proxies do no CPU-bound work here, though a cold epoch makes the Rust service stream one snapshot |
 | `RATE_LIMIT_LOOSE` | 120 req | 60 s | Defined for read-mostly cached endpoints; **not currently wired to any route** |
 
 Limits are keyed by caller IP (`x-real-ip` preferred on Vercel; `x-forwarded-for` as fallback). Requests without resolvable IP headers proceed untracked by design — rate-limiting is advisory. Because state is per-instance, the effective fleet-wide limit is `N × limit` where N is the number of Vercel replicas. For fleet-wide enforcement, replace the implementation with a shared Redis-backed limiter (the consumer API `checkRateLimit(req, opts)` does not change).

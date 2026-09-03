@@ -1,13 +1,13 @@
 //! Per-epoch diff shape store: memory, then durable persistence, then ingest
-//! from the snapshot bucket. One ingest per epoch at a time; failures are
-//! never cached.
+//! from the snapshot bucket. `get` runs one ingest per epoch at a time and
+//! caches no failure. `ingest` and `fill_missing` go straight to the bucket.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use aws_sdk_s3::error::DisplayErrorContext;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, Semaphore};
 
 use crate::cache::S3CacheRef;
 use crate::diff::{DiffShape, extract_diff_shape, parse_sections};
@@ -21,11 +21,21 @@ use crate::snapshot::{
 pub const DIFF_SHAPE_VERSION_PREFIX: &str = "diff/v1";
 /// How long a discovered latest epoch is trusted before probing the bucket again.
 pub const LATEST_EPOCH_TTL: Duration = Duration::from_secs(5 * 60);
+/// Snapshot ingests allowed at once in one process, across every request and
+/// the poller. An ingest holds its captured section bytes through the parse,
+/// so this is what bounds ingest memory and the blocking-pool queue.
+pub const MAX_CONCURRENT_INGESTS: usize = 6;
+/// Delay before a failed fill attempt is retried, doubled per consecutive
+/// failure and capped at [`FILL_RETRY_MAX`].
+pub const FILL_RETRY_BASE: Duration = Duration::from_secs(15 * 60);
+/// Ceiling on the fill retry delay.
+pub const FILL_RETRY_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 
 const SHAPE_KEY_STEM: &str = "shape-";
 const SHAPE_KEY_SUFFIX: &str = ".json";
 const SHAPE_CONTENT_TYPE: &str = "application/json";
 const FILL_PROGRESS_EVERY: usize = 10;
+const FILL_RETRY_MAX_SHIFT: u32 = 8;
 
 /// Object key of one epoch's persisted shape: `diff/v1/shape-000211.json`.
 pub(crate) fn shape_key(epoch: Epoch) -> String {
@@ -230,12 +240,32 @@ pub enum IngestOutcome {
     Missing,
     /// The ingest failed; the text is the error's `Display`.
     Failed(String),
+    /// An earlier attempt failed and its backoff has not elapsed.
+    Deferred,
 }
 
 struct IngestReport {
     shape: Arc<DiffShape>,
     bytes_read: usize,
     elapsed: Duration,
+    /// `Some` when the shape was extracted but the write did not land.
+    persist_error: Option<String>,
+}
+
+/// Whether a fill pass honours the per-epoch retry backoff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FillPolicy {
+    /// Attempt every missing epoch. The one-shot `diff-backfill` role, where
+    /// an operator asked for a complete fill now.
+    EveryEpoch,
+    /// Skip an epoch whose backoff has not elapsed. The poller.
+    DueOnly,
+}
+
+/// Fill backoff for one epoch.
+struct RetryState {
+    failures: u32,
+    next_attempt: Instant,
 }
 
 type ShapeCell = Arc<OnceCell<Arc<DiffShape>>>;
@@ -247,6 +277,8 @@ pub struct DiffStore {
     shapes: RwLock<HashMap<Epoch, Arc<DiffShape>>>,
     in_flight: Mutex<HashMap<Epoch, ShapeCell>>,
     latest: Mutex<Option<(Epoch, Instant)>>,
+    retry_after: Mutex<HashMap<Epoch, RetryState>>,
+    ingest_permits: Semaphore,
 }
 
 impl DiffStore {
@@ -258,6 +290,8 @@ impl DiffStore {
             shapes: RwLock::new(HashMap::new()),
             in_flight: Mutex::new(HashMap::new()),
             latest: Mutex::new(None),
+            retry_after: Mutex::new(HashMap::new()),
+            ingest_permits: Semaphore::new(MAX_CONCURRENT_INGESTS),
         }
     }
 
@@ -267,8 +301,13 @@ impl DiffStore {
         if let Some(shape) = self.cached(epoch) {
             return Ok(shape);
         }
-        let cell = self.in_flight_cell(epoch);
-        let result = cell
+        let flight = InFlightGuard {
+            store: self,
+            epoch,
+            cell: self.in_flight_cell(epoch),
+        };
+        let result = flight
+            .cell
             .get_or_try_init(|| async {
                 match self.persistence.load(epoch).await {
                     Some(shape) => Ok(shape),
@@ -280,7 +319,6 @@ impl DiffStore {
         if let Ok(shape) = &result {
             self.remember(epoch, Arc::clone(shape));
         }
-        self.release_in_flight(epoch, &cell);
         result
     }
 
@@ -312,8 +350,13 @@ impl DiffStore {
     /// persisted set, in ascending order, and report each epoch's outcome.
     /// When the persisted set cannot be listed, or persistence is not durable,
     /// the epochs already held in memory stand in for it and are reported as
-    /// `AlreadyPersisted`.
-    pub async fn fill_missing(&self, latest: Epoch) -> Vec<(Epoch, IngestOutcome)> {
+    /// `AlreadyPersisted`. Under [`FillPolicy::DueOnly`] an epoch whose retry
+    /// backoff has not elapsed is reported as `Deferred` and not read.
+    pub async fn fill_missing(
+        &self,
+        latest: Epoch,
+        policy: FillPolicy,
+    ) -> Vec<(Epoch, IngestOutcome)> {
         let persisted = if self.persistence.is_durable() {
             match self.persistence.persisted_epochs().await {
                 Ok(persisted) => persisted,
@@ -332,17 +375,35 @@ impl DiffStore {
         for number in MIN_DZ_EPOCH.0..=latest.0 {
             let epoch = Epoch(number);
             if persisted.contains(&epoch) {
+                self.clear_retry(epoch);
                 outcomes.push((epoch, IngestOutcome::AlreadyPersisted));
                 continue;
             }
+            if policy == FillPolicy::DueOnly && self.is_deferred(epoch) {
+                outcomes.push((epoch, IngestOutcome::Deferred));
+                continue;
+            }
             let outcome = match self.ingest_with_report(epoch).await {
-                Ok(report) => IngestOutcome::Ingested {
-                    bytes_read: report.bytes_read,
-                    ms: report.elapsed.as_millis(),
+                Ok(report) => match report.persist_error {
+                    None => {
+                        self.clear_retry(epoch);
+                        IngestOutcome::Ingested {
+                            bytes_read: report.bytes_read,
+                            ms: report.elapsed.as_millis(),
+                        }
+                    }
+                    Some(error) => {
+                        self.defer_retry(epoch);
+                        IngestOutcome::Failed(format!("shape not persisted: {error}"))
+                    }
                 },
-                Err(SnapshotError::NotFound { .. }) => IngestOutcome::Missing,
+                Err(SnapshotError::NotFound { .. }) => {
+                    self.defer_retry(epoch);
+                    IngestOutcome::Missing
+                }
                 Err(error) => {
                     tracing::warn!(epoch = epoch.0, error = %error, "diff index: ingest failed");
+                    self.defer_retry(epoch);
                     IngestOutcome::Failed(error.to_string())
                 }
             };
@@ -357,6 +418,8 @@ impl DiffStore {
 
     async fn ingest_with_report(&self, epoch: Epoch) -> Result<IngestReport, SnapshotError> {
         let started = Instant::now();
+        // Held across the fetch and the parse, so it bounds both at once.
+        let _permit = self.ingest_permits.acquire().await.ok();
         let scan = self.reader.fetch_sections(epoch).await?;
         let bytes_read = scan.bytes_read;
         let shape = tokio::task::spawn_blocking(move || {
@@ -379,14 +442,19 @@ impl DiffStore {
             contributors = shape.contributors.len(),
             "diff index: ingested epoch"
         );
-        if let Err(error) = self.persistence.store(&shape).await {
-            tracing::error!(epoch = epoch.0, error = %error,
-                "diff index: failed to persist shape");
-        }
+        let persist_error = match self.persistence.store(&shape).await {
+            Ok(()) => None,
+            Err(error) => {
+                tracing::error!(epoch = epoch.0, error = %error,
+                    "diff index: failed to persist shape");
+                Some(error.to_string())
+            }
+        };
         Ok(IngestReport {
             shape,
             bytes_read,
             elapsed,
+            persist_error,
         })
     }
 
@@ -433,6 +501,37 @@ impl DiffStore {
             .map(|(epoch, _)| epoch)
     }
 
+    fn is_deferred(&self, epoch: Epoch) -> bool {
+        self.retry_after
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&epoch)
+            .is_some_and(|state| Instant::now() < state.next_attempt)
+    }
+
+    fn defer_retry(&self, epoch: Epoch) {
+        let mut retries = self
+            .retry_after
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let state = retries.entry(epoch).or_insert(RetryState {
+            failures: 0,
+            next_attempt: Instant::now(),
+        });
+        state.failures = state.failures.saturating_add(1);
+        let delay = FILL_RETRY_BASE
+            .saturating_mul(1u32 << state.failures.min(FILL_RETRY_MAX_SHIFT))
+            .min(FILL_RETRY_MAX);
+        state.next_attempt = Instant::now() + delay;
+    }
+
+    fn clear_retry(&self, epoch: Epoch) {
+        self.retry_after
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&epoch);
+    }
+
     #[cfg(test)]
     fn in_flight_len(&self) -> usize {
         self.in_flight
@@ -442,15 +541,31 @@ impl DiffStore {
     }
 }
 
+/// Drops the epoch's in-flight cell when a read finishes, including when the
+/// caller is cancelled mid-await.
+struct InFlightGuard<'a> {
+    store: &'a DiffStore,
+    epoch: Epoch,
+    cell: ShapeCell,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.store.release_in_flight(self.epoch, &self.cell);
+    }
+}
+
 fn log_fill_progress(outcomes: &[(Epoch, IngestOutcome)], processed: usize, latest: Epoch) {
     let mut ingested = 0usize;
     let mut missing = 0usize;
     let mut failed = 0usize;
+    let mut deferred = 0usize;
     for (_, outcome) in outcomes {
         match outcome {
             IngestOutcome::Ingested { .. } => ingested += 1,
             IngestOutcome::Missing => missing += 1,
             IngestOutcome::Failed(_) => failed += 1,
+            IngestOutcome::Deferred => deferred += 1,
             IngestOutcome::AlreadyPersisted => {}
         }
     }
@@ -459,6 +574,7 @@ fn log_fill_progress(outcomes: &[(Epoch, IngestOutcome)], processed: usize, late
         ingested,
         missing,
         failed,
+        deferred,
         latest = latest.0,
         "diff index: fill progress"
     );
@@ -468,7 +584,7 @@ fn log_fill_progress(outcomes: &[(Epoch, IngestOutcome)], processed: usize, late
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
 
     use super::{BTreeSet, DiffShape, ShapePersistence};
@@ -582,6 +698,7 @@ pub(crate) mod test_support {
         shapes: Mutex<HashMap<Epoch, Arc<DiffShape>>>,
         load_calls: AtomicUsize,
         store_calls: AtomicUsize,
+        is_store_failing: AtomicBool,
     }
 
     impl MemoryPersistence {
@@ -612,6 +729,12 @@ pub(crate) mod test_support {
         pub(crate) fn store_calls(&self) -> usize {
             self.store_calls.load(Ordering::SeqCst)
         }
+
+        /// Every later `store` fails while every `load` and `persisted_epochs`
+        /// keeps working, which is what read-only credentials look like.
+        pub(crate) fn fail_stores(&self) {
+            self.is_store_failing.store(true, Ordering::SeqCst);
+        }
     }
 
     impl ShapePersistence for MemoryPersistence {
@@ -629,6 +752,9 @@ pub(crate) mod test_support {
         fn store<'a>(&'a self, shape: &'a DiffShape) -> BoxFuture<'a, Result<(), anyhow::Error>> {
             Box::pin(async move {
                 self.store_calls.fetch_add(1, Ordering::SeqCst);
+                if self.is_store_failing.load(Ordering::SeqCst) {
+                    return Err(anyhow::anyhow!("injected store failure"));
+                }
                 self.insert(shape.clone());
                 Ok(())
             })
@@ -717,12 +843,12 @@ mod tests {
         let store = DiffStore::new(shared_reader, Arc::new(NoPersistence));
         assert!(!store.has_durable_persistence());
 
-        let first = store.fill_missing(Epoch(49)).await;
+        let first = store.fill_missing(Epoch(49), FillPolicy::DueOnly).await;
         assert!(matches!(first[0].1, IngestOutcome::Ingested { .. }));
         assert!(matches!(first[1].1, IngestOutcome::Ingested { .. }));
         assert_eq!(reader.fetch_calls(), 2);
 
-        let second = store.fill_missing(Epoch(49)).await;
+        let second = store.fill_missing(Epoch(49), FillPolicy::DueOnly).await;
         assert_eq!(second[0].1, IngestOutcome::AlreadyPersisted);
         assert_eq!(second[1].1, IngestOutcome::AlreadyPersisted);
         assert_eq!(reader.fetch_calls(), 2);
@@ -836,6 +962,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fill_missing_reports_a_shape_that_was_not_written_as_failed() {
+        let reader = Arc::new(FakeReader::with_epochs([48]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        persistence.fail_stores();
+        let store = DiffStore::new(
+            Arc::clone(&reader) as Arc<dyn SnapshotReader>,
+            Arc::clone(&persistence) as Arc<dyn ShapePersistence>,
+        );
+
+        let outcomes = store.fill_missing(Epoch(48), FillPolicy::EveryEpoch).await;
+
+        assert!(
+            matches!(outcomes[0].1, IngestOutcome::Failed(ref text)
+                if text.contains("shape not persisted")),
+            "got {:?}",
+            outcomes[0].1
+        );
+        assert!(!persistence.contains(Epoch(48)));
+    }
+
+    #[tokio::test]
+    async fn fill_missing_defers_a_failed_epoch_on_the_next_pass() {
+        let reader = Arc::new(FakeReader::with_epochs([48]));
+        let store = DiffStore::new(
+            Arc::clone(&reader) as Arc<dyn SnapshotReader>,
+            Arc::new(MemoryPersistence::default()),
+        );
+        reader.fail_next_fetches(1);
+
+        let first = store.fill_missing(Epoch(48), FillPolicy::DueOnly).await;
+        assert!(matches!(first[0].1, IngestOutcome::Failed(_)));
+        assert_eq!(reader.fetch_calls(), 1);
+
+        let second = store.fill_missing(Epoch(48), FillPolicy::DueOnly).await;
+        assert_eq!(second[0].1, IngestOutcome::Deferred);
+        assert_eq!(
+            reader.fetch_calls(),
+            1,
+            "the backoff must suppress the retry"
+        );
+
+        let forced = store.fill_missing(Epoch(48), FillPolicy::EveryEpoch).await;
+        assert!(matches!(forced[0].1, IngestOutcome::Ingested { .. }));
+        assert_eq!(reader.fetch_calls(), 2, "the one-shot role ignores backoff");
+
+        let after_success = store.fill_missing(Epoch(48), FillPolicy::DueOnly).await;
+        assert_eq!(after_success[0].1, IngestOutcome::AlreadyPersisted);
+    }
+
+    #[tokio::test]
     async fn fill_missing_skips_persisted_epochs_and_reports_missing_ones() {
         let reader = Arc::new(FakeReader::with_epochs([48, 49, 51]));
         let persistence = Arc::new(MemoryPersistence::with_shape(stored_shape(Epoch(48))));
@@ -843,7 +1019,7 @@ mod tests {
         reader.fail_next_fetches(1);
         assert!(store.has_durable_persistence());
 
-        let outcomes = store.fill_missing(Epoch(51)).await;
+        let outcomes = store.fill_missing(Epoch(51), FillPolicy::EveryEpoch).await;
         let epochs: Vec<Epoch> = outcomes.iter().map(|(epoch, _)| *epoch).collect();
         assert_eq!(epochs, vec![Epoch(48), Epoch(49), Epoch(50), Epoch(51)]);
         assert_eq!(outcomes[0].1, IngestOutcome::AlreadyPersisted);

@@ -5,12 +5,23 @@
 #   ./tests/smoke.sh                       # tests against http://localhost:8080
 #   ./tests/smoke.sh https://your-url      # tests against deployed service
 #
+# Set SHAPLEY_API_TOKEN when the target gates its compute endpoints, which any
+# deployed service does. Without it those steps get a 404 from the auth-gated
+# router.
+#
 # Exits non-zero on the first failure. Designed to be safe to run in CI.
 
 set -euo pipefail
 
 BASE="${1:-http://localhost:8080}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Expanded as ${AUTH[@]+...} because bash 3.2, the macOS default, treats an
+# empty array as unbound under `set -u`.
+AUTH=()
+if [ -n "${SHAPLEY_API_TOKEN:-}" ]; then
+  AUTH=(-H "Authorization: Bearer ${SHAPLEY_API_TOKEN}")
+fi
 
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
 green()  { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -33,7 +44,7 @@ green "    ok"
 
 # 2) /shapley with upstream simple example
 yellow "[2/8] POST $BASE/shapley (simple example)"
-RESP=$(curl -fsS -X POST "$BASE/shapley" \
+RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} -X POST "$BASE/shapley" \
   -H 'content-type: application/json' \
   --data-binary @"$ROOT/tests/fixtures/simple.json")
 
@@ -74,7 +85,7 @@ fi
 # 3) /link-estimate with Alpha as focus
 yellow "[3/8] POST $BASE/link-estimate (focus=Alpha)"
 LE_BODY=$(jq '{ input: ., operator_focus: "Alpha" }' "$ROOT/tests/fixtures/simple.json")
-LE_RESP=$(curl -fsS -X POST "$BASE/link-estimate" \
+LE_RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} -X POST "$BASE/link-estimate" \
   -H 'content-type: application/json' \
   --data-binary "$LE_BODY")
 echo "$LE_RESP" | jq -e '.method == "retag-shapley-rs"' >/dev/null
@@ -84,7 +95,7 @@ test "$LINKS" -ge 1 || { red "expected >= 1 link"; exit 1; }
 
 # 4) /shapley with three-operator scenario (structural correctness)
 yellow "[4/8] POST $BASE/shapley (three-operator fixture)"
-TO_RESP=$(curl -fsS -X POST "$BASE/shapley" \
+TO_RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} -X POST "$BASE/shapley" \
   -H 'content-type: application/json' \
   --data-binary @"$ROOT/tests/fixtures/three-operator.json")
 
@@ -118,21 +129,21 @@ test "$MS" -le 5000 || yellow "    warning: ${MS}ms > 5s warm budget"
 
 # 6) /diff over the fixture window: epoch 208 removed one stakefac link.
 yellow "[6/8] GET $BASE/diff?from=204&to=211"
-DIFF_RESP=$(curl -fsS "$BASE/diff?from=204&to=211")
+DIFF_RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} "$BASE/diff?from=204&to=211")
 echo "$DIFF_RESP" | jq -e '.summary.linksRemoved == 1' >/dev/null \
   || { red "    expected summary.linksRemoved == 1"; exit 1; }
 green "    ok"
 
 # 7) /diff/contributor/:code: the body carries the code and no display name.
 yellow "[7/8] GET $BASE/diff/contributor/tsw?from=204&to=211"
-CDIFF_RESP=$(curl -fsS "$BASE/diff/contributor/tsw?from=204&to=211")
+CDIFF_RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} "$BASE/diff/contributor/tsw?from=204&to=211")
 echo "$CDIFF_RESP" | jq -e '.code == "tsw"' >/dev/null \
   || { red "    expected code == tsw"; exit 1; }
 green "    ok"
 
 # 8) /diff/precompute warms the two latest epochs.
 yellow "[8/8] POST $BASE/diff/precompute?depth=2"
-PRE_RESP=$(curl -fsS -X POST "$BASE/diff/precompute?depth=2")
+PRE_RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} -X POST "$BASE/diff/precompute?depth=2")
 echo "$PRE_RESP" | jq -e '(.results | length) == 2 and all(.results[]; .status == "ok")' >/dev/null \
   || { red "    expected every precompute status == ok"; echo "$PRE_RESP" | jq .; exit 1; }
 green "    ok"

@@ -50,7 +50,8 @@ export function WeeklyDigest() {
     dedupingInterval: 5 * 60_000,
   });
 
-  const hasError = Boolean(error || epochsError);
+  // Keep a loaded digest on screen when a background revalidation fails.
+  const hasError = Boolean((error || epochsError) && !data);
 
   const retry = () => {
     void mutateEpochs();

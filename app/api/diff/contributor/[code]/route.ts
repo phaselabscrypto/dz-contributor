@@ -15,6 +15,25 @@ import {
 import { enforceRateLimit, RATE_LIMIT_STANDARD } from "@/lib/utils/rate-limit";
 import { categorizeError, reportError } from "@/lib/observability";
 
+const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
+
+/** Contributor codes are short on-chain identifiers, e.g. `tsw`, `jump_`. */
+const CONTRIBUTOR_CODE = /^[a-z0-9_-]{1,32}$/i;
+
+function isContributorDiffBody(
+  value: unknown,
+): value is Omit<ContributorDiffResponse, "name"> {
+  if (typeof value !== "object" || value === null) return false;
+  const body = value as Partial<ContributorDiffResponse>;
+  return (
+    typeof body.code === "string" &&
+    typeof body.from === "number" &&
+    typeof body.to === "number" &&
+    typeof body.footprint === "object" &&
+    body.footprint !== null
+  );
+}
+
 /**
  * GET /api/diff/contributor/[code]?from=<epoch>&to=<epoch>
  *
@@ -22,9 +41,6 @@ import { categorizeError, reportError } from "@/lib/observability";
  * service has no copy of `CONTRIBUTOR_NAMES`, so the display name is
  * added here before the body is returned.
  */
-
-const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
-
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ code: string }> },
@@ -36,7 +52,7 @@ export async function GET(
   if (limited) return limited;
 
   const { code } = await params;
-  if (!code) {
+  if (!code || !CONTRIBUTOR_CODE.test(code)) {
     return NextResponse.json(
       { error: "contributor code required" },
       { status: 400, headers: NO_STORE_HEADERS },
@@ -74,10 +90,10 @@ export async function GET(
         headers: { "Content-Type": "application/json", ...NO_STORE_HEADERS },
       });
     }
-    const parsed = JSON.parse(upstream.body) as Omit<
-      ContributorDiffResponse,
-      "name"
-    >;
+    const parsed: unknown = JSON.parse(upstream.body);
+    if (!isContributorDiffBody(parsed)) {
+      throw new DiffServiceError("contributor diff body is not the wire shape");
+    }
     const data: ContributorDiffResponse = {
       ...parsed,
       name: getContributorDisplayName(code),

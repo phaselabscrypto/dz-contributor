@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -17,16 +17,26 @@ use tokio::task::{Id, JoinSet};
 
 use crate::AppState;
 use crate::diff::{
-    DiffShape, EpochWindow, compute_contributor_diff, compute_network_diff, now_rfc3339,
-    validate_window,
+    DiffShape, EpochWindow, MAX_DIFF_EPOCH, compute_contributor_diff, compute_network_diff,
+    now_rfc3339, validate_window,
 };
 use crate::diff_store::DiffStore;
-use crate::snapshot::{Epoch, MIN_DZ_EPOCH, SnapshotError};
+use crate::snapshot::{Epoch, MIN_DZ_EPOCH, SNAPSHOT_FETCH_TIMEOUT, SnapshotError};
 
 /// Concurrent shape reads for the intermediate epochs of one `GET /diff`.
 pub(crate) const INTERMEDIATE_CONCURRENCY: usize = 10;
 /// Concurrent shape reads for one `POST /diff/precompute`.
 pub(crate) const PRECOMPUTE_CONCURRENCY: usize = 3;
+/// Deadline for one intermediate shape read. Short, because a missed
+/// intermediate only degrades `first_observed_epoch`, while the Next.js proxy
+/// abandons the whole request at 20 s.
+pub(crate) const INTERMEDIATE_READ_TIMEOUT: Duration = Duration::from_secs(6);
+/// Deadline for one shape read in a precompute, which exists to pay the
+/// cold-ingest cost and so gets the full snapshot budget.
+pub(crate) const PRECOMPUTE_READ_TIMEOUT: Duration = SNAPSHOT_FETCH_TIMEOUT;
+/// Marks a body whose attribution was computed without every intermediate
+/// epoch, so the proxy can refuse to cache it.
+pub(crate) const DEGRADED_HEADER: &str = "x-diff-degraded";
 /// Epochs warmed by `POST /diff/precompute` when `depth` is absent.
 pub(crate) const DEFAULT_PRECOMPUTE_DEPTH: u32 = 8;
 /// Largest `depth` `POST /diff/precompute` accepts.
@@ -35,6 +45,7 @@ pub(crate) const MAX_PRECOMPUTE_DEPTH: u32 = 30;
 const FETCH_FAILED_MESSAGE: &str = "snapshot fetch failed";
 const SCAN_FAILED_MESSAGE: &str = "snapshot scan failed";
 const DEPTH_MESSAGE: &str = "depth must be an integer in [1, 30]";
+const EPOCH_MESSAGE: &str = "epoch must be an integer in [48, 100000]";
 
 /// The diff routes, mounted by `main.rs` inside the auth-gated compute router.
 pub fn routes() -> Router<Arc<AppState>> {
@@ -115,14 +126,20 @@ async fn network_diff(
         Ok(ends) => ends,
         Err(error) => return snapshot_error_response(&error),
     };
-    let intermediates = load_intermediates(&state.diff_store, window).await;
-    Json(compute_network_diff(
+    let (intermediates, skipped) = load_intermediates(&state.diff_store, window).await;
+    let mut response = Json(compute_network_diff(
         &before,
         &after,
         &intermediates,
         now_rfc3339(),
     ))
-    .into_response()
+    .into_response();
+    if skipped > 0 {
+        response
+            .headers_mut()
+            .insert(DEGRADED_HEADER, HeaderValue::from_static("1"));
+    }
+    response
 }
 
 /// `GET /diff/contributor/:code?from&to`: one contributor's diff. The body
@@ -158,7 +175,13 @@ async fn precompute(
         Ok(plan) => plan,
         Err(response) => return response,
     };
-    let reads = read_bounded(&state.diff_store, targets, PRECOMPUTE_CONCURRENCY).await;
+    let reads = read_bounded(
+        &state.diff_store,
+        targets,
+        PRECOMPUTE_CONCURRENCY,
+        PRECOMPUTE_READ_TIMEOUT,
+    )
+    .await;
     let results: Vec<PrecomputeResult> = reads
         .iter()
         .map(|read| PrecomputeResult {
@@ -192,6 +215,9 @@ async fn precompute_targets(
     query: &PrecomputeQuery,
 ) -> Result<(Option<Epoch>, Vec<Epoch>), Response> {
     if let Some(epoch) = query.epoch {
+        if !(MIN_DZ_EPOCH.0..=MAX_DIFF_EPOCH.0).contains(&epoch) {
+            return Err(error_json(StatusCode::BAD_REQUEST, EPOCH_MESSAGE));
+        }
         return Ok((None, vec![Epoch(epoch)]));
     }
     let depth = query.depth.unwrap_or(DEFAULT_PRECOMPUTE_DEPTH);
@@ -224,29 +250,42 @@ async fn load_window_ends(
     Ok((before?, after?))
 }
 
-/// Shapes for `from+1 ..= to-1`, ascending. Empty when `from >= to - 1`.
-async fn load_intermediates(store: &Arc<DiffStore>, window: EpochWindow) -> Vec<Arc<DiffShape>> {
+/// Shapes for `from+1 ..= to-1`, ascending, with the number that could not be
+/// read. Empty when `from >= to - 1`.
+async fn load_intermediates(
+    store: &Arc<DiffStore>,
+    window: EpochWindow,
+) -> (Vec<Arc<DiffShape>>, usize) {
     let epochs = (window.from.0.saturating_add(1)..window.to.0).map(Epoch);
-    read_bounded(store, epochs, INTERMEDIATE_CONCURRENCY)
-        .await
-        .into_iter()
-        .filter_map(|read| match read.result {
-            Ok(shape) => Some(shape),
+    let reads = read_bounded(
+        store,
+        epochs,
+        INTERMEDIATE_CONCURRENCY,
+        INTERMEDIATE_READ_TIMEOUT,
+    )
+    .await;
+    let mut shapes = Vec::with_capacity(reads.len());
+    let mut skipped = 0usize;
+    for read in reads {
+        match read.result {
+            Ok(shape) => shapes.push(shape),
             Err(error) => {
+                skipped += 1;
                 tracing::warn!(epoch = read.epoch.0, error = %error,
                     "diff: intermediate epoch skipped");
-                None
             }
-        })
-        .collect()
+        }
+    }
+    (shapes, skipped)
 }
 
 /// Read every epoch through the store with at most `concurrency` reads in
-/// flight. Results come back ascending by epoch.
+/// flight, each bounded by `per_read`. Results come back ascending by epoch.
 async fn read_bounded(
     store: &Arc<DiffStore>,
     epochs: impl IntoIterator<Item = Epoch>,
     concurrency: usize,
+    per_read: Duration,
 ) -> Vec<ShapeRead> {
     let mut pending = epochs.into_iter();
     let mut tasks: JoinSet<ShapeRead> = JoinSet::new();
@@ -259,7 +298,10 @@ async fn read_bounded(
             let store = Arc::clone(store);
             let handle = tasks.spawn(async move {
                 let started = Instant::now();
-                let result = store.get(epoch).await;
+                let result = match tokio::time::timeout(per_read, store.get(epoch)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(SnapshotError::Timeout { epoch }),
+                };
                 ShapeRead {
                     epoch,
                     result,
@@ -426,9 +468,13 @@ mod tests {
         assert_eq!(epochs, vec![49, 50, 51]);
         assert_eq!(reader.fetch_calls(), 3);
 
-        let (status, body) = call(state, "POST", "/diff/precompute?depth=31").await;
+        let (status, body) = call(Arc::clone(&state), "POST", "/diff/precompute?depth=31").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], DEPTH_MESSAGE);
+
+        let (status, body) = call(state, "POST", "/diff/precompute?epoch=1").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], EPOCH_MESSAGE);
     }
 
     #[tokio::test]
@@ -462,7 +508,7 @@ mod tests {
             Arc::clone(&reader) as Arc<dyn crate::snapshot::SnapshotReader>,
             Arc::new(NoPersistence),
         ));
-        let reads = read_bounded(&store, (48..=52).map(Epoch), 2).await;
+        let reads = read_bounded(&store, (48..=52).map(Epoch), 2, INTERMEDIATE_READ_TIMEOUT).await;
         let epochs: Vec<Epoch> = reads.iter().map(|read| read.epoch).collect();
         assert_eq!(epochs, (48..=52).map(Epoch).collect::<Vec<_>>());
         assert!(reads.iter().all(|read| read.result.is_ok()));
@@ -471,9 +517,40 @@ mod tests {
             from: Epoch(48),
             to: Epoch(55),
         };
-        let intermediates = load_intermediates(&store, window).await;
+        let (intermediates, skipped) = load_intermediates(&store, window).await;
         let epochs: Vec<Epoch> = intermediates.iter().map(|shape| shape.epoch).collect();
         assert_eq!(epochs, vec![Epoch(49), Epoch(50), Epoch(51), Epoch(52)]);
+        assert_eq!(skipped, 2, "epochs 53 and 54 have no snapshot");
+    }
+
+    #[tokio::test]
+    async fn a_skipped_intermediate_marks_the_body_degraded() {
+        let reader = Arc::new(FakeReader::with_epochs([48, 49, 51]));
+        let state = state_over(Arc::clone(&reader));
+
+        let response = routes()
+            .with_state(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/diff?from=48&to=51")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(DEGRADED_HEADER)
+                .map(|v| v.as_bytes()),
+            Some(b"1".as_slice()),
+            "epoch 50 is absent, so attribution fell back to `to`"
+        );
+
+        let (status, body) = call(state, "GET", "/diff?from=48&to=49").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["to"], 49, "a window with no intermediates is complete");
     }
 
     #[test]

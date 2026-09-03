@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
     let s3_cache = S3Cache::new().await;
     let snapshot_reader = Arc::new(S3SnapshotReader::from_env().await);
     let shape_persistence: Arc<dyn ShapePersistence> = match &s3_cache {
-        Some(cache) => Arc::new(S3ShapePersistence::from(cache.as_ref())),
+        Some(cache) => Arc::new(S3ShapePersistence::from(cache.handle())),
         None => Arc::new(NoPersistence),
     };
     let diff_store = Arc::new(DiffStore::new(snapshot_reader, shape_persistence));
@@ -166,10 +166,13 @@ async fn run_api(state: Arc<AppState>, serve_compute: bool) -> anyhow::Result<()
 }
 
 /// Worker role: a minimal `/health` listener for K8s probes, the Stream
-/// consume loop, and the diff index poller. No compute HTTP routes. Both share a graceful-shutdown signal,
-/// so a SIGTERM stops accepting and lets the in-flight solve wind down (the
+/// consume loop, and the diff index poller, raced by one `select!`. The health
+/// server and the consume loop share a graceful-shutdown signal, so a SIGTERM
+/// stops accepting and lets the in-flight solve wind down (the
 /// terminationGracePeriod). Anything interrupted is recovered by the worker's
-/// XAUTOCLAIM sweep under at-least-once delivery, made safe by the result cache.
+/// XAUTOCLAIM sweep under at-least-once delivery, made safe by the result
+/// cache. The poller has no such signal: a SIGTERM drops it mid-ingest, which
+/// is safe because a shape is written in one PUT and the next tick refills.
 async fn run_worker(state: Arc<AppState>) -> anyhow::Result<()> {
     let health = Router::new().route("/health", get(routes::health));
     let addr = SocketAddr::from(([0, 0, 0, 0], bind_port()));

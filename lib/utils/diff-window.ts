@@ -14,17 +14,23 @@ export type DiffWindowValidation =
   | { ok: true; from: number; to: number }
   | { ok: false; error: string };
 
+/** Integers only, matching Rust's `str::parse::<i64>` after a trim. */
+function parseEpochParam(raw: string | null): number {
+  const trimmed = raw?.trim() ?? "";
+  return /^[+-]?\d+$/.test(trimmed) ? Number(trimmed) : NaN;
+}
+
 /**
- * Validate the `from` and `to` query params of a diff request. The error
- * strings match the Rust service's `validate_window` so both layers
- * report the same message.
+ * Validate the `from` and `to` query params of a diff request. The accepted
+ * inputs and the error strings both match the Rust service's
+ * `validate_window`, so the two layers are one contract.
  */
 export function validateDiffWindow(
   fromRaw: string | null,
   toRaw: string | null,
 ): DiffWindowValidation {
-  const from = parseInt(fromRaw ?? "", 10);
-  const to = parseInt(toRaw ?? "", 10);
+  const from = parseEpochParam(fromRaw);
+  const to = parseEpochParam(toRaw);
   if (!Number.isFinite(from) || !Number.isFinite(to) || from === to) {
     return {
       ok: false,

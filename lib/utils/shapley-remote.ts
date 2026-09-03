@@ -615,8 +615,6 @@ export async function getLinkEstimateJob(
   };
 }
 
-// ── Snapshot diff index ─────────────────────────────────────────────────
-
 const DIFF_TIMEOUT_MS = 20_000;
 
 /**
@@ -637,11 +635,20 @@ export class DiffServiceError extends Error {
 /** Statuses the proxies forward verbatim; anything else is a DiffServiceError. */
 const DIFF_FORWARDED_STATUSES = new Set([200, 400, 404]);
 
+/** Set by the service when attribution ran without every intermediate epoch. */
+const DIFF_DEGRADED_HEADER = "x-diff-degraded";
+
+export interface DiffUpstreamResponse {
+  status: number;
+  body: string;
+  isDegraded: boolean;
+}
+
 async function fetchDiffPath(
   path: string,
   label: string,
   timeoutMs: number,
-): Promise<{ status: number; body: string }> {
+): Promise<DiffUpstreamResponse> {
   let response: Response;
   try {
     response = await fetch(`${jobsBase()}${path}`, {
@@ -665,7 +672,20 @@ async function fetchDiffPath(
     );
   }
 
-  const body = await response.text().catch(() => "");
+  let body: string;
+  try {
+    body = await response.text();
+  } catch (err) {
+    if (DIFF_FORWARDED_STATUSES.has(response.status)) {
+      throw new DiffServiceError(
+        `${label} body read failed: ${err instanceof Error ? err.name : "unknown"}`,
+        response.status,
+        err instanceof Error &&
+          (err.name === "TimeoutError" || err.name === "AbortError"),
+      );
+    }
+    body = "";
+  }
   if (!DIFF_FORWARDED_STATUSES.has(response.status)) {
     const detail = body.slice(0, MAX_ERROR_DETAIL_CHARS);
     throw new DiffServiceError(
@@ -673,19 +693,29 @@ async function fetchDiffPath(
       response.status,
     );
   }
-  return { status: response.status, body };
+  if (!body) {
+    throw new DiffServiceError(
+      `${label} returned an empty body under HTTP ${response.status}`,
+      response.status,
+    );
+  }
+  return {
+    status: response.status,
+    body,
+    isDegraded: response.headers.get(DIFF_DEGRADED_HEADER) === "1",
+  };
 }
 
 /**
  * `GET {base}/diff?from&to`. Returns the upstream status and raw body so the
- * proxy can forward bytes. Throws `DiffServiceError` on timeout or a status
- * other than 200/400/404.
+ * proxy can forward bytes. Throws `DiffServiceError` on timeout, an empty
+ * body, or a status other than 200/400/404.
  */
 export async function fetchNetworkDiffRemote(
   from: number,
   to: number,
   opts: { timeoutMs?: number } = {},
-): Promise<{ status: number; body: string }> {
+): Promise<DiffUpstreamResponse> {
   return fetchDiffPath(
     `/diff?from=${from}&to=${to}`,
     "network diff",
@@ -702,7 +732,7 @@ export async function fetchContributorDiffRemote(
   from: number,
   to: number,
   opts: { timeoutMs?: number } = {},
-): Promise<{ status: number; body: string }> {
+): Promise<DiffUpstreamResponse> {
   return fetchDiffPath(
     `/diff/contributor/${encodeURIComponent(code)}?from=${from}&to=${to}`,
     "contributor diff",

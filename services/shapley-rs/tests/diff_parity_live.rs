@@ -193,6 +193,19 @@ async fn live_diffs_match_the_production_captures() {
     ))
     .expect("network diff serializes");
     let expected_network = fixture("network-204-211.json");
+    // Comparing two empty arrays asserts nothing, so pin what this window is
+    // known to carry. It has one removal attributed to epoch 208 and three
+    // endpoint changes attributed to 205. It has no addition, and no
+    // bandwidthGbps or linkType change, so those paths are covered only by the
+    // offline tests in src/diff.rs and tests/diff_scanner.rs.
+    assert!(
+        !pubkeys(&expected_network, "removed").is_empty(),
+        "the network fixture must keep its attributed removal"
+    );
+    assert!(
+        !pubkeys(&expected_network, "changed").is_empty(),
+        "the network fixture must keep its attributed changes"
+    );
     for key in ["added", "removed", "changed"] {
         assert_eq!(
             pubkeys(&expected_network, key),
@@ -218,6 +231,14 @@ async fn live_diffs_match_the_production_captures() {
     assert!(
         contributor.get("name").is_none(),
         "service body carries no name"
+    );
+    // This contributor's added/removed/changed are all empty over this window,
+    // so the footprint and the bandwidth totals are the only real signal here.
+    assert!(
+        expected_contributor["footprint"]["before"]["linkCount"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "the contributor fixture must keep a non-empty footprint"
     );
     for key in ["added", "removed", "changed"] {
         assert_eq!(

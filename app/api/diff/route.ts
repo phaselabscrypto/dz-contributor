@@ -11,16 +11,15 @@ import {
 import { enforceRateLimit, RATE_LIMIT_STANDARD } from "@/lib/utils/rate-limit";
 import { categorizeError, reportError } from "@/lib/observability";
 
+const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
+
 /**
  * GET /api/diff?from=<epoch>&to=<epoch>
  *
- * Proxy over the Rust service's `/diff` endpoint, which serves the
- * per-epoch snapshot diff index. The upstream body is forwarded as bytes;
- * a successful pair is immutable so it is CDN cached.
+ * Proxy over the Rust service's `/diff` endpoint. A complete pair is
+ * immutable, so it is CDN cached; a body the service marked degraded is not,
+ * since the missing intermediates may load on the next attempt.
  */
-
-const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
-
 export async function GET(request: Request) {
   const limited = enforceRateLimit(request, {
     bucket: "diff",
@@ -57,7 +56,9 @@ export async function GET(request: Request) {
       return new NextResponse(upstream.body, {
         headers: {
           "Content-Type": "application/json",
-          "Cache-Control": DIFF_CACHE_CONTROL,
+          "Cache-Control": upstream.isDegraded
+            ? "no-store"
+            : DIFF_CACHE_CONTROL,
         },
       });
     }

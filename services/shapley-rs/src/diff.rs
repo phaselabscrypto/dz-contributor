@@ -18,9 +18,9 @@ use crate::snapshot::{
 };
 
 /// Highest epoch a diff window may name.
-pub const MAX_DIFF_EPOCH: Epoch = Epoch(100_000);
+pub(crate) const MAX_DIFF_EPOCH: Epoch = Epoch(100_000);
 /// Widest `|to - from|` a diff window may span.
-pub const MAX_DIFF_WINDOW: u32 = 200;
+pub(crate) const MAX_DIFF_WINDOW: u32 = 200;
 
 const UNKNOWN_CONTRIBUTOR_CODE: &str = "unknown";
 const ENDPOINT_SEPARATOR: &str = "↔";
@@ -178,8 +178,7 @@ fn count_u32(count: usize) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
-/// Project the parsed sections onto a [`DiffShape`]. Same rules as the
-/// former `extractDiffShape` in the Next.js app.
+/// Project the parsed sections onto a [`DiffShape`].
 pub fn extract_diff_shape(epoch: Epoch, sections: &DiffSections) -> DiffShape {
     let location_code: HashMap<&str, &str> = sections
         .locations
@@ -686,9 +685,9 @@ pub struct ContributorFootprint {
     pub before: FootprintCounts,
     /// Counts in `after`; zeros when absent.
     pub after: FootprintCounts,
-    /// Present in `after` only. Wire name predates the `is_` rule.
+    /// Present in `after` only.
     pub first_seen: bool,
-    /// Present in `before` only. Wire name predates the `is_` rule.
+    /// Present in `before` only.
     pub left_network: bool,
 }
 

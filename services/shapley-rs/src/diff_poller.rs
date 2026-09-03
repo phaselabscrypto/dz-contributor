@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::time::MissedTickBehavior;
 
-use crate::diff_store::{DiffStore, IngestOutcome};
+use crate::diff_store::{DiffStore, FillPolicy, IngestOutcome};
 use crate::snapshot::Epoch;
 
 /// Time between two discovery-and-fill passes in the worker.
@@ -16,6 +16,7 @@ struct FillSummary {
     ingested: usize,
     already_persisted: usize,
     missing: usize,
+    deferred: usize,
     failed: Vec<Epoch>,
 }
 
@@ -27,7 +28,7 @@ pub async fn run(store: Arc<DiffStore>) {
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         ticks.tick().await;
-        if let Some(summary) = fill(&store).await {
+        if let Some(summary) = fill(&store, FillPolicy::DueOnly).await {
             log_summary("diff poller: fill complete", &summary);
         }
     }
@@ -79,7 +80,7 @@ pub async fn backfill_once(store: Arc<DiffStore>) -> Result<(), BackfillError> {
         );
         return Err(BackfillError::NoDurablePersistence);
     }
-    match fill(&store).await {
+    match fill(&store, FillPolicy::EveryEpoch).await {
         Some(summary) => {
             log_summary("diff backfill: complete", &summary);
             if summary.failed.is_empty() {
@@ -92,7 +93,7 @@ pub async fn backfill_once(store: Arc<DiffStore>) -> Result<(), BackfillError> {
     }
 }
 
-async fn fill(store: &DiffStore) -> Option<FillSummary> {
+async fn fill(store: &DiffStore, policy: FillPolicy) -> Option<FillSummary> {
     let latest = match store.latest_epoch().await {
         Ok(latest) => latest,
         Err(error) => {
@@ -101,7 +102,7 @@ async fn fill(store: &DiffStore) -> Option<FillSummary> {
         }
     };
     tracing::info!(latest = latest.0, "diff index: fill started");
-    Some(summarize(latest, store.fill_missing(latest).await))
+    Some(summarize(latest, store.fill_missing(latest, policy).await))
 }
 
 fn summarize(latest: Epoch, outcomes: Vec<(Epoch, IngestOutcome)>) -> FillSummary {
@@ -110,6 +111,7 @@ fn summarize(latest: Epoch, outcomes: Vec<(Epoch, IngestOutcome)>) -> FillSummar
         ingested: 0,
         already_persisted: 0,
         missing: 0,
+        deferred: 0,
         failed: Vec::new(),
     };
     for (epoch, outcome) in outcomes {
@@ -117,6 +119,7 @@ fn summarize(latest: Epoch, outcomes: Vec<(Epoch, IngestOutcome)>) -> FillSummar
             IngestOutcome::Ingested { .. } => summary.ingested += 1,
             IngestOutcome::AlreadyPersisted => summary.already_persisted += 1,
             IngestOutcome::Missing => summary.missing += 1,
+            IngestOutcome::Deferred => summary.deferred += 1,
             IngestOutcome::Failed(_) => summary.failed.push(epoch),
         }
     }
@@ -131,6 +134,7 @@ fn log_summary(message: &'static str, summary: &FillSummary) {
             ingested = summary.ingested,
             already_persisted = summary.already_persisted,
             missing = summary.missing,
+            deferred = summary.deferred,
             message
         );
     } else {
@@ -139,6 +143,7 @@ fn log_summary(message: &'static str, summary: &FillSummary) {
             ingested = summary.ingested,
             already_persisted = summary.already_persisted,
             missing = summary.missing,
+            deferred = summary.deferred,
             failed_count = failed.len(),
             ?failed,
             message
@@ -199,6 +204,26 @@ mod tests {
         assert_eq!(reader.head_calls(), 0);
     }
 
+    #[tokio::test]
+    async fn backfill_once_fails_when_the_shapes_were_extracted_but_not_written() {
+        let reader = Arc::new(FakeReader::with_epochs([48, 49]));
+        let persistence = Arc::new(MemoryPersistence::default());
+        persistence.fail_stores();
+        let store = Arc::new(DiffStore::new(
+            Arc::clone(&reader) as Arc<dyn SnapshotReader>,
+            Arc::clone(&persistence) as Arc<dyn crate::diff_store::ShapePersistence>,
+        ));
+
+        let outcome = backfill_once(store).await;
+
+        assert_eq!(
+            outcome,
+            Err(BackfillError::EpochsFailed(vec![Epoch(48), Epoch(49)])),
+            "a shape that was never written must not count as ingested"
+        );
+        assert_eq!(persistence.store_calls(), 2);
+    }
+
     #[test]
     fn backfill_error_displays_the_cause() {
         assert_eq!(
@@ -247,12 +272,14 @@ mod tests {
                 ),
                 (Epoch(50), IngestOutcome::Missing),
                 (Epoch(51), IngestOutcome::Failed("boom".to_string())),
+                (Epoch(52), IngestOutcome::Deferred),
             ],
         );
         assert_eq!(summary.latest, Epoch(51));
         assert_eq!(summary.ingested, 1);
         assert_eq!(summary.already_persisted, 1);
         assert_eq!(summary.missing, 1);
+        assert_eq!(summary.deferred, 1);
         assert_eq!(summary.failed, vec![Epoch(51)]);
     }
 }

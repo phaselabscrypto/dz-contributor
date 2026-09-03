@@ -82,10 +82,11 @@ those shapes. The Next.js routes become thin proxies.
   that the contributor display name is added by the proxy because the service
   has no copy of `CONTRIBUTOR_NAMES`.
 
-### S3 objects, not a database
+### Why the index is S3 objects
 
-The data is one immutable 28 KB record per epoch, about 165 today, growing by
-one every 38 to 44 hours, read by key, never updated, never joined.
+The data is one immutable 28 KB record per epoch. There are about 165 today,
+and one more arrives every 38 to 44 hours. Each is read by key. None is ever
+updated or joined.
 
 | | S3 object per epoch (chosen) | Postgres | SQLite on PVC | Redis (existing) |
 |---|---|---|---|---|
@@ -146,6 +147,19 @@ filled from them without re-reading a snapshot.
   implementations that must agree.
 - **A layout change fails loudly.** If DoubleZero moves `dz_serviceability`
   after the telemetry arrays, ingest for that epoch fails with `BudgetExceeded`
-  at 32 MiB. There is no fallback to a full parse.
+  at 32 MiB. There is no fallback to a full parse. The fill backs such an epoch
+  off on a doubling delay from 15 minutes to a 24 hour cap, so a permanent
+  layout change costs about one attempt a day per affected epoch instead of one
+  every tick.
+- **Ingest concurrency is capped process-wide.** `MAX_CONCURRENT_INGESTS` (6)
+  is held across the stream and the parse, so the resident section bytes and
+  the blocking-pool queue are bounded by that count rather than by how many
+  requests arrive. Per-epoch single flight in `DiffStore::get` already collapses
+  duplicate demand for one epoch.
+- **A degraded diff is not cached.** An intermediate epoch that misses its 6 s
+  read deadline is skipped and attribution falls back to `to`, as before, but
+  the response now carries `x-diff-degraded: 1` and the proxy serves it
+  `no-store`. Only a diff computed from every intermediate gets the 24 hour
+  `s-maxage`.
 - **A missing `to` epoch is a 404, not a 502.** The service returns 404 and the
   proxy forwards it. No consumer branches on 502.

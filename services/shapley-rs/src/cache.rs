@@ -216,7 +216,7 @@ impl S3Cache {
 
     /// Clone of the client and bucket as a `Send + 'static` handle, so other
     /// S3-backed stores can share the configured connection.
-    pub fn as_ref(&self) -> S3CacheRef {
+    pub fn handle(&self) -> S3CacheRef {
         S3CacheRef {
             client: self.client.clone(),
             bucket: self.bucket.clone(),

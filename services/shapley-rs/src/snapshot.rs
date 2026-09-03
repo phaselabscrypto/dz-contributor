@@ -38,7 +38,7 @@ pub const MIN_DZ_EPOCH: Epoch = Epoch(48);
 /// dz_telemetry began at 9.7 MB on epoch 211; 3x headroom, still forbids the 110 MB read.
 pub const MAX_SCAN_BYTES: usize = 32 * 1024 * 1024;
 /// Upper bound on one snapshot fetch, from request start to the last scanned byte.
-pub const SNAPSHOT_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const SNAPSHOT_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 /// The `dz_serviceability` children the diff index reads, in file order.
 pub(crate) const DIFF_SECTION_KEYS: [&str; 4] = ["locations", "devices", "links", "contributors"];
 
@@ -349,7 +349,7 @@ where
 
 /// Highest published epoch: exponential probe from 100 (cap 10 000), then
 /// binary search between the last hit and the first miss.
-pub async fn discover_latest(reader: &dyn SnapshotReader) -> Result<Epoch, SnapshotError> {
+pub(crate) async fn discover_latest(reader: &dyn SnapshotReader) -> Result<Epoch, SnapshotError> {
     let mut last_ok = MIN_DZ_EPOCH.0;
     let mut probe = DISCOVERY_PROBE_START;
     while probe <= DISCOVERY_PROBE_CAP {
