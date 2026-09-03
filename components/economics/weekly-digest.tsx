@@ -5,27 +5,13 @@ import Link from "next/link";
 import { useEpochs } from "@/lib/hooks/use-epochs";
 import { Skeleton } from "@/components/ui/states";
 import { getContributorDisplayName } from "@/lib/constants/config";
+import type { NetworkDiffResponse } from "@/lib/types/diff";
 import { ArrowRight, Plus, Minus } from "lucide-react";
 
-interface DiffSummary {
-  from: number;
-  to: number;
-  summary: {
-    linksAdded: number;
-    linksRemoved: number;
-    linksChanged: number;
-    contributorsAffected: number;
-  };
-  contributors: {
-    code: string;
-    linksAdded: number;
-    linksRemoved: number;
-    linksChanged: number;
-    bandwidthGbpsDelta: number;
-    firstSeen: boolean;
-    leftNetwork: boolean;
-  }[];
-}
+type DiffSummary = Pick<
+  NetworkDiffResponse,
+  "from" | "to" | "summary" | "contributors"
+>;
 
 const fetcher = async (url: string): Promise<DiffSummary> => {
   const res = await fetch(url);
@@ -47,7 +33,11 @@ function fmtGbps(gbps: number): string {
  * thing users see is "what changed since last time you looked".
  */
 export function WeeklyDigest() {
-  const { data: epochs } = useEpochs();
+  const {
+    data: epochs,
+    error: epochsError,
+    mutate: mutateEpochs,
+  } = useEpochs();
   const latest = epochs?.latest;
   const lookback = latest ? Math.max(latest - 7, 48) : null;
 
@@ -55,12 +45,18 @@ export function WeeklyDigest() {
     latest && lookback && latest > lookback
       ? `/api/diff?from=${lookback}&to=${latest}`
       : null;
-  const { data, error } = useSWR<DiffSummary>(swrKey, fetcher, {
+  const { data, error, mutate } = useSWR<DiffSummary>(swrKey, fetcher, {
     revalidateOnFocus: false,
     dedupingInterval: 5 * 60_000,
   });
 
-  if (error) return null;
+  // Keep a loaded digest on screen when a background revalidation fails.
+  const hasError = Boolean((error || epochsError) && !data);
+
+  const retry = () => {
+    void mutateEpochs();
+    void mutate();
+  };
 
   const totalGbpsDelta =
     data?.contributors.reduce((s, c) => s + c.bandwidthGbpsDelta, 0) ?? 0;
@@ -78,7 +74,20 @@ export function WeeklyDigest() {
         )}
       </div>
       <div className="p-4">
-        {!data ? (
+        {hasError ? (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono">
+            <span className="text-amber-300/80">
+              Couldn&apos;t load the change digest.
+            </span>
+            <button
+              type="button"
+              onClick={retry}
+              className="inline-flex items-center uppercase tracking-[0.12em] text-cream-40 hover:text-foreground transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        ) : !data ? (
           <div className="space-y-2.5">
             <Skeleton className="h-3 w-1/2" />
             <Skeleton className="h-3 w-1/3" />

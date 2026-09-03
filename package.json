@@ -30,7 +30,8 @@
     "test:epoch-rate": "tsx scripts/test-epoch-rate.ts",
     "test:simulate-eta": "tsx scripts/test-simulate-eta.ts",
     "test:stake": "tsx scripts/test-validator-stake.ts",
-    "test:estimate": "tsx scripts/test-validator-estimate.ts"
+    "test:estimate": "tsx scripts/test-validator-estimate.ts",
+    "test:diff-window": "tsx scripts/test-diff-window.ts"
   },
   "dependencies": {
     "@solana/web3.js": "1.98.4",

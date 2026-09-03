@@ -1,125 +1,114 @@
 import { NextResponse } from "next/server";
 import {
-  fetchAndParseForDiff,
-  computeDiff,
-  publicDiffFetchError,
-} from "@/lib/utils/snapshot-diff";
-import { getContributorDisplayName } from "@/lib/constants/config";
-import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
-import { reportError } from "@/lib/observability";
-import { LruCache } from "@/lib/utils/lru-cache";
+  getContributorDisplayName,
+  shapleyServiceBase,
+} from "@/lib/constants/config";
+import type { ContributorDiffResponse } from "@/lib/types/diff";
+import {
+  DIFF_CACHE_CONTROL,
+  validateDiffWindow,
+} from "@/lib/utils/diff-window";
+import {
+  DiffServiceError,
+  fetchContributorDiffRemote,
+} from "@/lib/utils/shapley-remote";
+import { enforceRateLimit, RATE_LIMIT_STANDARD } from "@/lib/utils/rate-limit";
+import { categorizeError, reportError } from "@/lib/observability";
+
+const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
+
+/** Contributor codes are short on-chain identifiers, e.g. `tsw`, `jump_`. */
+const CONTRIBUTOR_CODE = /^[a-z0-9_-]{1,32}$/i;
+
+function isContributorDiffBody(
+  value: unknown,
+): value is Omit<ContributorDiffResponse, "name"> {
+  if (typeof value !== "object" || value === null) return false;
+  const body = value as Partial<ContributorDiffResponse>;
+  return (
+    typeof body.code === "string" &&
+    typeof body.from === "number" &&
+    typeof body.to === "number" &&
+    typeof body.footprint === "object" &&
+    body.footprint !== null
+  );
+}
 
 /**
  * GET /api/diff/contributor/[code]?from=<epoch>&to=<epoch>
  *
- * Returns the same diff shape as /api/diff but scoped to a single
- * contributor — added/removed/changed links plus before/after footprint
- * stats. Drives the per-operator changelog trail on the contributor
- * detail page.
- *
- * Cached for 30 minutes; both inputs are immutable historical snapshots.
+ * Proxy over the Rust service's `/diff/contributor/{code}` endpoint. The
+ * service has no copy of `CONTRIBUTOR_NAMES`, so the display name is
+ * added here before the body is returned.
  */
-
-// Keyspace is (code × from × to) — multiply that by 14 contributors and
-// 30 epochs and the unbounded version could blow up. Cap at 48.
-const cache = new LruCache<string, unknown>({
-  ttlMs: 30 * 60 * 1000,
-  maxSize: 48,
-});
-
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ code: string }> },
 ) {
   const limited = enforceRateLimit(request, {
     bucket: "diff-contributor",
-    ...RATE_LIMIT_HEAVY,
+    ...RATE_LIMIT_STANDARD,
   });
   if (limited) return limited;
 
   const { code } = await params;
-  if (!code) {
+  if (!code || !CONTRIBUTOR_CODE.test(code)) {
     return NextResponse.json(
       { error: "contributor code required" },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   const url = new URL(request.url);
-  const from = parseInt(url.searchParams.get("from") ?? "", 10);
-  const to = parseInt(url.searchParams.get("to") ?? "", 10);
-  if (!Number.isFinite(from) || !Number.isFinite(to) || from === to) {
+  const window = validateDiffWindow(
+    url.searchParams.get("from"),
+    url.searchParams.get("to"),
+  );
+  if (!window.ok) {
     return NextResponse.json(
-      { error: "from and to query params required (different integers)" },
-      { status: 400 },
+      { error: window.error },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+  const { from, to } = window;
+
+  if (!shapleyServiceBase()) {
+    reportError(new Error("SHAPLEY_SERVICE_URL not configured"), {
+      source: "api/diff/contributor",
+    });
+    return NextResponse.json(
+      { error: "diff service not configured" },
+      { status: 503, headers: NO_STORE_HEADERS },
     );
   }
 
-  const cacheKey = `${code}:${from}->${to}`;
-  const cached = cache.get(cacheKey);
-  if (cached !== undefined) {
-    return NextResponse.json(cached);
-  }
-
-  let a, b;
   try {
-    [a, b] = await Promise.all([
-      fetchAndParseForDiff(from),
-      fetchAndParseForDiff(to),
-    ]);
+    const upstream = await fetchContributorDiffRemote(code, from, to);
+    if (upstream.status !== 200) {
+      return new NextResponse(upstream.body, {
+        status: upstream.status,
+        headers: { "Content-Type": "application/json", ...NO_STORE_HEADERS },
+      });
+    }
+    const parsed: unknown = JSON.parse(upstream.body);
+    if (!isContributorDiffBody(parsed)) {
+      throw new DiffServiceError("contributor diff body is not the wire shape");
+    }
+    const data: ContributorDiffResponse = {
+      ...parsed,
+      name: getContributorDisplayName(code),
+    };
+    return NextResponse.json(data, {
+      headers: { "Cache-Control": DIFF_CACHE_CONTROL },
+    });
   } catch (err) {
-    reportError(err, { source: "api/diff/contributor", extras: { code, from, to } });
+    reportError(err instanceof DiffServiceError ? err : categorizeError(err), {
+      source: "api/diff/contributor",
+      extras: { code, from, to },
+    });
     return NextResponse.json(
-      { error: publicDiffFetchError(err) },
-      { status: 502 },
+      { error: "snapshot fetch failed" },
+      { status: 502, headers: NO_STORE_HEADERS },
     );
   }
-
-  const { added, removed, changed } = computeDiff(a, b, code);
-
-  const before = a.contributors.find((c) => c.code === code);
-  const after = b.contributors.find((c) => c.code === code);
-
-  const bwBefore = a.links
-    .filter((l) => l.contributorCode === code)
-    .reduce((s, l) => s + l.bandwidthGbps, 0);
-  const bwAfter = b.links
-    .filter((l) => l.contributorCode === code)
-    .reduce((s, l) => s + l.bandwidthGbps, 0);
-
-  const data = {
-    code,
-    name: getContributorDisplayName(code),
-    from: a.epoch,
-    to: b.epoch,
-    summary: {
-      linksAdded: added.length,
-      linksRemoved: removed.length,
-      linksChanged: changed.length,
-      bandwidthGbpsBefore: bwBefore,
-      bandwidthGbpsAfter: bwAfter,
-      bandwidthGbpsDelta: bwAfter - bwBefore,
-    },
-    footprint: {
-      before: {
-        linkCount: before?.linkCount ?? 0,
-        deviceCount: before?.deviceCount ?? 0,
-        metroCount: before?.metroCount ?? 0,
-      },
-      after: {
-        linkCount: after?.linkCount ?? 0,
-        deviceCount: after?.deviceCount ?? 0,
-        metroCount: after?.metroCount ?? 0,
-      },
-      firstSeen: !before && !!after,
-      leftNetwork: !!before && !after,
-    },
-    added,
-    removed,
-    changed,
-    fetchedAt: new Date().toISOString(),
-  };
-
-  cache.set(cacheKey, data);
-  return NextResponse.json(data);
 }

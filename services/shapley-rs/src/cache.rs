@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
 
+use aws_config::timeout::TimeoutConfig;
 use serde::{Deserialize, Serialize};
 
 /// Cached per-city Shapley values + aggregated baseline for a network topology.
@@ -89,6 +91,30 @@ pub fn hash_input(input: &crate::model::ShapleyInputIn) -> u64 {
 /// rotated key), but it is a recompute cost, not a correctness risk.
 const CACHE_VERSION_PREFIX: &str = "shapley/v3";
 
+/// TCP connect timeout for every S3 client this service builds.
+pub(crate) const S3_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-socket-read timeout. Bounds a body stream that stalls mid-transfer,
+/// which no other timeout covers: a response body is read after the operation
+/// itself has completed.
+pub(crate) const S3_READ_TIMEOUT: Duration = Duration::from_secs(20);
+/// Timeout for one attempt of a request, retried by the SDK.
+pub(crate) const S3_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timeout for a whole request including its retries.
+pub(crate) const S3_OPERATION_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Timeouts for every S3 client in this service. The SDK default bounds the
+/// connect phase alone, so a request over an established but blackholed
+/// connection would otherwise never return, which stalls the diff poller's
+/// loop for good, since one pass must finish before the next tick fires.
+pub(crate) fn s3_timeout_config() -> TimeoutConfig {
+    TimeoutConfig::builder()
+        .connect_timeout(S3_CONNECT_TIMEOUT)
+        .read_timeout(S3_READ_TIMEOUT)
+        .operation_attempt_timeout(S3_ATTEMPT_TIMEOUT)
+        .operation_timeout(S3_OPERATION_TIMEOUT)
+        .build()
+}
+
 /// S3-backed cache for persisting per-city Shapley values across pod restarts.
 pub struct S3Cache {
     client: aws_sdk_s3::Client,
@@ -116,6 +142,7 @@ impl S3Cache {
 
         let shared = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_sdk_s3::config::Region::new(region))
+            .timeout_config(s3_timeout_config())
             .load()
             .await;
 
@@ -185,6 +212,15 @@ impl S3Cache {
         }
         .store(cache)
         .await;
+    }
+
+    /// Clone of the client and bucket as a `Send + 'static` handle, so other
+    /// S3-backed stores can share the configured connection.
+    pub fn handle(&self) -> S3CacheRef {
+        S3CacheRef {
+            client: self.client.clone(),
+            bucket: self.bucket.clone(),
+        }
     }
 
     /// Borrow the bucket name for spawned tasks.
@@ -487,7 +523,7 @@ impl S3CacheRef {
 
 #[cfg(test)]
 mod tests {
-    use super::S3Cache;
+    use super::*;
 
     #[test]
     fn simulate_key_is_zero_padded_hex_under_v3_json() {
@@ -495,5 +531,15 @@ mod tests {
             S3Cache::simulate_key(0xdead_beef),
             "shapley/v3/simulate-00000000deadbeef.json"
         );
+    }
+
+    #[test]
+    fn s3_timeout_config_bounds_reads_and_whole_operations() {
+        let config = s3_timeout_config();
+        assert_eq!(config.connect_timeout(), Some(S3_CONNECT_TIMEOUT));
+        assert_eq!(config.read_timeout(), Some(S3_READ_TIMEOUT));
+        assert_eq!(config.operation_attempt_timeout(), Some(S3_ATTEMPT_TIMEOUT));
+        assert_eq!(config.operation_timeout(), Some(S3_OPERATION_TIMEOUT));
+        assert!(S3_ATTEMPT_TIMEOUT <= S3_OPERATION_TIMEOUT);
     }
 }

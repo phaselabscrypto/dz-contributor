@@ -4,12 +4,16 @@
 //!
 //! Run:  cargo test -p dz-shapley-service --test link_estimate_http
 
+mod common;
+
 use axum::{
     Router,
     body::Body,
     http::Request,
     routing::{get, post},
 };
+use common::NeverReader;
+use dz_shapley_service::diff_store::{DiffStore, NoPersistence};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -24,6 +28,10 @@ fn app() -> Router {
         s3_cache: None,
         api_token: None,
         jobs: None,
+        diff_store: Arc::new(DiffStore::new(
+            Arc::new(NeverReader),
+            Arc::new(NoPersistence),
+        )),
     });
     Router::new()
         .route(
