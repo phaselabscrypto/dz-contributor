@@ -18,7 +18,7 @@ network-shapley = { git = "https://github.com/phaselabscrypto/network-shapley-rs
 
 # HTTP server
 axum = { version = "0.7", features = ["json"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "timeout", "catch-panic"] }
 
 # Serialization

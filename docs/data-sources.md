@@ -52,11 +52,11 @@ The DoubleZero Foundation publishes immutable per-epoch JSON snapshots to a publ
 | Epoch floor | `MIN_DZ_EPOCH = 48` (earliest published epoch) |
 | Epoch discovery | Exponential probe + binary-search via HEAD requests; see `lib/utils/epoch-discovery.ts` |
 | Discovery cache | 5 min (`CACHE_TTL = 5 * 60 * 1000` in `epoch-discovery.ts`) |
-| Snapshot size | ~5 MB per epoch (comment in `app/api/snapshot/route.ts`) |
+| Snapshot size | 68 to 110 MB per epoch (about 90 MB is `dz_telemetry`); the Rust service's diff index streams only the first 3.7 MB, see [shapley-service.md](shapley-service.md#snapshot-diff-index) |
 | Server LRU cache | 8 entries, TTL 5 min (`snapshotCache` in `app/api/snapshot/route.ts`) |
 | CDN headers | `public, max-age=3600, s-maxage=3600, stale-while-revalidate=86400` |
 | Fetch timeout | 30 s |
-| Consuming routes | `app/api/snapshot/route.ts`, `app/api/epochs/route.ts`, `app/api/shapley/route.ts`, `app/api/shapley/baseline/route.ts`, `app/api/diff/route.ts`, `app/api/diff/contributor/[code]/route.ts` |
+| Consuming routes | `app/api/snapshot/route.ts`, `app/api/epochs/route.ts`, `app/api/shapley/route.ts`, `app/api/shapley/baseline/route.ts`; `app/api/diff/route.ts` and `app/api/diff/contributor/[code]/route.ts` proxy to the Rust service, which reads the bucket itself |
 | Failure | 404 propagated when epoch not found; other S3 errors forwarded verbatim |
 
 Snapshots for completed epochs are immutable; the aggressive CDN TTL (1 h fresh, 24 h stale-while-revalidate) reflects this. Epoch discovery avoids a hard-coded ceiling by probing S3 directly; see `lib/utils/epoch-discovery.ts` for the algorithm.

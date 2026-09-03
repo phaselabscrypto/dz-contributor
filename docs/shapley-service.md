@@ -14,9 +14,10 @@ HTTP microservice wrapping the `network-shapley` Rust crate: synchronous Shapley
 6. [Async job lifecycle](#async-job-lifecycle)
 7. [Redis keyspace](#redis-keyspace)
 8. [S3 result cache](#s3-result-cache)
-9. [Concurrency model](#concurrency-model)
-10. [Container image](#container-image)
-11. [Error shape](#error-shape)
+9. [Snapshot diff index](#snapshot-diff-index)
+10. [Concurrency model](#concurrency-model)
+11. [Container image](#container-image)
+12. [Error shape](#error-shape)
 
 ---
 
@@ -27,7 +28,8 @@ One binary, `dz-shapley-service`, serves two roles selected by the first CLI arg
 | Role | How to invoke | What runs |
 |---|---|---|
 | `api` (default) | no arg, `api`, or `--role=api` | Full HTTP server: all sync compute endpoints plus the `/jobs/*` enqueue/poll/cancel surface |
-| `worker` | `worker` or `--role=worker` | Minimal `/health`-only HTTP listener plus the Redis Stream consume loop |
+| `worker` | `worker` or `--role=worker` | Minimal `/health`-only HTTP listener plus the Redis Stream consume loop and the snapshot diff poller |
+| `diff-backfill` | `diff-backfill` or `--role=diff-backfill` | One-shot: ingests every missing epoch into the diff index, prints a summary, exits non-zero if any epoch failed |
 
 Both roles share the same `AppState` (in-memory epoch cache, S3 cache handle, API token, job store) and the same graceful-shutdown handler. SIGTERM or Ctrl-C stops the server; an in-flight worker solve winds down within the `terminationGracePeriod`, and any interrupted entry is recovered by the worker's `XAUTOCLAIM` sweep under at-least-once delivery.
 
@@ -64,8 +66,11 @@ All compute endpoints require auth (see above). `/health` is always open.
 | `DELETE` | `/jobs/{id}` | Required | Request cooperative cancellation; `202 {state: cancelling}` or `404` | — |
 | `POST` | `/precompute/link-estimates` | Required | Enqueue a sweep job that fans out one link-estimate child per operator (epoch-cron warm-up); returns `202 {job_id}` | — |
 | `GET` | `/precompute/link-estimates/status` | Required | Check whether the S3 "fully swept" marker exists for `?tag=`; the cron route uses this to skip the snapshot build on a warm epoch | — |
+| `GET` | `/diff?from&to` | Required | Network topology diff between two epochs: summary, per-contributor rollup, `added`, `removed`, `changed` links with first-observed attribution; served from the diff index | `from` and `to` each in `[48, 100000]`, `from != to`, `abs(to - from) <= 200`; the order is not enforced, so `from > to` returns a backward diff |
+| `GET` | `/diff/contributor/{code}?from&to` | Required | Per-contributor diff between two epochs: footprint before and after, added, removed, and changed links (no display `name`; the Next.js proxy adds it) | same window rules |
+| `POST` | `/diff/precompute?epoch=N` or `?depth=D` | Required | Ingest one epoch, or the latest `D` epochs (default 8, max 30); returns `{ latest, results: [{ epoch, status, ms }] }` | 502 only when every epoch errored |
 
-Router source: `src/main.rs` (`run_api`) and route handlers in `src/routes.rs`.
+Router source: `src/main.rs` (`run_api`), route handlers in `src/routes.rs`, and the `/diff*` handlers in `src/diff_routes.rs`.
 
 ---
 
@@ -231,10 +236,31 @@ When `S3_CACHE_ENDPOINT` is set, the AWS SDK client is configured with that URL 
 | `shapley/v3/link-estimate-{hash:016x}.bin` | `shapley/v3/link-estimate-0000abcd1234ef56.bin` | bincode-serialized `LinkEstimateResponse` |
 | `shapley/v3/simulate-{hash:016x}.json` | `shapley/v3/simulate-0000abcd1234ef56.json` | JSON-serialized `SimulateResponse` (what-if result, persisted forever by whole-request payload hash; PSYS-557) |
 | `shapley/v3/sweep-marker-{hash:016x}.json` | `shapley/v3/sweep-marker-0000abcd1234ef56.json` | JSON `{"tag": "..."}` marker indicating a fully swept epoch; tag is hashed before use as the key suffix |
+| `diff/v1/shape-{epoch:06}.json` | `diff/v1/shape-000211.json` | JSON-serialized `DiffShape` (lean links and contributors for one epoch); its own version prefix, see [Snapshot diff index](#snapshot-diff-index) |
 
 The `v3` prefix must be bumped on any change to the serialized shape or the engine that produced the values, so results from an older engine are never served for the same input hash.
 
 Writes are always detached best-effort (`tokio::spawn` or fire-and-forget calls in `src/routes.rs` and `src/worker.rs`). Without S3, the service is stateless across restarts (cold start on every pod recycle); the precompute cron mitigates this by warming the cache before the first client request of an epoch.
+
+---
+
+## Snapshot diff index
+
+Source: `src/snapshot.rs` (public-bucket client and scanner), `src/diff.rs` (shape extraction and diff computation), `src/diff_store.rs` (three-tier store), `src/diff_poller.rs` (worker loop and backfill), `src/diff_routes.rs` (handlers). Design rationale: [ADR 0002](adr/0002-snapshot-diff-index.md).
+
+The `/diff*` endpoints answer from a per-epoch index of the DoubleZero topology instead of downloading full snapshots per request. One snapshot is 68 to 110 MB. The four sections the diff needs (`locations`, `devices`, `links`, `contributors`) end within the first 3.7 MB.
+
+**Public-bucket client.** `S3SnapshotReader` is a second `aws_sdk_s3::Client` with no credentials (`no_credentials()`), region `us-east-1`, and no endpoint override. It reads `mn-epoch-{n}-snapshot.json` from the public bucket `doublezero-contributor-rewards-mn-beta-snapshots`. Env overrides: `DZ_SNAPSHOT_BUCKET`, `DZ_SNAPSHOT_REGION`. The cluster must allow HTTPS egress to that host.
+
+**Scanner.** `SectionScanner` tracks JSON depth on raw bytes and captures each wanted section as it streams. It stops when the fourth section closes or when `dz_serviceability` closes, then drops the `ByteStream`, which closes the connection. `MAX_SCAN_BYTES` (32 MiB) is a hard ceiling: if the layout changes so the sections move after the telemetry arrays, the scan fails with `BudgetExceeded` instead of reading 110 MB. A scan never returns a partial result. Parsing and extraction run under `spawn_blocking`.
+
+**Persisted shape.** The extractor reduces the sections to a `DiffShape` of about 28 KB (166 links, 15 contributors on epoch 211) and stores it as `diff/v1/shape-{epoch:06}.json` in the result-cache bucket. `DIFF_SHAPE_VERSION_PREFIX` is independent of the `shapley/v3` prefix, so an LP engine bump does not orphan the index. Bump `diff/v1` when `DiffShape` fields change, when the extractor's emitted values change, or when the set of scanned sections changes. Without `S3_CACHE_BUCKET` the store keeps shapes in memory only (`NoPersistence`).
+
+**Read path.** `DiffStore::get` checks memory, then S3, then ingests from the public bucket. Concurrent misses for one epoch share a single ingest. A failed ingest is never cached. `GET /diff` loads `from`, `to`, and the intermediate epochs with concurrency 10; an intermediate that fails is logged and skipped, and attribution for the affected entries falls back to `to`.
+
+**Poller and backfill.** The `worker` role runs `diff_poller::run` alongside the Redis consume loop. Every 15 minutes it discovers the latest epoch (`head_object` exponential probe, then binary search) and ingests every epoch in `48..=latest` missing from the persisted set. Duplicate ingests across worker replicas write the same bytes to the same key. The `diff-backfill` role runs the same fill once from a terminal and exits with a non-zero status if any epoch failed. The initial fill is about 165 epochs at 3.7 MB each, 2 to 5 minutes sequential.
+
+**Error mapping** (by enum variant, in `src/diff_routes.rs`): 400 for window validation; 404 when `from` or `to` has no snapshot (`"epoch {n}: snapshot HTTP 404"`); 422 for a scan failure (`"snapshot scan failed"`); 502 for an HTTP, transport, or timeout failure (`"snapshot fetch failed"`). The epoch and cause go to the log, never to the response body.
 
 ---
 
@@ -297,3 +323,4 @@ HTTP status codes follow standard conventions: 400 for validation failures, 422 
 - [development.md](development.md) — local setup, running the service
 - [operations.md](operations.md) — environment variable reference, deployment topology
 - [ADR 0001](adr/0001-async-compute-queue.md) — rationale for the async compute queue
+- [ADR 0002](adr/0002-snapshot-diff-index.md): rationale for the snapshot diff index

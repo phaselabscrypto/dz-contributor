@@ -14,6 +14,7 @@ This document is the index into the system. For depth, follow the cross-links:
 | [development.md](./development.md) | Local setup, env vars, running without the Rust service |
 | [operations.md](./operations.md) | Deployment, cron, rate limits, observability |
 | [adr/0001-async-compute-queue.md](./adr/0001-async-compute-queue.md) | Why the long solves run as queued jobs |
+| [adr/0002-snapshot-diff-index.md](./adr/0002-snapshot-diff-index.md) | Why the epoch diff is served from a Rust-side index |
 
 ## System diagram
 
@@ -23,8 +24,8 @@ flowchart TD
 
     subgraph next["Next.js 16 App Router (Vercel)"]
         direction TB
-        proxy["Proxy / aggregate group<br/>/api/live/*<br/>/api/diff, /api/diff/contributor<br/>/api/epochs, /api/snapshot<br/>/api/fees, /api/prices, /api/publishers<br/>/api/health, /api/economics/projection"]
-        compute["Compute group<br/>/api/shapley/*<br/>/api/link-value/*"]
+        proxy["Proxy / aggregate group<br/>/api/live/*<br/>/api/epochs, /api/snapshot<br/>/api/fees, /api/prices, /api/publishers<br/>/api/health, /api/economics/projection"]
+        compute["Compute group<br/>/api/shapley/*<br/>/api/link-value/*<br/>/api/diff, /api/diff/contributor"]
         onchain["Env-gated stubs<br/>/api/onchain/*"]
     end
 
@@ -56,6 +57,7 @@ flowchart TD
 
     rust --> redis
     rust --> s3cache
+    rust -. "diff index: first 3.7 MB per epoch" .-> snaps
 ```
 
 All external feeds are reached **server-side** from the API routes — the browser only ever talks to `/api/*` on its own origin. The Content-Security-Policy in `next.config.ts` enforces this: `connect-src 'self'` in production. The on-chain group is dark by default and returns `503` with a stable shape until DoubleZero ships the program IDL (see `lib/onchain/README.md`).
@@ -124,8 +126,8 @@ Client data is fetched with SWR. The shared config (`lib/hooks/use-live.ts`) set
 
 There are **29** `route.ts` files. They fall into three behavioral groups:
 
-- **Proxy / aggregate** — fetch an upstream server-side, cache, and return JSON. Examples: `live/*`, `epochs`, `snapshot`, `fees`, `prices`, `publishers`, `economics/projection`, `health`, `diff`, `diff/contributor/[code]`.
-- **Compute** — build a Shapley input and call the Rust service: `shapley`, `shapley/baseline`, `shapley/simulate`, `shapley/tracking`, `shapley/jobs` (+ `[id]`), `link-value/jobs` (+ `[id]`), `link-value/precompute`. All eight rate-limited routes live here plus the two diff routes (see [Security posture](#security-posture-summary)).
+- **Proxy / aggregate** — fetch an upstream server-side, cache, and return JSON. Examples: `live/*`, `epochs`, `snapshot`, `fees`, `prices`, `publishers`, `economics/projection`, `health`.
+- **Compute** — build a Shapley input and call the Rust service: `shapley`, `shapley/baseline`, `shapley/simulate`, `shapley/tracking`, `shapley/jobs` (+ `[id]`), `link-value/jobs` (+ `[id]`), `link-value/precompute`. The two diff routes, `diff` and `diff/contributor/[code]`, also live here: they proxy to the Rust service's `/diff*` endpoints, which answer from a per-epoch index ([adr/0002-snapshot-diff-index.md](./adr/0002-snapshot-diff-index.md)). All eight rate-limited routes are in this group (see [Security posture](#security-posture-summary)).
 - **Env-gated stubs** — `onchain/{topology,validators}` pre-flight-check configuration and return `503` with a stable `{ ready: false, reason }` shape until `ONCHAIN_ENABLED` / `DZ_REGISTRY_PROGRAM_ID` are set; `onchain/{contributors,rewards,contributor-rewards}` attempt the read directly and surface a `502` on failure instead.
 - **Meta** — `methodology` (machine-readable formula/source manifest) and `vitals` (Web Vitals sink; always `204`, logs only outside production).
 
@@ -133,8 +135,8 @@ There are **29** `route.ts` files. They fall into three behavioral groups:
 
 The builders, solver clients, and caches that the routes compose:
 
-- **Input builders** — `canonical-input-builder.ts` (bit-comparable to the Foundation reference), `shapley-input-builder.ts` (heuristic fallback), `live-shapley-input.ts`, `shapley-input-modifier.ts` (applies simulate edits). `snapshot-parser.ts` + `snapshot-diff.ts` parse and diff S3 snapshots.
-- **Solver clients** — `shapley-remote.ts` is the single source of truth for talking to the Rust service (compute, simulate, job start/poll/cancel, precompute sweep). `shapley-solver.ts` is the in-process TypeScript solver used only in local dev.
+- **Input builders** — `canonical-input-builder.ts` (bit-comparable to the Foundation reference), `shapley-input-builder.ts` (heuristic fallback), `live-shapley-input.ts`, `shapley-input-modifier.ts` (applies simulate edits). `snapshot-parser.ts` parses S3 snapshots; the epoch diff is computed in the Rust service (`diff-window.ts` holds the shared window validation).
+- **Solver clients** — `shapley-remote.ts` is the single source of truth for talking to the Rust service (compute, simulate, job start/poll/cancel, precompute sweep, network and contributor diff). `shapley-solver.ts` is the in-process TypeScript solver used only in local dev.
 - **Caching + safety** — `lru-cache.ts` (TTL + size-capped LRU used by the compute routes), `rate-limit.ts` (per-instance advisory IP limiter), `sweep-tag.ts` (S3 marker key per epoch).
 - **Feed helpers** — `live-topology-fetch.ts`, `economic-hub-fetch.ts`, `epoch-discovery.ts`, `fee-parser.ts`, `jupiter-price.ts`, `csv.ts`.
 
@@ -144,7 +146,7 @@ Typed Solana RPC client and Anchor-IDL decoder **stubs** awaiting the DoubleZero
 
 ### Rust service (`services/shapley-rs/`)
 
-An axum + tokio + rayon HTTP wrapper around `network-shapley-rs`. It exposes `POST /shapley`, `POST /simulate`, `POST /link-estimate`, async job endpoints (`/jobs/*`), and a precompute sweep (`/precompute/link-estimates`), persisting per-`(epoch, operator)` results to an S3-compatible cache so each one is computed once. Its Dockerfile is an OpenShift-compatible image (runs as a non-root user with gid=0, `chmod g=u`). Full detail — endpoints, the Redis Streams queue, the result cache, and bearer auth — is in [shapley-service.md](./shapley-service.md); the algorithm itself is in [shapley-pipeline.md](./shapley-pipeline.md).
+An axum + tokio + rayon HTTP wrapper around `network-shapley-rs`. It exposes `POST /shapley`, `POST /simulate`, `POST /link-estimate`, async job endpoints (`/jobs/*`), a precompute sweep (`/precompute/link-estimates`), and the epoch diff endpoints (`/diff`, `/diff/contributor/{code}`), persisting per-`(epoch, operator)` results and per-epoch diff shapes to an S3-compatible cache so each one is computed once. Its Dockerfile is an OpenShift-compatible image (runs as a non-root user with gid=0, `chmod g=u`). Full detail — endpoints, the Redis Streams queue, the result cache, and bearer auth — is in [shapley-service.md](./shapley-service.md); the algorithm itself is in [shapley-pipeline.md](./shapley-pipeline.md).
 
 ## Request flows
 
@@ -223,8 +225,8 @@ Every compute/proxy route caches; the mechanism and bounds vary by route. Verifi
 | `/api/shapley/baseline` | module-level cache | 5 min | 1 (singleton) |
 | `/api/shapley/simulate` | module-level `Map` (per-epoch baseline) | 30 min | 10 entries |
 | `/api/shapley/tracking` | in-memory LRU (keyed by `count`) | 30 min | 4 entries |
-| `/api/diff` | in-memory LRU (keyed by `from→to`) | 30 min | 16 entries |
-| `/api/diff/contributor/[code]` | in-memory LRU (keyed by `code:from→to`) | 30 min | 48 entries |
+| `/api/diff` | Rust service memory → S3 `diff/v1` → CDN `s-maxage=86400` | shapes immutable per epoch; `max-age=300, s-maxage=86400, stale-while-revalidate=604800` | one 28 KB shape per epoch |
+| `/api/diff/contributor/[code]` | same as `/api/diff` | same | same |
 | `/api/live/topology` / `stats` / `status` | ISR (`export const revalidate = 60`) + 60 s module cache (topology's lives in `lib/utils/live-topology-fetch.ts`, shared with the baseline route) | 60 s | — |
 | `/api/live/economic-hub` | module cache + ISR + CDN | 5 min (`max-age=300`) | 1 |
 | `/api/fees` | module cache + CDN | 10 min (`max-age=600, s-maxage=600, stale-while-revalidate=1800`) | 1 |
@@ -279,8 +281,8 @@ See [operations.md](./operations.md) for the operational detail; the building bl
 
 | Preset | Limit | Used by |
 |---|---|---|
-| `RATE_LIMIT_HEAVY` | 10 req / min | all compute routes + both diff routes (`shapley`, `shapley/simulate`, `shapley/baseline`, `shapley/tracking`, `shapley/jobs`, `link-value/jobs`, `diff`, `diff/contributor/[code]`) |
-| `RATE_LIMIT_STANDARD` | 60 req / min | (defined; not currently wired) |
+| `RATE_LIMIT_HEAVY` | 10 req / min | the six compute routes (`shapley`, `shapley/simulate`, `shapley/baseline`, `shapley/tracking`, `shapley/jobs`, `link-value/jobs`) |
+| `RATE_LIMIT_STANDARD` | 60 req / min | both diff proxy routes (`diff`, `diff/contributor/[code]`) |
 | `RATE_LIMIT_LOOSE` | 120 req / min | (defined; not currently wired) |
 
 The limiter is advisory by design — when no trusted IP can be identified the request proceeds rather than sharing one bucket across unknown callers, and the bucket map is bounded so a header-spoofing flood can't OOM the instance. It throttles pathological retries from a single client; it is not a global SLA.

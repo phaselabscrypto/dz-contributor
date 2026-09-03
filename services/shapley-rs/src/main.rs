@@ -4,12 +4,19 @@
 //! - `GET  /health`            -> liveness + crate version
 //! - `POST /shapley`           -> compute Shapley values for a coalition input
 //! - `POST /link-estimate`     -> per-link value-add for a focused operator
+//! - `GET  /diff`              -> network diff between two epochs
+//! - `GET  /diff/contributor/:code` -> one contributor's diff between two epochs
+//! - `POST /diff/precompute`   -> warm diff shapes for recent epochs
 
 use std::sync::Arc;
 
 use dz_shapley_service::AppState;
 use dz_shapley_service::cache::S3Cache;
-use dz_shapley_service::routes;
+use dz_shapley_service::diff_store::{
+    DiffStore, NoPersistence, S3ShapePersistence, ShapePersistence,
+};
+use dz_shapley_service::snapshot::S3SnapshotReader;
+use dz_shapley_service::{diff_poller, diff_routes, routes};
 
 use axum::{
     Router,
@@ -43,6 +50,12 @@ async fn main() -> anyhow::Result<()> {
     // ── Shared state for both roles ──────────────────────────────────────
     // S3 cache is a no-op when S3_CACHE_BUCKET is unset.
     let s3_cache = S3Cache::new().await;
+    let snapshot_reader = Arc::new(S3SnapshotReader::from_env().await);
+    let shape_persistence: Arc<dyn ShapePersistence> = match &s3_cache {
+        Some(cache) => Arc::new(S3ShapePersistence::from(cache.as_ref())),
+        None => Arc::new(NoPersistence),
+    };
+    let diff_store = Arc::new(DiffStore::new(snapshot_reader, shape_persistence));
     // Compute-endpoint auth posture, resolved once and FAIL-CLOSED by default.
     // Production sets `SHAPLEY_API_TOKEN` via a Secret. With no token, the
     // compute endpoints are served ONLY when `SHAPLEY_ALLOW_UNAUTHENTICATED=1`
@@ -79,12 +92,19 @@ async fn main() -> anyhow::Result<()> {
         s3_cache,
         api_token,
         jobs: dz_shapley_service::jobs::store_from_env(),
+        diff_store,
     });
 
     match role.as_str() {
         "api" | "--role=api" => run_api(state, serve_compute).await,
         "worker" | "--role=worker" => run_worker(state).await,
-        other => anyhow::bail!("unknown role {other:?} — expected `api` or `worker`"),
+        "diff-backfill" | "--role=diff-backfill" => {
+            diff_poller::backfill_once(Arc::clone(&state.diff_store)).await?;
+            Ok(())
+        }
+        other => {
+            anyhow::bail!("unknown role {other:?}, expected `api`, `worker`, or `diff-backfill`")
+        }
     }
 }
 
@@ -121,6 +141,7 @@ async fn run_api(state: Arc<AppState>, serve_compute: bool) -> anyhow::Result<()
                 "/jobs/:id",
                 get(routes::job_status).delete(routes::job_cancel),
             )
+            .merge(diff_routes::routes())
             .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
         app = app.merge(compute_routes);
     }
@@ -144,8 +165,8 @@ async fn run_api(state: Arc<AppState>, serve_compute: bool) -> anyhow::Result<()
     Ok(())
 }
 
-/// Worker role: a minimal `/health` listener for K8s probes plus the Stream
-/// consume loop. No compute HTTP routes. Both share a graceful-shutdown signal,
+/// Worker role: a minimal `/health` listener for K8s probes, the Stream
+/// consume loop, and the diff index poller. No compute HTTP routes. Both share a graceful-shutdown signal,
 /// so a SIGTERM stops accepting and lets the in-flight solve wind down (the
 /// terminationGracePeriod). Anything interrupted is recovered by the worker's
 /// XAUTOCLAIM sweep under at-least-once delivery, made safe by the result cache.
@@ -161,7 +182,7 @@ async fn run_worker(state: Arc<AppState>) -> anyhow::Result<()> {
             r?;
             tracing::info!("worker health server stopped");
         }
-        r = dz_shapley_service::worker::run(state) => {
+        r = dz_shapley_service::worker::run(Arc::clone(&state)) => {
             match r {
                 Ok(()) => tracing::info!("worker loop exited"),
                 Err(e) => {
@@ -169,6 +190,9 @@ async fn run_worker(state: Arc<AppState>) -> anyhow::Result<()> {
                     return Err(e);
                 }
             }
+        }
+        _ = diff_poller::run(Arc::clone(&state.diff_store)) => {
+            tracing::info!("diff poller exited");
         }
     }
     Ok(())

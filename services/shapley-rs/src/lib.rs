@@ -2,11 +2,18 @@
 //! This is not a public API; types may change without notice.
 
 pub mod cache;
+pub mod diff;
+pub mod diff_poller;
+pub mod diff_routes;
+pub mod diff_store;
 pub mod jobs;
 pub mod model;
 pub mod queue;
 pub mod routes;
+pub mod snapshot;
 pub mod worker;
+
+use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
@@ -34,4 +41,8 @@ pub struct AppState {
     /// replicas. `None` when `REDIS_URL` is unset — `/jobs/*` then 503 and the
     /// worker refuses to start, while the synchronous endpoints keep working.
     pub jobs: Option<jobs::RedisJobStore>,
+    /// Per-epoch diff shapes behind `/diff*` and the worker poller: memory,
+    /// then S3 under `diff/v1` when `S3_CACHE_BUCKET` is set, then an ingest
+    /// from the public snapshot bucket.
+    pub diff_store: Arc<diff_store::DiffStore>,
 }

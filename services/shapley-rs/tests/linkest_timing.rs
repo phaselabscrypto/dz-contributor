@@ -10,6 +10,10 @@
 //!
 //! Skips gracefully when the epoch-149 fixture is absent.
 
+mod common;
+
+use common::NeverReader;
+use dz_shapley_service::diff_store::{DiffStore, NoPersistence};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,6 +34,10 @@ fn app() -> Router {
         s3_cache: None,
         api_token: None,
         jobs: None,
+        diff_store: Arc::new(DiffStore::new(
+            Arc::new(NeverReader),
+            Arc::new(NoPersistence),
+        )),
     });
     Router::new()
         .route(
