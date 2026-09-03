@@ -11,7 +11,7 @@ checked against DZ line-by-line and we **never diverge again**.
 |---|---|
 | DZ orchestration | `doublezerofoundation/doublezero-offchain` tag **`contributor-rewards/v0.5.3`** |
 | DZ LP engine | `doublezerofoundation/network-shapley-rs` **v0.5.0** |
-| Our LP engine (fork) | `phaselabscrypto/network-shapley-rs` rev **`c9fc7d1`** (`services/shapley-rs/Cargo.toml`) — `src/` verified byte-identical to the rev we build |
+| Our LP engine (fork) | `phaselabscrypto/network-shapley-rs` tag **`phase-2026.09`** (`services/shapley-rs/Cargo.toml`) — `src/` verified byte-identical to the rev we build |
 | IBRL demand priority | **`0.0`** (the epoch-149 value; DZ PR #369 raised it to 20.0 *after* epoch 149 — re-pinning epochs means re-verifying, not a drive-by bump) |
 | Tuning | `operator_uptime=0.98`, `contiguity_bonus=5.0`, `demand_multiplier=1.0` |
 

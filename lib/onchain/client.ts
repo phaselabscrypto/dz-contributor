@@ -4,7 +4,7 @@
  * Live in production. `getSlot`, `getBlockTime` and `getEpochInfo` back the
  * measured epoch rate in `lib/utils/epoch-rate.ts`, which feeds every monthly
  * and yearly SOL projection in the app. `getProgramAccounts` and
- * `getAccountInfo` are still only used by `topology.ts` (scaffolding); the
+ * `getAccountInfo` are still only used by `topology.ts` (unimplemented); the
  * live on-chain reward paths (`rewards.ts`, `contributor-directory.ts`) use
  * `@solana/web3.js` `Connection` directly.
  *

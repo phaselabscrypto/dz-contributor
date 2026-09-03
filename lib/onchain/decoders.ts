@@ -1,28 +1,26 @@
 /**
- * ⚠️ SCAFFOLDING — NOT LIVE
+ * NOT IMPLEMENTED
  *
- * Borsh decoders for the DZ registry program (Metro / Device / Link /
- * Contributor). Every function in this file throws `OnchainNotConfigured`
- * until DZ ships the IDL and `idl-registry.ts` is flipped from
- * `stubRegistry` to `anchorRegistry`.
+ * Decoders for the Metro, Device and Link accounts on the DoubleZero
+ * serviceability program. Every function throws `OnchainNotConfigured`
+ * because no layout has been written for those three account types.
  *
- * See `lib/onchain/README.md` for the live-vs-stub matrix and the
- * activation checklist.
+ * This is our own remaining work, not an external dependency. No
+ * program IDL is required. `contributor-directory.ts` reads
+ * `AccountType::Contributor` from the same program using byte offsets
+ * verified against every live account, and `dz-rewards-record.ts`
+ * decodes reward records on the record program the same way. Follow
+ * either one.
  *
- * NB: this does NOT block contributor-rewards / contributor-directory
- * reads — those use their own verified decoders in `dz-rewards-record.ts`
- * and `contributor-directory.ts`, which read from different DZ programs
- * (record + serviceability) where the layouts are already known and
- * bit-verified against live mainnet data.
+ * See `lib/onchain/README.md` for what each stub needs.
  */
 
 export class OnchainNotConfigured extends Error {
   constructor(component: string) {
     super(
-      `On-chain decoder for ${component} is not configured yet — ` +
-        `pending DZ IDL. See lib/onchain/README.md for the activation ` +
-        `checklist; until then, use the malbeclabs HTTP source via ` +
-        `/api/live/* routes.`,
+      `On-chain decoder for ${component} is not implemented. ` +
+        `See lib/onchain/README.md; use the malbeclabs HTTP source via ` +
+        `/api/live/* routes instead.`,
     );
     this.name = "OnchainNotConfigured";
   }
@@ -66,13 +64,12 @@ export interface OnchainContributor {
 // ─────────────────────────────────────────────────────────────────────
 // Decoder registry
 //
-// All four decoders below delegate to the active registry. To swap from
-// stubs to real Anchor-backed decoders once DZ ships the IDL, change
-// the import below from `stubRegistry` to `anchorRegistry`. That's the
-// entire swap — every call site stays the same.
+// All four decoders below delegate to the active registry. Point this
+// import at a registry that implements the layouts and every call site
+// stays the same. `borsh-registry.ts` is the closest starting point.
 // ─────────────────────────────────────────────────────────────────────
 import { stubRegistry as registry } from "./idl-registry";
-// import { anchorRegistry as registry } from "./idl-registry";
+// import { borshRegistry as registry } from "./borsh-registry";
 
 export function decodeMetro(pubkey: string, data: Buffer): OnchainMetro {
   return registry.decodeMetro(pubkey, data);

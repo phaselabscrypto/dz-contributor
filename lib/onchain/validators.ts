@@ -1,19 +1,19 @@
 /**
- * ⚠️ SCAFFOLDING — NOT LIVE
+ * NOT IMPLEMENTED
  *
  * On-chain validator-payout reader. Per-epoch SOL paid to publishing
  * validators from the 45% pool.
  *
- * Currently returns `{ epochs: [], source: "stub" }` — the body fetches
- * program accounts then immediately discards them (see `void accounts`)
- * because the per-account decoder layout is not yet known.
+ * Returns `{ epochs: [], source: "stub" }`. The body fetches program
+ * accounts then discards them (see `void accounts`) because the payout
+ * record layout has not been written.
  *
- * Blocked on DZ Q13: rewards-program IDL + per-validator-payout record
- * layout. Once those land:
+ * No IDL is needed. Verify the layout against a live payout account,
+ * the way `dz-rewards-record.ts` verified the reward record. Then:
  *   1. Decode each account into `ValidatorEpochPayout` via borsh
  *   2. Remove the `void accounts;` line
- *   3. Verify against a known epoch's payouts
- *   4. Drop "scaffolding" tag from this docstring
+ *   3. Check against a known epoch's payouts
+ *   4. Drop the NOT IMPLEMENTED tag from this docstring
  *
  * See `lib/onchain/README.md` for the live-vs-stub matrix.
  * The `/api/onchain/validators` route is gated on `ONCHAIN_ENABLED` and
@@ -59,12 +59,12 @@ export async function fetchOnchainValidatorPayouts(): Promise<
   const programId = getProgramId("rewards");
   if (!programId) {
     throw new Error(
-      "DZ_REWARDS_PROGRAM_ID not configured — pending Foundation IDL",
+      "DZ_REWARDS_PROGRAM_ID not configured",
     );
   }
 
-  // Filter by the validator-payout discriminator. Currently a placeholder
-  // (0x10) — adjust once IDL lands.
+  // Filter by the validator-payout discriminator. 0x10 is an unverified
+  // guess; check it against a live account.
   void ACCOUNT_DISCRIMINATORS.epochReward;
 
   const accounts = await getProgramAccounts(programId);
@@ -72,7 +72,7 @@ export async function fetchOnchainValidatorPayouts(): Promise<
 
   // TODO: decode each account into ValidatorEpochPayout via borsh schema.
   //
-  // Expected shape (best guess pending IDL):
+  // Expected shape, unverified:
   //   pub struct ValidatorEpochPayout {
   //       pub discriminator: [u8; 8],
   //       pub epoch: u64,

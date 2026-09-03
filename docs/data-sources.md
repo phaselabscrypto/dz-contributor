@@ -52,11 +52,11 @@ The DoubleZero Foundation publishes immutable per-epoch JSON snapshots to a publ
 | Epoch floor | `MIN_DZ_EPOCH = 48` (earliest published epoch) |
 | Epoch discovery | Exponential probe + binary-search via HEAD requests; see `lib/utils/epoch-discovery.ts` |
 | Discovery cache | 5 min (`CACHE_TTL = 5 * 60 * 1000` in `epoch-discovery.ts`) |
-| Snapshot size | ~5 MB per epoch (comment in `app/api/snapshot/route.ts`) |
+| Snapshot size | 70-110 MB per epoch, measured (`lib/constants/config.ts`) |
 | Server LRU cache | 8 entries, TTL 5 min (`snapshotCache` in `app/api/snapshot/route.ts`) |
 | CDN headers | `public, max-age=3600, s-maxage=3600, stale-while-revalidate=86400` |
-| Fetch timeout | 30 s |
-| Consuming routes | `app/api/snapshot/route.ts`, `app/api/epochs/route.ts`, `app/api/shapley/route.ts`, `app/api/shapley/baseline/route.ts`, `app/api/diff/route.ts`, `app/api/diff/contributor/[code]/route.ts` |
+| Fetch timeout | 30 s in `app/api/snapshot/route.ts`; 120 s elsewhere (`SNAPSHOT_FETCH_TIMEOUT_MS`, `lib/constants/config.ts`), used by `lib/utils/epoch-shapley.ts`, `app/api/shapley/simulate/route.ts`, `app/api/shapley/jobs/route.ts`, and `app/api/link-value/precompute/route.ts` |
+| Consuming routes | `app/api/snapshot/route.ts`, `app/api/epochs/route.ts`, `app/api/shapley/route.ts` (via `lib/utils/epoch-shapley.ts`), `app/api/shapley/baseline/route.ts` (via `lib/utils/epoch-shapley.ts`), `app/api/shapley/precompute/route.ts` (via `lib/utils/epoch-shapley.ts`), `app/api/shapley/simulate/route.ts`, `app/api/shapley/jobs/route.ts`, `app/api/link-value/precompute/route.ts`, `app/api/diff/route.ts`, `app/api/diff/contributor/[code]/route.ts` |
 | Failure | 404 propagated when epoch not found; other S3 errors forwarded verbatim |
 
 Snapshots for completed epochs are immutable; the aggressive CDN TTL (1 h fresh, 24 h stale-while-revalidate) reflects this. Epoch discovery avoids a hard-coded ceiling by probing S3 directly; see `lib/utils/epoch-discovery.ts` for the algorithm.
@@ -98,7 +98,7 @@ The Foundation publishes a consolidated fee-and-payments CSV to a public GitHub 
 | Epoch coverage | Per-epoch columns for epochs ≥ 934; epochs 859–933 are estimated by averaging the `previous_fees` aggregate column over 75 epochs and are tagged `isEstimated: true` |
 | Failure | Upstream HTTP status forwarded verbatim; 500 on timeout or parse error |
 
-The CSV is updated manually by the Foundation at most once per Solana epoch (~2 days), making the 10-minute cache conservative.
+The CSV is updated manually by the Foundation at most once per Solana epoch (about 44 hours at current slot times, `lib/utils/epoch-rate.ts`), making the 10-minute cache conservative.
 
 ---
 
@@ -123,22 +123,22 @@ Token prices for SOL and 2Z are fetched from the Jupiter Price API v3 to denomin
 
 ## 7. Solana RPC and DZ ledger RPC
 
-Direct on-chain reads require two RPC endpoints: a standard Solana RPC for mainnet account queries, and a separate DZ ledger RPC for reading contributor-rewards records stored on the DZ cluster.
+Direct on-chain reads use two RPC endpoints: a standard Solana RPC for mainnet account queries, and a separate DZ ledger RPC for reading contributor-rewards records stored on the DZ ledger. Two more routes outside the `/api/onchain/*` namespace, `/api/validators/stake` and `/api/epoch-rate`, also call the Solana RPC directly and have no unconfigured state.
 
 | Fact | Value |
 |---|---|
 | Solana RPC env var | `SOLANA_RPC_URL` |
 | Solana RPC default | `https://api.mainnet-beta.solana.com` |
-| DZ ledger RPC env var | `DZ_LEDGER_RPC_URL` (required; no default — see note) |
-| Feature gate | `ONCHAIN_ENABLED` (true when `DZ_REGISTRY_PROGRAM_ID` is set, or `ONCHAIN_ENABLED=1`) |
-| Program ID env vars | `DZ_REGISTRY_PROGRAM_ID`, `DZ_REWARDS_PROGRAM_ID` |
+| DZ ledger RPC env var | `DZ_LEDGER_RPC_URL` (required, no default; see the note below) |
+| Feature gate | `ONCHAIN_ENABLED` (true when `DZ_REGISTRY_PROGRAM_ID` is set, or `ONCHAIN_ENABLED=1`); does not gate `/api/validators/stake` or `/api/epoch-rate` |
+| Program ID env vars | `DZ_REGISTRY_PROGRAM_ID` (unset; the serviceability program that owns these accounts is known and hardcoded in `lib/onchain/contributor-directory.ts`), `DZ_REWARDS_PROGRAM_ID` (known: `dzrevZC94tBLwuHw1dyynZxaXTWyp7yocsinyEVPtt4`, in `.env.example`) |
 | Record program ID | `dzrecxigtaZQ3gPmt2X5mDkYigaruFR1rHCqztFTvx7` (constant in `lib/onchain/dz-rewards-record.ts`) |
-| Relevant files | `lib/onchain/program-ids.ts`, `lib/onchain/dz-rewards-record.ts` |
-| Consuming routes | `app/api/onchain/topology/route.ts`, `app/api/onchain/validators/route.ts`, `app/api/onchain/contributors/route.ts`, `app/api/onchain/rewards/route.ts`, `app/api/onchain/contributor-rewards/route.ts` |
+| Relevant files | `lib/onchain/program-ids.ts`, `lib/onchain/dz-rewards-record.ts`, `lib/onchain/client.ts` (`getVoteAccounts`, `getEpochInfo`, `getBlockTime`) |
+| Consuming routes | `app/api/onchain/topology/route.ts`, `app/api/onchain/validators/route.ts`, `app/api/onchain/contributors/route.ts`, `app/api/onchain/rewards/route.ts`, `app/api/onchain/contributor-rewards/route.ts`, `app/api/validators/stake/route.ts` (`getVoteAccounts`), `app/api/epoch-rate/route.ts` (`getEpochInfo` + `getBlockTime`, via `lib/utils/epoch-rate.ts`) |
 | Failure (unconfigured) | `topology` and `validators` pre-flight-check configuration and return 503 with a stable `{ ready: false, reason: "…" }` shape; `contributors`, `rewards`, and `contributor-rewards` attempt the read directly and surface the failure as a 502 |
-| Failure (configured, RPC error) | 502 |
+| Failure (configured, RPC error) | 502 (`/api/epoch-rate` instead falls back to a fixed measurement and always answers 200) |
 
-`DZ_LEDGER_RPC_URL` has no built-in default because baking an endpoint value into source would expose a paid API key in the deployed JS bundle. Set it in `.env.local` for development; see `.env.example` for the recommended public endpoint. `DZ_REGISTRY_PROGRAM_ID` and `DZ_REWARDS_PROGRAM_ID` are currently placeholders pending the Foundation publishing the on-chain IDL.
+`DZ_LEDGER_RPC_URL` has no built-in default because baking an endpoint value into source would expose a paid API key in the deployed JS bundle. Set it in `.env.local` for development; see `.env.example` for the recommended public endpoint. `DZ_REGISTRY_PROGRAM_ID` remains unset because the registry reader that would use it is unimplemented. The serviceability program that owns Metro, Device, Link, and Contributor accounts is known: `contributor-directory.ts` hardcodes `ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv` and decodes contributor accounts from it by verified byte offsets. `DZ_REWARDS_PROGRAM_ID` is already known and set in `.env.example`.
 
 ---
 
@@ -149,7 +149,7 @@ When the Foundation ships frozen per-epoch CSV inputs, the app can consume them 
 | Fact | Value |
 |---|---|
 | Env var | `DZ_CANONICAL_INPUTS_URL` |
-| URL pattern | e.g. `https://…/epoch-{N}/` — `{N}` is replaced with the epoch number |
+| URL pattern | e.g. `https://…/epoch-{N}/`, where `{N}` is replaced with the epoch number |
 | Files fetched | `private_links.csv`, `devices.csv`, `public_links.csv`, `demand.csv` |
 | Module | `lib/utils/canonical-inputs.ts` |
 | Consuming routes | `app/api/shapley/route.ts` (highest-priority input source when set) |
@@ -170,12 +170,12 @@ When `DZ_CANONICAL_INPUTS_URL` is unset, all Shapley routes derive inputs from t
 | Probe timeout | 8 s per source |
 | CDN headers | `public, max-age=15, s-maxage=15, stale-while-revalidate=60` |
 | Response shape | `{ overall, checkedAt, sources: [{ name, host, status, latencyMs, httpStatus?, errorCode? }] }` |
-| `host` field | Hostname only — never includes path, query string, or credentials |
+| `host` field | Hostname only (never path, query string, or credentials) |
 | `errorCode` values | `timeout` \| `network` \| `parse` \| `unknown` (raw error text is discarded) |
 | Status values | `ok` when latency ≤ 3 s and HTTP 2xx; `degraded` when latency > 3 s or HTTP 4xx; `down` on HTTP 5xx or network failure; `disabled` for sources that are not configured (e.g. `shapley-service` without `SHAPLEY_SERVICE_URL`, `solana-rpc` without `SOLANA_RPC_URL`) |
 | UI consumers | `/status` page (`app/status/page.tsx`), sidebar NetworkPulse component |
 
-Response hardening (security fix H17): full URLs, paths, and auth tokens stay inside the probe closure on the server and are never echoed to the client.
+Response hardening: full URLs, paths, and auth tokens stay inside the probe closure on the server and are never echoed to the client.
 
 ---
 
@@ -195,4 +195,6 @@ Response hardening (security fix H17): full URLs, paths, and auth tokens stay in
 | Jupiter prices | `https://lite-api.jup.ag/price/v3` | 60 s | `app/api/prices/route.ts`, `lib/utils/fee-parser.ts` | 502 |
 | Solana RPC | `SOLANA_RPC_URL` | On-demand | `app/api/onchain/*` | 503 unconfigured (`topology`/`validators` only) / 502 |
 | DZ ledger RPC | `DZ_LEDGER_RPC_URL` | On-demand | `app/api/onchain/*` | 503 unconfigured (`topology`/`validators` only) / 502 |
+| Validator stake lookup | `SOLANA_RPC_URL` | 60 s hit / 5 min miss | `app/api/validators/stake/route.ts` | 400/404 on bad input; 502 on RPC failure; never 503 |
+| Measured epoch rate | `SOLANA_RPC_URL` | 1 h route; 6 h measurement | `app/api/epoch-rate/route.ts` | Always 200 (falls back to a real measurement) |
 | Canonical Shapley inputs | `DZ_CANONICAL_INPUTS_URL` | On-demand | `app/api/shapley/route.ts` | Falls back to snapshot inputs |
