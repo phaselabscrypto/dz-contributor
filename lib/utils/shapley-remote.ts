@@ -614,3 +614,98 @@ export async function getLinkEstimateJob(
     result: raw.result,
   };
 }
+
+// ── Snapshot diff index ─────────────────────────────────────────────────
+
+const DIFF_TIMEOUT_MS = 20_000;
+
+/**
+ * Failure talking to the service's `/diff*` endpoints: a client-side
+ * timeout, a network error, or a status other than 200/400/404.
+ */
+export class DiffServiceError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly timedOut: boolean = false,
+  ) {
+    super(message);
+    this.name = "DiffServiceError";
+  }
+}
+
+/** Statuses the proxies forward verbatim; anything else is a DiffServiceError. */
+const DIFF_FORWARDED_STATUSES = new Set([200, 400, 404]);
+
+async function fetchDiffPath(
+  path: string,
+  label: string,
+  timeoutMs: number,
+): Promise<{ status: number; body: string }> {
+  let response: Response;
+  try {
+    response = await fetch(`${jobsBase()}${path}`, {
+      method: "GET",
+      headers: buildHeaders(),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      (err.name === "TimeoutError" || err.name === "AbortError")
+    ) {
+      throw new DiffServiceError(
+        `${label} timed out after ${timeoutMs}ms`,
+        undefined,
+        true,
+      );
+    }
+    throw new DiffServiceError(
+      `${label} request failed: ${err instanceof Error ? err.name : "unknown"}`,
+    );
+  }
+
+  const body = await response.text().catch(() => "");
+  if (!DIFF_FORWARDED_STATUSES.has(response.status)) {
+    const detail = body.slice(0, MAX_ERROR_DETAIL_CHARS);
+    throw new DiffServiceError(
+      `${label} HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
+      response.status,
+    );
+  }
+  return { status: response.status, body };
+}
+
+/**
+ * `GET {base}/diff?from&to`. Returns the upstream status and raw body so the
+ * proxy can forward bytes. Throws `DiffServiceError` on timeout or a status
+ * other than 200/400/404.
+ */
+export async function fetchNetworkDiffRemote(
+  from: number,
+  to: number,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ status: number; body: string }> {
+  return fetchDiffPath(
+    `/diff?from=${from}&to=${to}`,
+    "network diff",
+    opts.timeoutMs ?? DIFF_TIMEOUT_MS,
+  );
+}
+
+/**
+ * `GET {base}/diff/contributor/{code}?from&to`. Same contract as
+ * {@link fetchNetworkDiffRemote}; the body omits `name`.
+ */
+export async function fetchContributorDiffRemote(
+  code: string,
+  from: number,
+  to: number,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ status: number; body: string }> {
+  return fetchDiffPath(
+    `/diff/contributor/${encodeURIComponent(code)}?from=${from}&to=${to}`,
+    "contributor diff",
+    opts.timeoutMs ?? DIFF_TIMEOUT_MS,
+  );
+}

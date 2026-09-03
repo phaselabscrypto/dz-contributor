@@ -99,6 +99,7 @@ const KNOWN_SHAPLEY_ENDPOINTS = [
   "/simulate",
   "/link-estimate",
   "/health",
+  "/diff",
 ];
 
 /**
