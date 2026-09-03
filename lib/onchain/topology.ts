@@ -1,19 +1,22 @@
 /**
- * ⚠️ SCAFFOLDING — NOT LIVE
+ * NOT IMPLEMENTED
  *
  * On-chain topology fetcher. Returns the same `LiveTopology` shape the
- * malbeclabs HTTP source returns, so the rest of the app doesn't care
+ * malbeclabs HTTP source returns, so the rest of the app does not care
  * which source is active.
  *
- * Currently throws `OnchainNotConfigured` on every call because the
- * Metro / Device / Link / Contributor decoders in `decoders.ts` are
- * stubs. `isOnchainReady()` returns false unless both
- * `DZ_REGISTRY_PROGRAM_ID` and `ONCHAIN_ENABLED=1` are configured —
- * which they aren't in production today.
+ * Throws `OnchainNotConfigured` on every call because the Metro, Device
+ * and Link decoders in `decoders.ts` are stubs. `isOnchainReady()`
+ * returns false unless both `DZ_REGISTRY_PROGRAM_ID` and
+ * `ONCHAIN_ENABLED=1` are set, and neither is set in production.
  *
- * The single live path through this module is `isOnchainReady()` — used
- * by `/api/onchain/topology` to return 503 cleanly. See
- * `lib/onchain/README.md` for the activation checklist.
+ * That gate was written when the owning program was thought unknown. It
+ * is known: see `DZ_SERVICEABILITY_PROGRAM_ID` in
+ * `contributor-directory.ts`. What is missing is the layout work for
+ * the three account types.
+ *
+ * The one live path here is `isOnchainReady()`, used by
+ * `/api/onchain/topology` to return 503 cleanly.
  */
 
 import type {
@@ -51,10 +54,10 @@ interface FetchTopologyResult {
 /**
  * Fetch the full topology directly from chain.
  *
- * Pending DZ IDL — we filter `getProgramAccounts` by a discriminator memcmp
- * for each account type. Once the real IDL lands, the discriminators in
- * `program-ids.ts` swap to the real 8-byte anchor discriminators and the
- * decoders become real.
+ * Filters `getProgramAccounts` by a one-byte account-type memcmp per
+ * account type. The discriminator values in `program-ids.ts` are
+ * unverified guesses, so this path cannot return data until they are
+ * checked against live accounts.
  */
 export async function fetchOnchainTopology(): Promise<FetchTopologyResult> {
   if (!isOnchainReady()) {
@@ -201,14 +204,15 @@ export async function fetchOnchainTopology(): Promise<FetchTopologyResult> {
 }
 
 /**
- * Encode a 1-byte discriminator into a base58-encoded string the way the
- * Solana RPC `memcmp` filter expects. Once the real anchor 8-byte
- * discriminators are wired, swap this for a base58-encoder helper.
+ * Encode a 1-byte account-type discriminant into a base58 string the
+ * way the Solana RPC `memcmp` filter expects. `contributor-directory.ts`
+ * does the same with `bs58.encode`, which is the better approach if this
+ * module is rewritten.
  */
 function encodeDisc(byte: number): string {
   // Base58 of a single byte = the alphabet character at that index for
   // values < 58; for values >= 58 we fall back to a 2-char encoding.
-  // For our placeholder discriminators (0x01..0x04) this is fine.
+  // Fine for the single-byte discriminant values used here.
   const ALPHABET =
     "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
   if (byte < ALPHABET.length) return ALPHABET[byte];

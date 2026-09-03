@@ -6,9 +6,10 @@
  * `lib/onchain/idl/schemas.ts`, encodes them with borsh, and round-trips
  * through `borshRegistry`. Asserts the decoded shape matches the input.
  *
- * Today this exercises the placeholder schemas. When DZ ships the real
- * IDL, this file becomes a regression pin: as long as it passes, we know
- * the registry plumbing is intact regardless of schema shape changes.
+ * Today this exercises the placeholder schemas. Once the layouts are
+ * verified against live accounts, this file becomes a regression pin: as
+ * long as it passes, the registry plumbing is intact regardless of
+ * schema shape changes.
  *
  * Usage:
  *   npx tsx scripts/test-borsh-registry.ts
@@ -178,7 +179,7 @@ function main() {
       }
     }
     console.log("\nSkipping decode tests (haveSchemas=false).");
-    console.log("Once DZ ships the real IDL, set haveSchemas=true and re-run.");
+    console.log("Verify the layouts against live accounts, set haveSchemas=true, re-run.");
   } else {
     // Real schemas — exercise every decoder.
     testMetro();
