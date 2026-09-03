@@ -1,9 +1,9 @@
 # On-chain reader status
 
-This directory contains DZ ledger / Solana mainnet readers. **Not all
-files are live**: the pieces below describe which paths are bit-
-verified against on-chain data and which are scaffolding awaiting
-DZ Foundation work.
+This directory contains DZ ledger and Solana mainnet readers. **Not
+all files are live**: the sections below say which paths are verified
+against on-chain data and which are stubs waiting on layout work of
+our own. Nothing here waits on a program IDL.
 
 ## ✅ Live (verified end-to-end)
 
@@ -14,57 +14,61 @@ into production API routes and the site UI depends on them.
 |---|---|---|
 | `dz-rewards-record.ts` | `RecordData` header + borsh `ShapleyOutputStorage` payload | Decoded against live epoch 117; matches Foundation CLI bit-for-bit. See `scripts/verify-derive-and-decode.ts`. |
 | `rewards.ts` | All contributor-rewards records on the DZ ledger (`getProgramAccounts` + memcmp filter on authority) | Discovery + decode verified for 3+ epochs. See `scripts/decode-live-rewards.ts`. |
-| `contributor-directory.ts` | All `AccountType::Contributor` accounts from the DZ serviceability program | Cross-checked against the gist's known reward keys. All 14 contributors resolve correctly. |
+| `contributor-directory.ts` | All `AccountType::Contributor` accounts from the DZ serviceability program | Byte layout verified by decoding every live account. All 14 contributors resolve, and their owner keys match the reward rows. See `scripts/verify-contributor-directory.ts`. |
 
 These modules use `@solana/web3.js Connection` directly, require
 `DZ_LEDGER_RPC_URL` to be set, and show clear errors when it's not.
 
-## ⚠️ Scaffolding (stubbed, pending DZ IDL)
+## Not implemented (stubs)
 
 These modules exist so call sites can be wired against a stable
-function signature **before** the underlying decoders are available.
-Every call currently throws `OnchainNotConfigured` or returns
-`{ epochs: [], source: "stub" }`.
+function signature before the decoders are written. Every call throws
+`OnchainNotConfigured` or returns `{ epochs: [], source: "stub" }`.
 
-| Module | What it would read | What's blocking |
+None of them needs a program IDL. The live modules above read their
+accounts by decoding verified byte offsets. The same approach applies
+here. What is missing is the layout work.
+
+| Module | What it would read | What it needs |
 |---|---|---|
-| `decoders.ts` | Metro / Device / Link / Contributor records via Anchor IDL | Blocked on the Foundation's program IDL, not yet published: needs the IDL JSON dropped at `lib/onchain/idl/dz-registry.json` and `idl-registry.ts` swapped from `stubRegistry` → `anchorRegistry`. |
-| `topology.ts` | Full network topology from on-chain registry | Same: depends on `decoders.ts`. |
-| `validators.ts` | Per-epoch validator payout history (SOL) | Blocked on the Foundation's program IDL, not yet published: needs `DZ_REWARDS_PROGRAM_ID` set and the rewards-program IDL. |
-| `client.ts` | Hand-rolled JSON-RPC client used only by `topology.ts` | Kept thin until the IDL lands; will likely be replaced by `@solana/web3.js` at that point. |
+| `decoders.ts` | Metro, Device, and Link accounts | The byte layout of each account type on the serviceability program, verified against live accounts the way `contributor-directory.ts` verified `AccountType::Contributor`. Then point `decoders.ts` at a registry that implements them. |
+| `topology.ts` | Full network topology from on-chain accounts | Depends on `decoders.ts`. Its `DZ_REGISTRY_PROGRAM_ID` gate predates the known program id. |
+| `validators.ts` | Per-epoch validator payout history (SOL) | The payout record layout on the rewards program. `DZ_REWARDS_PROGRAM_ID` is already known. |
+| `client.ts` | Hand-rolled JSON-RPC client used only by `topology.ts` | Nothing. It works. `@solana/web3.js` would replace it if `topology.ts` is rewritten. |
+
+`idl-registry.ts` and `borsh-registry.ts` were written on an earlier
+assumption that an Anchor IDL was required. `borsh-registry.ts` is the
+closer starting point: it decodes with raw borsh and reads its schemas
+from `idl/schemas.ts`, where they are still placeholders
+(`haveSchemas = false`).
+
+The `ACCOUNT_DISCRIMINATORS` table in `program-ids.ts` holds guesses
+from before the layout work. It lists Contributor as `0x04`. The
+verified value is `10`. Treat every entry in that table as unchecked.
 
 API routes that consume these modules (`/api/onchain/topology`,
-`/api/onchain/validators`) are gated behind `ONCHAIN_ENABLED` env var
-and return **503 with a stable shape** when the flag is off. Frontend
-treats them as soft-disabled.
+`/api/onchain/validators`) sit behind `ONCHAIN_ENABLED` and return 503
+with a stable shape when the flag is off. The frontend treats them as
+soft-disabled.
 
-## Activation checklist (when DZ ships the IDL)
+## What the live modules already prove
 
-1. Drop `idl/dz-registry.json` (anchor IDL)
-2. In `idl-registry.ts`, swap the export:
-   ```ts
-   // export const registry: IdlRegistry = stubRegistry;
-   export const registry: IdlRegistry = anchorRegistry;
-   ```
-3. Set Vercel env:
-   ```
-   vercel env add DZ_REGISTRY_PROGRAM_ID production
-   vercel env add DZ_REWARDS_PROGRAM_ID production
-   vercel env add SOLANA_RPC_URL production
-   vercel env add ONCHAIN_ENABLED production   # set to 1
-   ```
-4. Trigger a Vercel redeploy
-5. Verify `/api/onchain/topology` and `/api/onchain/validators` return
-   live data instead of 503
+`contributor-directory.ts` reads `AccountType::Contributor` from the
+DoubleZero serviceability program at
+`ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv`. Its header documents the
+layout: account type at byte 0, owner pubkey at bytes 1 to 33, index at
+33 to 49, bump seed at 49, status at 50, code length at 51 to 55, then
+the code as UTF-8. Those offsets were verified by decoding every live
+contributor account. `dz-rewards-record.ts` decodes reward records the
+same way and matches the Foundation CLI byte for byte.
 
-## Why scaffolding rather than no code at all
+Metro, Device, and Link are account types on that same program. Reading
+them is the work above, repeated for three more layouts.
 
-Two reasons:
+## Why stubs rather than no code at all
 
-1. **Call-site stability.** Every consumer that wants on-chain reads
-   (live-topology fallback, validator detail pages, etc.) can wire
-   against the function signatures today. Activation is one
-   `idl-registry.ts` line swap and an env-var flip.
-2. **Discoverability.** A new contributor to this repo can grep for
-   `OnchainNotConfigured` and immediately see what's pending vs live.
-   Adding a stub is loud; missing scaffolding is silent.
+1. **Call-site stability.** Consumers that want on-chain reads can wire
+   against the function signatures today.
+2. **Discoverability.** Grep for `OnchainNotConfigured` to see what is
+   unimplemented against what is live. A stub is loud. Missing
+   scaffolding is silent.

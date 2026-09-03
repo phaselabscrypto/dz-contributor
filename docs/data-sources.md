@@ -131,14 +131,14 @@ Direct on-chain reads use two RPC endpoints: a standard Solana RPC for mainnet a
 | Solana RPC default | `https://api.mainnet-beta.solana.com` |
 | DZ ledger RPC env var | `DZ_LEDGER_RPC_URL` (required, no default; see the note below) |
 | Feature gate | `ONCHAIN_ENABLED` (true when `DZ_REGISTRY_PROGRAM_ID` is set, or `ONCHAIN_ENABLED=1`); does not gate `/api/validators/stake` or `/api/epoch-rate` |
-| Program ID env vars | `DZ_REGISTRY_PROGRAM_ID` (unset, pending the Foundation's on-chain IDL), `DZ_REWARDS_PROGRAM_ID` (known: `dzrevZC94tBLwuHw1dyynZxaXTWyp7yocsinyEVPtt4`, in `.env.example`) |
+| Program ID env vars | `DZ_REGISTRY_PROGRAM_ID` (unset; the serviceability program that owns these accounts is known and hardcoded in `lib/onchain/contributor-directory.ts`), `DZ_REWARDS_PROGRAM_ID` (known: `dzrevZC94tBLwuHw1dyynZxaXTWyp7yocsinyEVPtt4`, in `.env.example`) |
 | Record program ID | `dzrecxigtaZQ3gPmt2X5mDkYigaruFR1rHCqztFTvx7` (constant in `lib/onchain/dz-rewards-record.ts`) |
 | Relevant files | `lib/onchain/program-ids.ts`, `lib/onchain/dz-rewards-record.ts`, `lib/onchain/client.ts` (`getVoteAccounts`, `getEpochInfo`, `getBlockTime`) |
 | Consuming routes | `app/api/onchain/topology/route.ts`, `app/api/onchain/validators/route.ts`, `app/api/onchain/contributors/route.ts`, `app/api/onchain/rewards/route.ts`, `app/api/onchain/contributor-rewards/route.ts`, `app/api/validators/stake/route.ts` (`getVoteAccounts`), `app/api/epoch-rate/route.ts` (`getEpochInfo` + `getBlockTime`, via `lib/utils/epoch-rate.ts`) |
 | Failure (unconfigured) | `topology` and `validators` pre-flight-check configuration and return 503 with a stable `{ ready: false, reason: "…" }` shape; `contributors`, `rewards`, and `contributor-rewards` attempt the read directly and surface the failure as a 502 |
 | Failure (configured, RPC error) | 502 (`/api/epoch-rate` instead falls back to a fixed measurement and always answers 200) |
 
-`DZ_LEDGER_RPC_URL` has no built-in default because baking an endpoint value into source would expose a paid API key in the deployed JS bundle. Set it in `.env.local` for development; see `.env.example` for the recommended public endpoint. `DZ_REGISTRY_PROGRAM_ID` remains unset pending the Foundation publishing the on-chain IDL. `DZ_REWARDS_PROGRAM_ID` is already known and set in `.env.example`.
+`DZ_LEDGER_RPC_URL` has no built-in default because baking an endpoint value into source would expose a paid API key in the deployed JS bundle. Set it in `.env.local` for development; see `.env.example` for the recommended public endpoint. `DZ_REGISTRY_PROGRAM_ID` remains unset because the registry reader that would use it is unimplemented. The serviceability program that owns Metro, Device, Link, and Contributor accounts is known: `contributor-directory.ts` hardcodes `ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv` and decodes contributor accounts from it by verified byte offsets. `DZ_REWARDS_PROGRAM_ID` is already known and set in `.env.example`.
 
 ---
 

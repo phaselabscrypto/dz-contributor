@@ -46,7 +46,7 @@ Details: `docs/shapley-pipeline.md` (Limits) and `docs/shapley-service.md` (Inpu
 ## Known gaps
 
 - The progress screen on `/simulate` cannot tell a queued job from a solve that is still starting; both read as starting.
-- The on-chain registry decoders in `lib/onchain` wait for the Foundation's program IDL. Reward records, contributor directory, and vote-account stake read live today.
+- `GET /api/onchain/topology` and `GET /api/onchain/validators` return `503`. The Metro, Device, and Link account layouts are not written yet. This is our own remaining work, not an external dependency: those accounts sit on the DoubleZero serviceability program that `contributor-directory.ts` already reads, and its `AccountType::Contributor` offsets were verified against every live account. Decoding the other account types takes the same layout work. No program IDL is required. The `decoders.ts` and `idl-registry.ts` scaffolding was written on an earlier assumption that one was.
 - Open engineering notes are in `services/shapley-rs/TODO.md`.
 
 ## Not included, on purpose

@@ -52,7 +52,7 @@ flowchart TD
 
     compute --> snaps
     compute --> rust
-    onchain -. "reward records live;<br/>registry reads 503 until the IDL lands" .-> rpc
+    onchain -. "reward records live;<br/>registry reads 503, layouts unwritten" .-> rpc
 
     rust --> redis
     rust --> s3cache
@@ -128,7 +128,7 @@ There are **32** `route.ts` files. They fall into four behavioral groups:
 
 - **Proxy / aggregate**: fetch an upstream server-side, cache, and return JSON. Examples: `live/*`, `epochs`, `snapshot`, `fees`, `prices`, `publishers`, `economics/projection`, `epoch-rate`, `health`, `diff`, `diff/contributor/[code]`.
 - **Compute**: build a Shapley input and call the Rust service, or run a non-trivial on-chain lookup: `shapley`, `shapley/baseline`, `shapley/simulate`, `shapley/tracking`, `shapley/jobs` (+ `[id]`), `shapley/precompute`, `link-value/jobs` (+ `[id]`), `link-value/precompute`, `validators/stake`. Seven of these carry `RATE_LIMIT_HEAVY`; `validators/stake` carries `RATE_LIMIT_STANDARD` instead; `link-value/precompute` has no IP rate limit and relies on its `CRON_SECRET` check. Two more `RATE_LIMIT_HEAVY` routes, `diff` and `diff/contributor/[code]`, live in the proxy group above (see [Security posture](#security-posture-summary)).
-- **On-chain**: `onchain/{topology,validators}` pre-flight-check configuration and return `503` with a stable `{ ready: false, reason }` shape until the registry IDL lands; `onchain/{contributors,rewards,contributor-rewards}` read live from the DZ ledger and surface a `502` on failure instead (see [`lib/onchain`](#libonchain)).
+- **On-chain**: `onchain/{topology,validators}` pre-flight-check configuration and return `503` with a stable `{ ready: false, reason }` shape while the registry account layouts are unwritten; `onchain/{contributors,rewards,contributor-rewards}` read live from the DZ ledger and return a `502` on failure instead (see [`lib/onchain`](#libonchain)).
 - **Meta**: `methodology` (machine-readable formula/source manifest) and `vitals` (Web Vitals sink; always `204`, logs only outside production).
 
 ### `lib/utils`
@@ -144,9 +144,9 @@ The builders, solver clients, and caches that the routes compose:
 
 ### `lib/onchain`
 
-Three modules are live: `dz-rewards-record.ts` and `rewards.ts` read contributor-rewards records from the DZ ledger, and `contributor-directory.ts` reads the contributor directory from the same ledger. A fourth, `vote-stake.ts`, resolves activated stake for any Solana vote account and backs `/api/validators/stake`. The Metro/Device/Link/Contributor registry decoders (`decoders.ts`, `idl-registry.ts`, `topology.ts`, `validators.ts`) remain stubs awaiting the Foundation's on-chain IDL.
+Three modules are live: `dz-rewards-record.ts` and `rewards.ts` read contributor-rewards records from the DZ ledger, and `contributor-directory.ts` reads the contributor directory from the same ledger. A fourth, `vote-stake.ts`, resolves activated stake for any Solana vote account and backs `/api/validators/stake`. The Metro/Device/Link registry decoders (`decoders.ts`, `idl-registry.ts`, `topology.ts`, `validators.ts`) are still stubs. They need the byte layout for those three account types, which is unwritten. They do not need a program IDL: the accounts belong to the DoubleZero serviceability program (`ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv`) that `contributor-directory.ts` already reads by verified byte offsets, and `dz-rewards-record.ts` decodes reward records the same way.
 
-`program-ids.ts` defines `SOLANA_RPC_URL` (defaults to `https://api.mainnet-beta.solana.com`), `DZ_REGISTRY_PROGRAM_ID`, `DZ_REWARDS_PROGRAM_ID`, and the `ONCHAIN_ENABLED` toggle. The live reward paths separately require `DZ_LEDGER_RPC_URL`, which has no default: a baked-in value would expose a paid RPC key in the deployed bundle. Until the registry IDL lands, `/api/onchain/topology` and `/api/onchain/validators` return `503` with a stable shape; `/api/onchain/contributors`, `/api/onchain/rewards`, and `/api/onchain/contributor-rewards` read live and return `502` only if the upstream call fails. The activation checklist for the registry decoders lives in `lib/onchain/README.md`.
+`program-ids.ts` defines `SOLANA_RPC_URL` (defaults to `https://api.mainnet-beta.solana.com`), `DZ_REGISTRY_PROGRAM_ID`, `DZ_REWARDS_PROGRAM_ID`, and the `ONCHAIN_ENABLED` toggle. The live reward paths separately require `DZ_LEDGER_RPC_URL`, which has no default: a baked-in value would expose a paid RPC key in the deployed bundle. While the registry layouts are unwritten, `/api/onchain/topology` and `/api/onchain/validators` return `503` with a stable shape; `/api/onchain/contributors`, `/api/onchain/rewards`, and `/api/onchain/contributor-rewards` read live and return `502` only if the upstream call fails. What each stub still needs is listed in `lib/onchain/README.md`.
 
 ### Rust service (`services/shapley-rs/`)
 
@@ -263,7 +263,7 @@ Each fact has exactly one upstream owner. Detail (shapes, fallback chains) is in
 | Historical 2Z fee distribution | DZ Foundation | `raw.githubusercontent.com/doublezerofoundation/fees/main/fees_and_payments_consolidated.csv` | manual (~per epoch) |
 | Spot prices (2Z, SOL) | Jupiter | `lite-api.jup.ag/price/v3` | 60 s |
 | Contributor directory + reward records | DZ ledger | `DZ_LEDGER_RPC_URL` (required, no default) | on-demand (`502` on failure) |
-| Registry topology + validator payouts | Solana RPC | `SOLANA_RPC_URL` (default `api.mainnet-beta.solana.com`) | stubbed (`503`) pending Foundation IDL |
+| Registry topology + validator payouts | Solana RPC | `SOLANA_RPC_URL` (default `api.mainnet-beta.solana.com`) | not implemented (`503`); account layouts unwritten |
 
 The publisher feed treats Foundation exports as authoritative and malbec as a best-effort enrichment overlay (`app/api/publishers/route.ts`). The earliest published snapshot epoch is `MIN_DZ_EPOCH = 48` (`lib/constants/config.ts`); no upper bound is pinned; routes let the S3 `404` reject epochs that don't exist yet.
 

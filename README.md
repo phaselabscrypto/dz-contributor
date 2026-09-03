@@ -27,7 +27,7 @@ dz-contributor/
 ├── components/             UI primitives + page clients
 ├── lib/
 │   ├── hooks/              SWR hooks for live data + baseline shapley
-│   ├── onchain/            Solana RPC + DZ ledger readers (3 live, registry decoders pending IDL)
+│   ├── onchain/            Solana RPC + DZ ledger readers (3 live; Metro/Device/Link layouts unwritten)
 │   ├── types/              Wire types for snapshots, topology, etc.
 │   └── utils/              Shapley input builders + heuristics + CSV
 └── services/
@@ -87,7 +87,7 @@ All API routes return JSON. Cached server-side; SWR-cached client-side.
 | `GET /api/methodology` | Machine-readable formulas and sources. |
 | `GET /api/health` | Source-feed health aggregator. Vercel cron every 15 minutes. |
 | `POST /api/vitals` | Web vitals sink. No-op until a metrics backend is wired. |
-| `GET /api/onchain/{topology,validators}` | `503` until the DZ registry program IDL lands. |
+| `GET /api/onchain/{topology,validators}` | `503`. The Metro, Device, and Link account layouts are not written yet. |
 | `GET /api/onchain/{contributors,rewards,contributor-rewards}` | Live reads from the DZ ledger. `502` on an upstream failure. |
 
 ## Architecture
@@ -98,7 +98,7 @@ All API routes return JSON. Cached server-side; SWR-cached client-side.
 - **dz/economic-hub**: `doublezero.xyz/api/economic-hub` for distributed reward percentages
 - **DZ Foundation S3**: historical per-epoch snapshots
 - **Jupiter**: spot prices for 2Z and SOL
-- **Solana RPC**: live reads for vote-account stake (`/api/validators/stake`) and epoch timing (`/api/epoch-rate`) on mainnet, plus reward records and the contributor directory on the DZ ledger. Only the registry IDL (topology, validators) is still pending.
+- **Solana RPC**: live reads for vote-account stake (`/api/validators/stake`) and epoch timing (`/api/epoch-rate`) on mainnet, plus reward records and the contributor directory on the DZ ledger. On-chain topology and validator payouts are not implemented.
 
 ### Shapley solver
 
@@ -147,8 +147,14 @@ Solana sidechain.
 `/api/validators/stake`, outside the `/api/onchain/*` namespace.
 
 The registry decoders (`decoders.ts`, `topology.ts`, `validators.ts`)
-are stubs, awaiting the Foundation IDL. `GET /api/onchain/topology` and
-`GET /api/onchain/validators` return `503` until it lands. `GET
+are stubs, so `GET /api/onchain/topology` and `GET
+/api/onchain/validators` return `503`. What they need is the byte
+layout for the Metro, Device, and Link account types, which nobody has
+written yet. They do not need a program IDL: `contributor-directory.ts`
+reads `AccountType::Contributor` from the same DoubleZero
+serviceability program (`ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv`)
+by decoding verified byte offsets, and `dz-rewards-record.ts` does the
+same for reward records. `GET
 /api/onchain/{contributors,rewards,contributor-rewards}` read live data
 today and return `502` on an upstream failure.
 
@@ -261,12 +267,16 @@ parity-tested against the Foundation's Python reference (`network_shapley`
 and `network_linkestimate`). The smoke harness at `tests/smoke.sh`
 re-validates the deployed service end-to-end.
 
-## Pending external inputs
+## Not yet implemented
 
-The DZ Foundation has not published the registry program IDL. Until it
-ships, `/api/onchain/topology` and `/api/onchain/validators` return
-`503`. Every other route, including the other on-chain readers, runs
-live.
+`/api/onchain/topology` and `/api/onchain/validators` return `503`. The
+Metro, Device, and Link account layouts are not written yet. This is
+our own remaining work: those account types live on the serviceability
+program the contributor directory already reads, and the layout
+technique is proven there. Every other route, including the other
+on-chain readers, runs live.
+
+## Optional external inputs
 
 The Foundation's canonical per-epoch input files are optional. When
 `DZ_CANONICAL_INPUTS_URL` is set, the validation harness compares our
