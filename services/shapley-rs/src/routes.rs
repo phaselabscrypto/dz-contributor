@@ -1498,6 +1498,117 @@ pub async fn link_estimate_start(
     }
 }
 
+/// `POST /jobs/link-estimate/by-tag` request: resolve a PRECOMPUTED result by
+/// `(sweep tag, operator)` without sending the 145 KB canonical input.
+///
+/// Deliberately NOT a variant of [`model::LinkEstimateRequest`]. That struct's
+/// serialization IS the S3 cache key (see [`link_estimate_payload_hash`] and
+/// `jobs::enqueue`), so adding an optional field to it would change the hash of
+/// every existing caller's body and orphan every cached result.
+#[derive(Debug, serde::Deserialize)]
+pub struct LinkEstimateByTagRequest {
+    /// Sweep tag, e.g. `epoch-211:canonical-v1:9f2c...`. Opaque here; minted by
+    /// `lib/utils/sweep-tag.ts`, whose fingerprint component is what keeps a
+    /// parameter change from resolving to a pre-change result.
+    pub tag: String,
+    /// Operator code the estimate is focused on.
+    pub operator_focus: String,
+}
+
+/// `POST /jobs/link-estimate/by-tag`: complete a job from the precomputed
+/// alias, or 404 so the caller falls back.
+///
+/// This is the whole point of the alias: a warm request costs two S3 reads
+/// instead of a 113 MB snapshot download and a canonical rebuild whose only
+/// purpose was to name an object we already had.
+///
+/// 404 is a normal, expected answer, not an error. It means "no precomputed
+/// result for this pair", which the Next.js route treats as a signal to take
+/// the input path. Both a missing alias AND an alias whose result has gone
+/// answer 404, because a dangling alias must not strand a caller who sent no
+/// input to solve from.
+pub async fn link_estimate_start_by_tag(
+    State(state): State<Arc<crate::AppState>>,
+    Json(body): Json<LinkEstimateByTagRequest>,
+) -> impl IntoResponse {
+    let not_found = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "no precomputed link estimate for this epoch and operator",
+            })),
+        )
+            .into_response()
+    };
+
+    let Some(store) = state.jobs.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "async jobs disabled (REDIS_URL not configured)",
+            })),
+        )
+            .into_response();
+    };
+    let Some(s3) = &state.s3_cache else {
+        return not_found();
+    };
+    let Some(payload_hash) = s3
+        .load_link_estimate_alias(&body.tag, &body.operator_focus)
+        .await
+    else {
+        return not_found();
+    };
+    let Some(cached) = s3.load_link_estimate(payload_hash).await else {
+        // The alias outlived its result: an engine-prefix rotation, or an
+        // object removed by hand. Fall back rather than serve nothing.
+        tracing::warn!(
+            tag = %body.tag,
+            operator_focus = %body.operator_focus,
+            payload_hash = format!("{payload_hash:016x}"),
+            "link-estimate alias resolves but the result is gone"
+        );
+        return not_found();
+    };
+    let Ok(value) = serde_json::to_value(&cached) else {
+        // Unreachable for plain structs; fall back rather than 500.
+        tracing::error!("cached link-estimate failed to re-serialize");
+        return not_found();
+    };
+
+    let job_id = match store.create().await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to create job");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "job store unavailable" })),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = store.set_done(&job_id, &value).await {
+        tracing::error!(error = %e, job_id, "set_done from alias failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "job store unavailable" })),
+        )
+            .into_response();
+    }
+    tracing::info!(
+        job_id,
+        tag = %body.tag,
+        operator_focus = %body.operator_focus,
+        served_from = "alias",
+        "link-estimate job completed from the epoch alias"
+    );
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "job_id": job_id })),
+    )
+        .into_response()
+}
+
 /// Max focus links the sweep will enqueue: players = links + "Others" and the
 /// engine's exact path caps at 20 players, so >19 links can NEVER be solved
 /// exactly. Reported loudly in the sweep summary's `skipped` list rather than

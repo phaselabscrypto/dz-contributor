@@ -1,0 +1,1433 @@
+{
+  "epoch": 204,
+  "links": [
+    {
+      "pubkey": "YoE1ekeLwfkY6CAHm9RTXamRDC6tDzXDEs6iwMauV2m",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-LD4",
+      "sideZCode": "TELE-SOU",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "81bC6DMDwg7XVCdoAXpo9NpsCD5J4UJA22ZPicnZcFUX",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-MB2",
+      "sideZCode": "EQX-MB2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "ER7YPJAEd5dFqrELBPJPEfHfaZSw7NigvkqBeKp4ajKs",
+      "contributorCode": "jump_",
+      "sideACode": "CYR1-DFW1",
+      "sideZCode": "EQX-DC15",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "ABXMG7UZcbytdAt5tqMHUC8NBxuKByrLTRN91WXnZbk9",
+      "contributorCode": "jump_",
+      "sideACode": "ATY-CC1",
+      "sideZCode": "EQX-TY2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "HmMvUfSW9DMYiHAANEXrTYxwX89VUPxnbcWwWWUputnk",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-SEA10",
+      "sideZCode": "ATY-CC1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "HeejcBonv8tg2d2AXPAxCRkfVhWe2HvcCaaUMt3p1g2Y",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-DUB2",
+      "sideZCode": "EQX-LD4",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "5PfMcoVjuC8GSEwHS6uS4yJvVMfn5zzWo16DGVipFdmn",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-FR2",
+      "sideZCode": "EQX-LD4",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "297mYzpWzPDsJn7vmjjWmtNbYUDjfKaNEDoQBbJ9mn9x",
+      "contributorCode": "rox",
+      "sideACode": "OS-IX",
+      "sideZCode": "EQX-FR2",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "7xxfuQwZXKsbqyrZ2Rr3ZjBHP5ga2U9JxkzLdnUxBuhk",
+      "contributorCode": "laconic",
+      "sideACode": "EQX-MI1",
+      "sideZCode": "EQX-DA1",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "4DcV5UtFfWz1aH6oyppMsNt3ypu3wgUNnp6VvrDM8F2C",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-ORD13",
+      "sideZCode": "CYX-EWR2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "8XjBUfLfujKtrafLXk3SDMgsGL7hh4c3KPn32HVMFojX",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-FR13",
+      "sideZCode": "EQX-FR5",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "T1zE2oyWqfYpVW5NUuimeg6UyBGLtN6sSn7QDkozYJA",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-LD4",
+      "sideZCode": "EQX-NY5",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "2yHdPviNiFm53eYRg688otatNqx5Ewgyx5pozKtmu75M",
+      "contributorCode": "stakefac",
+      "sideACode": "SFR-SXB",
+      "sideZCode": "EQX-MU4",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "DndB9BUgRHupThKgd4nv47W2zuwjpKVf7pWhKpBnL1E9",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-DA11",
+      "sideZCode": "EQX-DA3",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "81khRsBPHa2XfdEZE1QxHuHeJgyE7yrhaCAfM2Dp1cdF",
+      "contributorCode": "cherry",
+      "sideACode": "EQX-FR13",
+      "sideZCode": "EQX-FR2",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "Cxp6rJ1NpjNTqe6RnkkJHBmpMqPnTnmgiRZxgPhqourd",
+      "contributorCode": "latitude",
+      "sideACode": "TELE-SOU",
+      "sideZCode": "TELE-SOU",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "9EUvwVQ6dMXf7oGEpmVKdJypuE6ayeKGqs6QQYieVnj1",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-MRS2",
+      "sideZCode": "EQX-SG1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "E6DjtpFgPftJvEx9Ca9A3arcJ29Ki2W2ttB1Vv3Q3mAC",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-FR2",
+      "sideZCode": "DRT-MRS2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "29coZnnxSPKYszJBvRCGFwyiRJcLJsW1hgsx4NwhMsfU",
+      "contributorCode": "tsw",
+      "sideACode": "DBK-PIT1",
+      "sideZCode": "EQX-DC10",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "G84ptDdcrhb75wHzzSTrTqyRKGi43L1E5TC4N5hU3Gvd",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-LD7",
+      "sideZCode": "EQX-LD4",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "8J4DJUr5wq1wJd8PCbr38jdF1v14ZkHmAQpfaqGWfeVk",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-NY7",
+      "sideZCode": "EQX-NY7",
+      "bandwidthGbps": 200,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "DDrDBdXGvfLMpUPwF7du8xEsQF7bQyCYwTYEUJoA6f31",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-ORD13",
+      "sideZCode": "EQX-SV1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "6mjRAWpgWFyeVt9EwD6SpR1s9noyepcMabj3hJBvTjqu",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-LD4",
+      "sideZCode": "DRT-MRS2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "HRqgCF2UdyRoH2b7vVxyf2w2oBKFmxtMzkZRLpoUTDBq",
+      "contributorCode": "s3v",
+      "sideACode": "DBK-SLC3",
+      "sideZCode": "DRT-CH1",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "J8SFGwr87W4u1HRUkGxnXQybR2UuDTR2s2up9o336N4L",
+      "contributorCode": "s3v",
+      "sideACode": "DRT-CH1",
+      "sideZCode": "EQX-CH2",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "3B9NhDBJ1sJEptuuE2xF8CMT6GdXspbNni1KeGYMsKhN",
+      "contributorCode": "jump_",
+      "sideACode": "CORE-LA2",
+      "sideZCode": "EQX-TY2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "CfQesQBHnHWrh42poQYrsp3EYfrHYHXjX7QfBqsDMFLW",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-SP1",
+      "sideZCode": "EQX-SP1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "7KUWgPjbPLpLMAjZq7BYioUxVeXYJrPvEL6TNeMDcwY2",
+      "contributorCode": "laconic",
+      "sideACode": "EQX-DC10",
+      "sideZCode": "EQX-DC10",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "8vkYpXaBW8RuknJqHHxhg1SsvKCLokHJ6WgTpSGgfgT8",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-AM4",
+      "sideZCode": "DRT-AMS18",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "AmVQfjXNQeQ299snwT3H2XfL5FoC39WPThGY3MkFxSnY",
+      "contributorCode": "stakefac",
+      "sideACode": "EQX-FR8",
+      "sideZCode": "SFR-SXB",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "67j732HB5cafsDjWS1dPpB6ckGumq18rndLvpWKXpXu8",
+      "contributorCode": "cdrw",
+      "sideACode": "CYR1-CHI2",
+      "sideZCode": "CORE-LA2",
+      "bandwidthGbps": 75,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "G4ST8z1Y34EHPDGCZhVKTgrmcL33wK2j6JeewDFuUVow",
+      "contributorCode": "infiber",
+      "sideACode": "EQX-FR5",
+      "sideZCode": "EQX-FR2",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "EY87P4cBAUW8VEJV82QaTmNY1ZB2t51Z9MPL7UUxywtp",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-SG3",
+      "sideZCode": "EQX-FR13",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "F4BvF2SYKCyGXBQHZ5zArb8v9u5YUFpVgFKWeH8H9ejV",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-HK2",
+      "sideZCode": "EQX-HK2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "D14dhq5XVDyMua1eN47rh5ybiNAkz6qJTaKr3maKnSck",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-FR5",
+      "sideZCode": "EQX-FR2",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "GfiWgCnSSEsmui4M2f3EsVusUuCdEoC1TZf4TzQJcfFo",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-SG3",
+      "sideZCode": "DRT-MRS1",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "AFvhUch4E6cqKssTjKGUfW3hvoAcSAEcyzkoQXhxKoFS",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-HK2",
+      "sideZCode": "EQX-SG1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "9sM8S2YW4xCnpnn8z6W7SnoV7Anukf2crX4TRgkXyLxW",
+      "contributorCode": "stakefac",
+      "sideACode": "DRT-AMS18",
+      "sideZCode": "EQX-FR8",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "DqJ98NLFCUu9fj5jhk9HAV76UE8puArU6NNjQ9Rwp5fj",
+      "contributorCode": "jump_",
+      "sideACode": "ATY-CC1",
+      "sideZCode": "ATY-CC1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "2AgowxodjPEDFgkxWZzkCy4YfTVT1WJiDv2ig1nfJUkk",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-MRS2",
+      "sideZCode": "EQX-MB2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "CcSTnWvgaHLtj3zFS98gQbsAcoV7hFbqMoAkAD95DZpj",
+      "contributorCode": "jump_",
+      "sideACode": "CYR1-DFW1",
+      "sideZCode": "DRT-ORD13",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "CRQMUYCfgP2o9NdNyoXJ93kM4wt39993V18yaZQx5je6",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-ORD13",
+      "sideZCode": "EQX-CH2",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "ZCf4eHeSMA1WoKsvLNEVMoYnWcEE4GrgvP4woivFUnm",
+      "contributorCode": "dgt",
+      "sideACode": "CORE-LA2",
+      "sideZCode": "EQX-DA3",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "9pKT1jVfzgtUGeLe5kLurfvWvRizyUh35zw7jp6jAuLt",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-NY7",
+      "sideZCode": "EQX-LD4",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "4RaBQ5BBWmUyzGTCYUFefDKLT6os9zab4icNpBidf2th",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-DC3",
+      "sideZCode": "EQX-DA3",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "4pgEW1XDahLuwjsuBkfes7KMbteGSzYSR9rmJs5krr9N",
+      "contributorCode": "s3v",
+      "sideACode": "DBK-SLC3",
+      "sideZCode": "CORE-LA2",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "Ca2Aj5RZnbrfWHU5jjSYZdWx7CZfuKoC8dxEEWTgJFx2",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-NY5",
+      "sideZCode": "EQX-NY2",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "513UJiJEspmNNApCPyp33Rctfj7bvUhcjhvumy8x5qEq",
+      "contributorCode": "tsw",
+      "sideACode": "165H-MMR",
+      "sideZCode": "EQX-NY5",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "8cAgVftvEXrHGDw2N2M9MFnC2eQiPEWWbPT6fPdgEVoJ",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-SEA10",
+      "sideZCode": "DRT-ORD13",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "9L36cYa4kxsVoNngeDMLuFxWVg8pUxykLmiBX1UfHzti",
+      "contributorCode": "jump_",
+      "sideACode": "CYR1-DFW1",
+      "sideZCode": "EQX-NY5",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "EcWSrui72LCx4DgMqnQoRwJdwpjqLv7b1s8BeupwHWFj",
+      "contributorCode": "glxy",
+      "sideACode": "DBK-SLC2",
+      "sideZCode": "DBK-SLC3",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "2EHeaxVbsb2FvheFGsWn7VBaQYcZdnXg7hhoMdiqtW4A",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-DC15",
+      "sideZCode": "DRT-MRS2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "jLpSzAwgdhe5yMi4vCdemqNPJZaNhsMwXD3k2QL78hz",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-DC15",
+      "sideZCode": "DRT-ORD13",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "H3SDoHyBLzD72tySCHpoTVJs2PQGpFrNAa1jYhkG1eCp",
+      "contributorCode": "cherry",
+      "sideACode": "EQX-FR13",
+      "sideZCode": "EQX-AM4",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "HQNCezuCWzZcMmhFHmPywJPMGZU1WkPwfBL5YMMyW6AM",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-NY7",
+      "sideZCode": "EQX-DC10",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "Aq1vfKKLfYdiCz1wz1x3uc9xepaZ1hcMHZ2JTBsPZ2eZ",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-MB2",
+      "sideZCode": "EQX-SG1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "7PXaBzL9yANF7vfLg3r1T9UTSvNV6Ftc5gEj57sVEd6X",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-SEA10",
+      "sideZCode": "EQX-SV1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "GwoqeRvzCUjmdNgm1NCbz5u49VXPVV7fuMzWenUTSeVi",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-SV1",
+      "sideZCode": "EQX-SV1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "9xBCJFY9RVWnhsxK8ePPcNsr3amKYco8nUdxyzxLFXnH",
+      "contributorCode": "tsw",
+      "sideACode": "DBK-PIT1",
+      "sideZCode": "165H-MMR",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "2jGY7sRd8MdJLAuGncyG7FAJQWyoHE43rYcbK41Fu4vv",
+      "contributorCode": "dgt",
+      "sideACode": "TELE-SOU",
+      "sideZCode": "EQX-DB2",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "JBmy4A7XxuB2dgBFGzRTvK8if1oNQW6Hx3DDGut8D8ZP",
+      "contributorCode": "jump_",
+      "sideACode": "ATY-CC1",
+      "sideZCode": "EQX-SG1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "5Psm9gSZjLvfskWq3DSBnqcKNypFaLp3diURBrLUXaMT",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-NY5",
+      "sideZCode": "EQX-SP1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "3HVDzUf5c1qr2CEMkLgigZhPjBA4KFVSkjExtaHRfM9f",
+      "contributorCode": "tsw",
+      "sideACode": "DBK-SLC3",
+      "sideZCode": "DBK-SLC2",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "H6TRtoGZpyvU8tNyKN8YgY1zSqumrU2hdXy2R8KszpUy",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-NY7",
+      "sideZCode": "COL-MTL11",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "61UDX3zAU7cZWBgyZA3xkBSzXjXhJbTPyNPM2JabWT8u",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-NY7",
+      "sideZCode": "EQX-NY5",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "6K7oDWbKHK3cF4AbpFEpM6Z9VFLuiuohGFKUMJihKB8D",
+      "contributorCode": "glxy",
+      "sideACode": "DRT-SEA10",
+      "sideZCode": "EQX-CH2",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "9MgrhvF7v6vevLAVcS5Zt4doPVyqPCCuoMEGwFiQJBBc",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-MRS2",
+      "sideZCode": "DRT-MRS1",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "B81688uu9zgJHzD5G1pn3YbAWtCf7uh2tfEU6dXQbsB4",
+      "contributorCode": "tsw",
+      "sideACode": "DRT-ORD10",
+      "sideZCode": "DRT-SEA10",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "FmcM3hsb96fgpFQMGHPoTcrKE6K4AKbC1xtaRhDsLkAa",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-SEA10",
+      "sideZCode": "DRT-SEA10",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "6xLR3MKkcSi35PVmTjusZSTNKzvriqkbm9FyTvRii61c",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-AM4",
+      "sideZCode": "EQX-LD4",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "6ct2cQXAKuB8M7pT4tHJTrCEKspRs2dSqrhrYHhFwMne",
+      "contributorCode": "jump_",
+      "sideACode": "CORE-LA2",
+      "sideZCode": "EQX-SG1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "GBefoHkadgE4kR6R4goKmeZNGTn6GX5Wr2RpYGFS9AFr",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-SG3",
+      "sideZCode": "EQX-SG1",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "H6L9WQo9g4rsKkpfZ7gxNkNmNVfHNpsqLbDBFcyr9gqw",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-DUB2",
+      "sideZCode": "EQX-DB2",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "AAZVdKN7UoCiRRvdkgawxtE3FRZntUa3oYjbMPENFyJ",
+      "contributorCode": "cdrw",
+      "sideACode": "CYR1-CHI2",
+      "sideZCode": "ATY-CC2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "sUTL6T7sJzjqttcG5Eu7nwMwE8ULMcRrgMU4fjXB1R2",
+      "contributorCode": "dgt",
+      "sideACode": "TELE-SOU",
+      "sideZCode": "IM-AMS1",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "4qdWd9nuQpQJacqbJpx2FGU84ePQvGcYt9Caz2ABnNE7",
+      "contributorCode": "cherry",
+      "sideACode": "EQX-FR13",
+      "sideZCode": "Cherry",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "DJ1sw7jUiZRvseynGGy5rvPiT1ybzpgMGoxnkrNuFU31",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-DUB2",
+      "sideZCode": "DRT-DUB2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "3HV6rX6KAPXuKWTmxiWmE7WTc9oXVfEVyNja4qYDATz6",
+      "contributorCode": "jump_",
+      "sideACode": "CORE-LA2",
+      "sideZCode": "CORE-LA2",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "5j4y3qgt8eqT2bKem13XzFydBN2ti7K9kEdjX5zoBnGM",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-DC3",
+      "sideZCode": "EQX-NY2",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "44RsnMsyJfLqCfDkiAuWVxTF5dLPLDq2buhbbQscv34h",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-AM4",
+      "sideZCode": "EQX-LD7",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "GGjAWMJRZy9cB3L9SKLQrEpJNBmsrSp8YXBnbaEGWTNm",
+      "contributorCode": "stakefac",
+      "sideACode": "EQX-FR8",
+      "sideZCode": "EQX-MU4",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "4CHWAfis8nch5fpAgyb69PcZHmt9zZQ94MvDjpAVSty2",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-NY7",
+      "sideZCode": "EQX-NY5",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "6yYfjJHaZMWj828pAchWRCjGApnMVCSqFNa2iPhBE2DE",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-DC15",
+      "sideZCode": "EQX-NY5",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "Fn2EJucjUakS99N9D4MFcykP7W8uiZ9PmCzBihfBi51s",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-DC15",
+      "sideZCode": "EQX-DC15",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "BfG691D2KxbcKrP3VFZWK8rNAetRaneg7FVCCQu8pZm3",
+      "contributorCode": "cherry",
+      "sideACode": "Cherry",
+      "sideZCode": "EQX-SK3",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "Bf2bFHK1uaCCwqbA6BHbRKACHXqMrog7S9MY539GpHgE",
+      "contributorCode": "infiber",
+      "sideACode": "EQX-TY2",
+      "sideZCode": "EQX-TY15",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "CywNxAMgEhsaCAcS3NhQ2JGmW3ArGFwxkQ5TBb7ULBsZ",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-ORD13",
+      "sideZCode": "DRT-ORD13",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "GUEVP6ugfbZpC33sYJuB1buTxwDJjEXn8wjxMuq9xpbK",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-SG3",
+      "sideZCode": "EQX-TY15",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "DzHDqj3cdi77eMLWKemdhfr6YZJeHHGxuysvAdekniC",
+      "contributorCode": "rox",
+      "sideACode": "TELE-SOU",
+      "sideZCode": "EQX-FR2",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "vJrmECGJ7GeBmrEN22TRJxdrd7mpD5Vefm4BUjFgYfQ",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-NY2",
+      "sideZCode": "TELE-SOU",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "2BVb9VWvNX6oy5NwSuJjTedhK9cZEdfjWDd3XcL3785Y",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-DA11",
+      "sideZCode": "DRT-ORD10",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "CLMj53rUneEokXWZLtBL8Jj5fWxjprBpcrdurysAis3v",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-MRS2",
+      "sideZCode": "EQX-SP1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "4jWgCo3rVDa61eaG7kBnRt5fbmnS6sug848XFsgBQC4N",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-SEA10",
+      "sideZCode": "DRT-SEA10",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "Ck3z6oWrXvrMVHvViWDPJYQuJW9EWqs2TVZWPgA76dXV",
+      "contributorCode": "dgt",
+      "sideACode": "IM-AMS1",
+      "sideZCode": "EQX-DB2",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "65eVRJGifcJUpjbbzazdZ17HMTmH8Jqkg3BiFWo5WwHK",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-LD4",
+      "sideZCode": "EQX-FR5",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "9yga9CRw7m5gw88xVWnsegBWMSZ6nDtMieCX6ZAocp7C",
+      "contributorCode": "stakefac",
+      "sideACode": "EQX-FR8",
+      "sideZCode": "EQX-FR5",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "8PTZtrzQ17sQBNNyRu1wxcbkjVLqnRTa3vkMRyBGxdXT",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-ORD13",
+      "sideZCode": "EQX-NY5",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "FE6BfMxh4iwdr6VsreBeDzK2VavKNQnmjZBonRpDx4r",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-HK2",
+      "sideZCode": "EQX-TY2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "A5WCW8Tc3TW5VZXhoCZELimuCnwXzW8VTnK1wiZB1q8Y",
+      "contributorCode": "rox",
+      "sideACode": "EQX-FR2",
+      "sideZCode": "EQX-FR13",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "2DPrStYZzCKo3QSiHLFSHr1Ktk7rCYyLqe2jN5z5PU7v",
+      "contributorCode": "cherry",
+      "sideACode": "EQX-FR13",
+      "sideZCode": "EQX-FR5",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "H1wHxbyXGj1TqKTsKsUdUACcUiSNbnjNbipwhtJY6Xrr",
+      "contributorCode": "laconic",
+      "sideACode": "EQX-DA1",
+      "sideZCode": "EQX-DA3",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "6V4vvD7NjvrK7kmekaf5pfGJiUbJZrUVB7PuZsnTqxZZ",
+      "contributorCode": "infiber",
+      "sideACode": "EQX-FR5",
+      "sideZCode": "EQX-TY2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "2Ees9RHezZuta2hgVJJXMWMVCDdqAyPyU1DUboUSiAze",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-DC15",
+      "sideZCode": "EQX-FR2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "AWsXPWzNAbuCAX3Cw6v5vWWbStwoxh41PNobfMQwojJT",
+      "contributorCode": "tsw",
+      "sideACode": "CORE-LA3",
+      "sideZCode": "CORE-LA2",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "AELJ8Dcr8CjYNxiCVt5LR7fQxsrPK8YFStNXq6aQysfh",
+      "contributorCode": "tsw",
+      "sideACode": "DRT-ORD10",
+      "sideZCode": "EQX-CH2",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "J4A6iB4SYxcgQ9GHNFfCq6ygLA6s8A57RyfKjDsscWGT",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-TY8",
+      "sideZCode": "CORE-LA2",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "GbURiJNcdGb5E3BRqpizsQHrbYEra5fDHe5jrvhnVbxe",
+      "contributorCode": "jump_",
+      "sideACode": "CYR1-DFW1",
+      "sideZCode": "EQX-DA3",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "5tavj7kq3uBrSP7LbuhT2T2VjngxV9yYU7hufrYXVntm",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-TY2",
+      "sideZCode": "EQX-TY9",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "VhDy3ieaY93vc9xwkVdvZV8ATg8kwYTLAVmSYhsGKVh",
+      "contributorCode": "glxy",
+      "sideACode": "DRT-SEA10",
+      "sideZCode": "DBK-SLC2",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "4SoZf7tRjQaFZyP5nfHikjgBRMCSfukJa2fNzcMoEQZB",
+      "contributorCode": "dgt",
+      "sideACode": "IM-AMS1",
+      "sideZCode": "DRT-AMS18",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "4DH6VssEtHvpQEuoiKUXCpZjbPD848FjXQDHxc5Rbg78",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-MRS2",
+      "sideZCode": "DRT-MRS2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "5LdodyAC2UtudDiE4wqifh37RX7WPUciHE5bRcHQYmP3",
+      "contributorCode": "jump_",
+      "sideACode": "ATY-CC1",
+      "sideZCode": "EQX-SV1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "H7NHBD35i4oQvwoiH4ocJL3qLABVj3Au5tGEgYUaBTxw",
+      "contributorCode": "velia",
+      "sideACode": "TELE-FRA",
+      "sideZCode": "EQX-FR5",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "36DajDue7EeALsXMnPD7VgHjU4CBxBdWoQcsMJuxtDNa",
+      "contributorCode": "stakefac",
+      "sideACode": "DRT-AMS18",
+      "sideZCode": "DRT-MRS1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "AwvKgL6P6rRmf8VRPXxWuboyQdcNqp4x986cghTWRk7S",
+      "contributorCode": "rox",
+      "sideACode": "TELE-SOU",
+      "sideZCode": "TELE-SOU",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "7GM3AyxDVhZ335eq7bg3iokycP7M3vRj4R2bt4VN88dr",
+      "contributorCode": "jump_",
+      "sideACode": "CYR1-DFW1",
+      "sideZCode": "CORE-LA2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "38AC4EEGwbjt9gTmgzSY9PXrC9RHV7wAeJoaTyCoxB7Y",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-FR2",
+      "sideZCode": "EQX-FR2",
+      "bandwidthGbps": 20,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "5Q928Fc5bjvMad6tDAtwXxuezJP1jJ9eKSEsFJN3EzqE",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-FR5",
+      "sideZCode": "IM-AMS1",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "HrXASHjNdDY6KuGBcd1yUNfC69aKMu6eefRe148VEpTP",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-AM4",
+      "sideZCode": "EQX-AM4",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "BghsvED9eCtpXC1smkfm8iEzfNGrro24c5eacE154goa",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-FR5",
+      "sideZCode": "DRT-MRS1",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "9iSeeEXQqumPpefJQn3L5We1FwtcVRgZ87Bzy5v72SU2",
+      "contributorCode": "rox",
+      "sideACode": "CECO-CZ",
+      "sideZCode": "EQX-FR2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "MoiGqAWncXdSyJhX2xAiEdSCYhm35tP39oya9KCiBDF",
+      "contributorCode": "stakefac",
+      "sideACode": "SFR-SXB",
+      "sideZCode": "DRT-MRS1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "CXeafseL5sd9KYmbKQQqmk3MzcGHwdLVLDqLbiKbpz3k",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-TY9",
+      "sideZCode": "EQX-SG1",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "dXoaHzUh3apD5PKxAUDdkDzZ7GUrQG1niYMjf4YK5jq",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-NY7",
+      "sideZCode": "EQX-CH2",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "4pRUyqhTmkKyuQMTRn9Kki9SmcKW7aSTe6RgNNEvgbZA",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-FR5",
+      "sideZCode": "EQX-FR5",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "CsLwpagXfZnMtB6XYMX2hAxCznWftKBbtGxEjSwZpvfX",
+      "contributorCode": "allnodes",
+      "sideACode": "EQX-FR5",
+      "sideZCode": "EQX-FR5",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "AsfPXyjY4dgNkUtepE6LCRzKcXroZ3z8XtR5XEGnc4GG",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-DC10",
+      "sideZCode": "EQX-DC10",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "bChqyD8NUxeXeTMFq3YBu4WP3XqHkwndPGTEZxmA82k",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-FR5",
+      "sideZCode": "EQX-FR5",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "CqHUSTSccTRMJ4LPGkgfQLA1GmYWTqiR8LQWfqVGUeAt",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-DC3",
+      "sideZCode": "EQX-DC10",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "ETLoXyDghC8FeP6CMvusqwscKsGras4MpeMVVjei29TT",
+      "contributorCode": "dgt",
+      "sideACode": "IM-AMS1",
+      "sideZCode": "EQX-AM4",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "HdKuqgJbBgWsAkVTPrGnyvbsAL345UyxU8phWZUWGJzb",
+      "contributorCode": "jump_",
+      "sideACode": "ATY-CC1",
+      "sideZCode": "EQX-TY2",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "AxSQ84SNxgjVYWodZSDTHPv4cynsrduYmfUQm27xqCYi",
+      "contributorCode": "tsw",
+      "sideACode": "DBK-PIT1",
+      "sideZCode": "DRT-ORD10",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "J18xDPrz4ormhrXXBLb1kG6eDtMe9wHSSLozmtzEUHyQ",
+      "contributorCode": "cherry",
+      "sideACode": "EQX-SK3",
+      "sideZCode": "EQX-AM4",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "9kEpEZQfXYFjSCvMsMu1gksdpE7PSmHVfmgngh1BbcXj",
+      "contributorCode": "cdrw",
+      "sideACode": "CYR1-CHI2",
+      "sideZCode": "EQX-CH2",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "889avwHAHyCvg9c8ALBfC91yQY7w6ncg9pjwdDivRsUZ",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-DC15",
+      "sideZCode": "EQX-DC10",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "6snESc9Qw3eHZcxfVeJM84Bd18bUorcmcZ3H4jG6Wxuq",
+      "contributorCode": "cherry",
+      "sideACode": "EQX-AM4",
+      "sideZCode": "IM-AMS1",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "BGmYpKgFjjVqdTXcRhFUe6hvb2gSmQVdaXoUA3WM4Jpi",
+      "contributorCode": "jump_",
+      "sideACode": "CYR1-DFW1",
+      "sideZCode": "CYX-EWR2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "6b7vqaWaVS119fqKKMEVdc1o8LYHmTvskYasFp6X5b7G",
+      "contributorCode": "jump_",
+      "sideACode": "CORE-LA2",
+      "sideZCode": "EQX-SP1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "B7qNZ1r7yXdLoEHb8eGvuPUdsVYoKUVgTPQsYqnqDBBQ",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-NY5",
+      "sideZCode": "EQX-NY5",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "81Z2wjrirbfZbAiPUrP2djshYzZxfLB9MKbnA1RMo4cV",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-LD4",
+      "sideZCode": "EQX-LD4",
+      "bandwidthGbps": 20,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "7V5g7QsLZ83jzDNdTSEdnJsDBTfxzsDAcqS9HUKUEEii",
+      "contributorCode": "dgt",
+      "sideACode": "CORE-LA2",
+      "sideZCode": "CORE-LA2",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "4cNZLDnNf6T5P7KbnTdKKDNMgAsfNAccXrh1Re4re4LJ",
+      "contributorCode": "laconic",
+      "sideACode": "EQX-DC10",
+      "sideZCode": "EQX-MI1",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "31N1k5feogjR5zDux9U6opBEjwtuJ6qzqNrmpKRHugvt",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-DC10",
+      "sideZCode": "EQX-FR13",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "5VjMUTNCDzmrfHkJ7MRftuvQjAmEv4da6WCm1Aqp9zzP",
+      "contributorCode": "jump_",
+      "sideACode": "CYX-EWR2",
+      "sideZCode": "EQX-NY5",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "BfrMFL2xVwGECppmQBrmCD2VkMfABr8ZtrafNVnohzET",
+      "contributorCode": "tsw",
+      "sideACode": "DRT-SEA10",
+      "sideZCode": "DRT-SEA10",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "7NMRSZ8AjmLYXmSLdn9vmoMisM8tYdxrk77jt6Zr19b8",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-AM4",
+      "sideZCode": "EQX-FR2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "4aE9d9UF25o6ZNvkuEEaHu14qw4fh6yBXN6Reom9Vd7Y",
+      "contributorCode": "s3v",
+      "sideACode": "DBK-SLC3",
+      "sideZCode": "DBK-SLC3",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "J35vG3xdC7WZ2AQzs295gFktfgRdq9URwdZGCitmDJFB",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-SG3",
+      "sideZCode": "EQX-SG1",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "EksKPymnmzYbqWLqL2T1wEHiLgtUHM6GZeEgN9eRWJd2",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-AM4",
+      "sideZCode": "EQX-FR13",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "GpsVKCeQW1CLeLfy9VCSKQUpQv2UAcM5jXaojuQyeiDt",
+      "contributorCode": "jump_",
+      "sideACode": "CORE-LA2",
+      "sideZCode": "EQX-SV1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "HjqQuQw87zU4bRxfM6zkaei9f5jTjC5LfwCWvjcPJu54",
+      "contributorCode": "jump_",
+      "sideACode": "EQX-SG1",
+      "sideZCode": "EQX-SG1",
+      "bandwidthGbps": 10,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "FVWE6sAb2KaHNANJm1CGQjhzWzMLZxqs9Wt7BkDoKiX4",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-TY8",
+      "sideZCode": "EQX-TY15",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "DtPLPTh9LkLzk5ezHeaszkFQNzQKWypPza4QzCr68ReQ",
+      "contributorCode": "tsw",
+      "sideACode": "DRT-SEA10",
+      "sideZCode": "CORE-LA3",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "CrHzEkpjQ7QSi8d4zGTMnhVS9kCcuaLKuY9mFJKvXyT6",
+      "contributorCode": "rox",
+      "sideACode": "OS-IX",
+      "sideZCode": "TELE-SOU",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "4r82w57HQbr9AH23mmeW9rhgtquMdxvzYCxf5gBuX4dj",
+      "contributorCode": "cdrw",
+      "sideACode": "CORE-LA2",
+      "sideZCode": "CORE-LA2",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "HT4cNCCCU64M4R4kzhP6RodGVrHdh4SqrMu3XXyHW8e6",
+      "contributorCode": "jump_",
+      "sideACode": "CYR1-DFW1",
+      "sideZCode": "CYR1-DFW1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "GmtxGqz73XYdDmerspvSmgik6vZP6jY1Fkz6M7xAas9a",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-LD7",
+      "sideZCode": "EQX-FR13",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "7rgqwAbY2iKoHA5xWeUmPZoY63YC6XvocbdHA5FjkzEn",
+      "contributorCode": "dgt",
+      "sideACode": "EQX-NY2",
+      "sideZCode": "EQX-NY5",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "6uF5TBjXQXxkjhJ2Y9vGB3fxiyUtcK5Bqw3wrdssxRFq",
+      "contributorCode": "jump_",
+      "sideACode": "DRT-DUB2",
+      "sideZCode": "EQX-NY5",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "DmGsJkmDeBWazNps4Y2YDK7KPWG4GXog2kBtQghsjNCu",
+      "contributorCode": "dgt",
+      "sideACode": "DRT-MRS1",
+      "sideZCode": "DRT-MRS1",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "G57tMEhyprE8Q47wvmwU4SY92w4uVP8i8Lt3ZZNGsxKa",
+      "contributorCode": "cherry",
+      "sideACode": "EQX-AM4",
+      "sideZCode": "DRT-AMS18",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "HDVKmprsequN6zuErSDTQ5WBR29TtVUh5oFyjRMh9VDM",
+      "contributorCode": "cdrw",
+      "sideACode": "ATY-CC2",
+      "sideZCode": "EQX-TY2",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "2evoLjnibgtukidrxRXy1fBruMmHJwk3nVSQGLpWcA4V",
+      "contributorCode": "glxy",
+      "sideACode": "EQX-NY7",
+      "sideZCode": "COL-TOR1",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "EXZnmY379HerfKQiUSHKReexZwCzueZg7g9iBTnDxStS",
+      "contributorCode": "jump_",
+      "sideACode": "CYX-EWR2",
+      "sideZCode": "CYX-EWR2",
+      "bandwidthGbps": 10,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "8wQCpckuDYHHQNM2cbLN2KgNjLT9EwbCAuegZuZy8AMr",
+      "contributorCode": "tsw",
+      "sideACode": "DRT-SEA10",
+      "sideZCode": "EQX-TY15",
+      "bandwidthGbps": 100,
+      "linkType": "WAN"
+    },
+    {
+      "pubkey": "4akCMp6aQGtbRMSns8exFwtiqaoTAaos785eHvJgx3o2",
+      "contributorCode": "tsw",
+      "sideACode": "EQX-TY15",
+      "sideZCode": "EQX-TY9",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    },
+    {
+      "pubkey": "EewiYE6NxAjaYq7uVGtame4fsFtCvLJ87zLpsWeayRSW",
+      "contributorCode": "stakefac",
+      "sideACode": "EQX-FR8",
+      "sideZCode": "EQX-FR5",
+      "bandwidthGbps": 100,
+      "linkType": "DZX"
+    }
+  ],
+  "contributors": [
+    {
+      "code": "rox",
+      "linkCount": 6,
+      "deviceCount": 4,
+      "metroCount": 4
+    },
+    {
+      "code": "velia",
+      "linkCount": 1,
+      "deviceCount": 1,
+      "metroCount": 1
+    },
+    {
+      "code": "latitude",
+      "linkCount": 1,
+      "deviceCount": 1,
+      "metroCount": 1
+    },
+    {
+      "code": "s3v",
+      "linkCount": 4,
+      "deviceCount": 3,
+      "metroCount": 3
+    },
+    {
+      "code": "gkl",
+      "linkCount": 0,
+      "deviceCount": 1,
+      "metroCount": 1
+    },
+    {
+      "code": "glxy",
+      "linkCount": 16,
+      "deviceCount": 13,
+      "metroCount": 12
+    },
+    {
+      "code": "laconic",
+      "linkCount": 4,
+      "deviceCount": 3,
+      "metroCount": 3
+    },
+    {
+      "code": "cherry",
+      "linkCount": 8,
+      "deviceCount": 4,
+      "metroCount": 4
+    },
+    {
+      "code": "stakefac",
+      "linkCount": 8,
+      "deviceCount": 5,
+      "metroCount": 5
+    },
+    {
+      "code": "infiber",
+      "linkCount": 3,
+      "deviceCount": 2,
+      "metroCount": 2
+    },
+    {
+      "code": "jump_",
+      "linkCount": 66,
+      "deviceCount": 32,
+      "metroCount": 20
+    },
+    {
+      "code": "cdrw",
+      "linkCount": 5,
+      "deviceCount": 3,
+      "metroCount": 3
+    },
+    {
+      "code": "tsw",
+      "linkCount": 24,
+      "deviceCount": 13,
+      "metroCount": 13
+    },
+    {
+      "code": "allnodes",
+      "linkCount": 1,
+      "deviceCount": 1,
+      "metroCount": 1
+    },
+    {
+      "code": "dgt",
+      "linkCount": 20,
+      "deviceCount": 11,
+      "metroCount": 11
+    }
+  ]
+}

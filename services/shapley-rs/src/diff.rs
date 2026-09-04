@@ -4,131 +4,24 @@
 //! in the Next.js app; the two must change together.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
-use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
-use crate::snapshot::{
-    DIFF_SECTION_KEYS, Epoch, MIN_DZ_EPOCH, ScanFailure, ScanResult, SnapshotError,
-};
+use crate::epoch::{Epoch, MIN_DZ_EPOCH};
 
 /// Highest epoch a diff window may name.
 pub(crate) const MAX_DIFF_EPOCH: Epoch = Epoch(100_000);
 /// Widest `|to - from|` a diff window may span.
 pub(crate) const MAX_DIFF_WINDOW: u32 = 200;
 
-const UNKNOWN_CONTRIBUTOR_CODE: &str = "unknown";
 const ENDPOINT_SEPARATOR: &str = "↔";
 const WINDOW_REQUIRED_MESSAGE: &str = "from and to query params required (different integers)";
 const WINDOW_BOUNDS_MESSAGE: &str = "from and to must be in [48, 100000]";
 const WINDOW_TOO_WIDE_MESSAGE: &str = "epoch window too wide: |to - from| must be <= 200";
 const UNIX_EPOCH_RFC3339: &str = "1970-01-01T00:00:00Z";
-
-/// Snapshot location record; only the field the extractor reads.
-#[derive(Debug, Deserialize)]
-pub(crate) struct RawLocation {
-    pub(crate) code: String,
-}
-
-/// Snapshot contributor record; only the field the extractor reads.
-#[derive(Debug, Deserialize)]
-pub(crate) struct RawContributor {
-    pub(crate) code: String,
-}
-
-/// Snapshot device record; only the fields the extractor reads.
-#[derive(Debug, Deserialize)]
-pub(crate) struct RawDevice {
-    pub(crate) location_pk: String,
-    pub(crate) contributor_pk: String,
-}
-
-/// Snapshot link record; only the fields the extractor reads.
-#[derive(Debug, Deserialize)]
-pub(crate) struct RawLink {
-    pub(crate) side_a_pk: String,
-    pub(crate) side_z_pk: String,
-    pub(crate) link_type: String,
-    pub(crate) bandwidth: f64,
-    pub(crate) contributor_pk: String,
-}
-
-/// JSON object deserialized as an ordered list of (key, value). Keeps file
-/// order, which `serde_json::Map` does not.
-#[derive(Debug)]
-pub struct OrderedMap<T>(pub Vec<(String, T)>);
-
-struct OrderedMapVisitor<T>(PhantomData<T>);
-
-impl<'de, T: Deserialize<'de>> Visitor<'de> for OrderedMapVisitor<T> {
-    type Value = OrderedMap<T>;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a JSON object")
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-        let mut entries = Vec::with_capacity(access.size_hint().unwrap_or(0));
-        while let Some(entry) = access.next_entry::<String, T>()? {
-            entries.push(entry);
-        }
-        Ok(OrderedMap(entries))
-    }
-}
-
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for OrderedMap<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(OrderedMapVisitor(PhantomData))
-    }
-}
-
-/// The four parsed `dz_serviceability` sections, in file order.
-#[derive(Debug)]
-pub struct DiffSections {
-    pub(crate) locations: OrderedMap<RawLocation>,
-    pub(crate) devices: OrderedMap<RawDevice>,
-    pub(crate) links: OrderedMap<RawLink>,
-    pub(crate) contributors: OrderedMap<RawContributor>,
-}
-
-fn parse_section<'a, T: Deserialize<'a>>(
-    scan: &'a ScanResult,
-    key: &'static str,
-) -> Result<OrderedMap<T>, SnapshotError> {
-    let scan_error = |failure: ScanFailure| SnapshotError::Scan {
-        epoch: scan.epoch,
-        bytes_read: scan.bytes_read,
-        failure,
-    };
-    let bytes = scan
-        .sections
-        .get(key)
-        .ok_or_else(|| scan_error(ScanFailure::MissingSection(key)))?;
-    let first_byte = bytes.iter().find(|byte| !byte.is_ascii_whitespace());
-    if first_byte != Some(&b'{') {
-        return Err(scan_error(ScanFailure::SectionNotObject(key)));
-    }
-    serde_json::from_slice(bytes)
-        .map_err(|error| scan_error(ScanFailure::Malformed(format!("section {key}: {error}"))))
-}
-
-/// Parse every captured section. A section that is not a JSON object fails
-/// with `ScanFailure::SectionNotObject`; one whose records lack a field the
-/// extractor reads fails with `ScanFailure::Malformed`.
-pub fn parse_sections(scan: &ScanResult) -> Result<DiffSections, SnapshotError> {
-    let [locations_key, devices_key, links_key, contributors_key] = DIFF_SECTION_KEYS;
-    Ok(DiffSections {
-        locations: parse_section(scan, locations_key)?,
-        devices: parse_section(scan, devices_key)?,
-        links: parse_section(scan, links_key)?,
-        contributors: parse_section(scan, contributors_key)?,
-    })
-}
 
 /// One link as the diff sees it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -176,92 +69,6 @@ pub struct DiffShape {
 
 fn count_u32(count: usize) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
-}
-
-/// Project the parsed sections onto a [`DiffShape`].
-pub fn extract_diff_shape(epoch: Epoch, sections: &DiffSections) -> DiffShape {
-    let location_code: HashMap<&str, &str> = sections
-        .locations
-        .0
-        .iter()
-        .map(|(pubkey, location)| (pubkey.as_str(), location.code.as_str()))
-        .collect();
-    let contributor_code: HashMap<&str, &str> = sections
-        .contributors
-        .0
-        .iter()
-        .map(|(pubkey, contributor)| (pubkey.as_str(), contributor.code.as_str()))
-        .collect();
-
-    let mut device_location_code: HashMap<&str, &str> = HashMap::new();
-    let mut devices_by_contributor: HashMap<&str, u32> = HashMap::new();
-    let mut metros_by_contributor: HashMap<&str, HashSet<&str>> = HashMap::new();
-    for (pubkey, device) in &sections.devices.0 {
-        let device_location = location_code
-            .get(device.location_pk.as_str())
-            .copied()
-            .unwrap_or("");
-        device_location_code.insert(pubkey.as_str(), device_location);
-        let owner = contributor_code
-            .get(device.contributor_pk.as_str())
-            .copied()
-            .unwrap_or(UNKNOWN_CONTRIBUTOR_CODE);
-        *devices_by_contributor.entry(owner).or_default() += 1;
-        if !device_location.is_empty() {
-            metros_by_contributor
-                .entry(owner)
-                .or_default()
-                .insert(device_location);
-        }
-    }
-
-    let mut links = Vec::with_capacity(sections.links.0.len());
-    let mut links_by_contributor: HashMap<&str, u32> = HashMap::new();
-    for (pubkey, link) in &sections.links.0 {
-        let owner = contributor_code
-            .get(link.contributor_pk.as_str())
-            .copied()
-            .unwrap_or(UNKNOWN_CONTRIBUTOR_CODE);
-        let side_code = |device_pk: &str| {
-            device_location_code
-                .get(device_pk)
-                .copied()
-                .unwrap_or("")
-                .to_string()
-        };
-        links.push(LinkRef {
-            pubkey: pubkey.clone(),
-            contributor_code: owner.to_string(),
-            side_a_code: side_code(&link.side_a_pk),
-            side_z_code: side_code(&link.side_z_pk),
-            bandwidth_gbps: link.bandwidth / 1e9,
-            link_type: link.link_type.clone(),
-        });
-        *links_by_contributor.entry(owner).or_default() += 1;
-    }
-
-    let contributors = sections
-        .contributors
-        .0
-        .iter()
-        .map(|(_, contributor)| {
-            let code = contributor.code.as_str();
-            ContributorRef {
-                code: code.to_string(),
-                link_count: links_by_contributor.get(code).copied().unwrap_or(0),
-                device_count: devices_by_contributor.get(code).copied().unwrap_or(0),
-                metro_count: metros_by_contributor
-                    .get(code)
-                    .map_or(0, |metros| count_u32(metros.len())),
-            }
-        })
-        .collect();
-
-    DiffShape {
-        epoch,
-        links,
-        contributors,
-    }
 }
 
 /// A validated `from`/`to` pair. `from` may be greater than `to`.
@@ -892,160 +699,6 @@ mod tests {
                 contributor("gamma", 0, 0, 0),
             ],
         }
-    }
-
-    fn scan_result(sections: &[(&'static str, &str)]) -> ScanResult {
-        ScanResult {
-            epoch: Epoch(7),
-            sections: sections
-                .iter()
-                .map(|(key, text)| (*key, text.as_bytes().to_vec()))
-                .collect(),
-            bytes_read: 1,
-            is_cancelled_early: true,
-        }
-    }
-
-    #[test]
-    fn ordered_map_keeps_file_order_and_rejects_non_objects() {
-        let parsed: OrderedMap<serde_json::Value> =
-            serde_json::from_str(r#"{"zeta": 1, "alpha": 2, "mid": 3}"#).unwrap();
-        let keys: Vec<&str> = parsed.0.iter().map(|(key, _)| key.as_str()).collect();
-        assert_eq!(keys, ["zeta", "alpha", "mid"]);
-
-        assert!(serde_json::from_str::<OrderedMap<serde_json::Value>>("[1, 2]").is_err());
-        assert!(serde_json::from_str::<OrderedMap<serde_json::Value>>("null").is_err());
-    }
-
-    #[test]
-    fn parse_sections_reads_records_and_reports_malformed_sections() {
-        let scan = scan_result(&[
-            (
-                "locations",
-                r#"{"L1": {"code": "nyc", "name": "New York"}}"#,
-            ),
-            (
-                "devices",
-                r#"{"D1": {"location_pk": "L1", "contributor_pk": "C1", "extra": 1}}"#,
-            ),
-            (
-                "links",
-                r#"{"K1": {"side_a_pk": "D1", "side_z_pk": "D1", "link_type": "WAN", "bandwidth": 10000000000, "contributor_pk": "C1"}}"#,
-            ),
-            ("contributors", r#"{"C1": {"code": "alpha"}}"#),
-        ]);
-        let sections = parse_sections(&scan).unwrap();
-        assert_eq!(sections.links.0[0].1.bandwidth, 10e9);
-        let shape = extract_diff_shape(Epoch(7), &sections);
-        assert_eq!(shape.links[0].side_a_code, "nyc");
-        assert_eq!(shape.contributors[0], contributor("alpha", 1, 1, 1));
-
-        let bad = scan_result(&[
-            ("locations", "{}"),
-            ("devices", "{}"),
-            ("links", r#"{"K1": {"side_a_pk": "D1"}}"#),
-            ("contributors", "{}"),
-        ]);
-        let error = parse_sections(&bad).unwrap_err();
-        assert!(matches!(
-            error,
-            SnapshotError::Scan {
-                failure: ScanFailure::Malformed(_),
-                ..
-            }
-        ));
-
-        let scalar = scan_result(&[
-            ("locations", "{}"),
-            ("devices", "{}"),
-            ("links", " null"),
-            ("contributors", "{}"),
-        ]);
-        assert!(matches!(
-            parse_sections(&scalar).unwrap_err(),
-            SnapshotError::Scan {
-                failure: ScanFailure::SectionNotObject("links"),
-                ..
-            }
-        ));
-
-        let incomplete = scan_result(&[("locations", "{}")]);
-        assert!(matches!(
-            parse_sections(&incomplete).unwrap_err(),
-            SnapshotError::Scan {
-                failure: ScanFailure::MissingSection("devices"),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn extract_diff_shape_resolves_codes_and_counts() {
-        let sections = DiffSections {
-            locations: OrderedMap(vec![
-                ("L1".into(), RawLocation { code: "nyc".into() }),
-                ("L2".into(), RawLocation { code: "lon".into() }),
-            ]),
-            devices: OrderedMap(vec![
-                (
-                    "D1".into(),
-                    RawDevice {
-                        location_pk: "L1".into(),
-                        contributor_pk: "C1".into(),
-                    },
-                ),
-                (
-                    "D2".into(),
-                    RawDevice {
-                        location_pk: "L2".into(),
-                        contributor_pk: "C1".into(),
-                    },
-                ),
-                (
-                    "D3".into(),
-                    RawDevice {
-                        location_pk: "LX".into(),
-                        contributor_pk: "CX".into(),
-                    },
-                ),
-            ]),
-            links: OrderedMap(vec![
-                (
-                    "K1".into(),
-                    RawLink {
-                        side_a_pk: "D1".into(),
-                        side_z_pk: "D2".into(),
-                        link_type: "WAN".into(),
-                        bandwidth: 10e9,
-                        contributor_pk: "C1".into(),
-                    },
-                ),
-                (
-                    "K5".into(),
-                    RawLink {
-                        side_a_pk: "D3".into(),
-                        side_z_pk: "D1".into(),
-                        link_type: "WAN".into(),
-                        bandwidth: 1e9,
-                        contributor_pk: "CX".into(),
-                    },
-                ),
-            ]),
-            contributors: OrderedMap(vec![(
-                "C1".into(),
-                RawContributor {
-                    code: "alpha".into(),
-                },
-            )]),
-        };
-        let shape = extract_diff_shape(Epoch(148), &sections);
-        assert_eq!(shape.epoch, Epoch(148));
-        assert_eq!(
-            shape.links[0],
-            link("K1", "alpha", "nyc", "lon", 10.0, "WAN")
-        );
-        assert_eq!(shape.links[1], link("K5", "unknown", "", "nyc", 1.0, "WAN"));
-        assert_eq!(shape.contributors, vec![contributor("alpha", 1, 2, 2)]);
     }
 
     #[test]

@@ -28,8 +28,7 @@ One binary, `dz-shapley-service`, serves two roles selected by the first CLI arg
 | Role | How to invoke | What runs |
 |---|---|---|
 | `api` (default) | no arg, `api`, or `--role=api` | Full HTTP server: all sync compute endpoints plus the `/jobs/*` enqueue/poll/cancel surface |
-| `worker` | `worker` or `--role=worker` | Minimal `/health`-only HTTP listener plus the Redis Stream consume loop and the snapshot diff poller |
-| `diff-backfill` | `diff-backfill` or `--role=diff-backfill` | One-shot: ingests every missing epoch into the diff index, prints a summary, exits non-zero if any epoch failed |
+| `worker` | `worker` or `--role=worker` | Minimal `/health`-only HTTP listener plus the Redis Stream consume loop |
 
 Both roles share the same `AppState` (in-memory epoch cache, S3 cache handle, API token, job store) and the same graceful-shutdown handler. SIGTERM or Ctrl-C stops the server; an in-flight worker solve winds down within the `terminationGracePeriod`, and any interrupted entry is recovered by the worker's `XAUTOCLAIM` sweep under at-least-once delivery.
 
@@ -250,7 +249,7 @@ Source: `src/snapshot.rs` (public-bucket client and scanner), `src/diff.rs` (sha
 
 The `/diff*` endpoints answer from a per-epoch index of the DoubleZero topology instead of downloading full snapshots per request. One snapshot is 68 to 110 MB. The four sections the diff needs (`locations`, `devices`, `links`, `contributors`) end within the first 3.7 MB.
 
-**Public-bucket client.** `S3SnapshotReader` is a second `aws_sdk_s3::Client` with no credentials (`no_credentials()`), region `us-east-1`. It is built from `aws_config::defaults`, so the standard `AWS_ENDPOINT_URL` and `AWS_ENDPOINT_URL_S3` settings still apply if the pod environment carries them. It reads `mn-epoch-{n}-snapshot.json` from the public bucket `doublezero-contributor-rewards-mn-beta-snapshots`. Env overrides: `DZ_SNAPSHOT_BUCKET`, `DZ_SNAPSHOT_REGION`. The cluster must allow HTTPS egress to that host.
+**No public-bucket client.** The service does not read the snapshot bucket. Records arrive over `PUT /diff/shape/:epoch` from the Vercel cron, gated by `SHAPLEY_INGEST_TOKEN` on top of the compute token, and `GET /diff/missing?latest=N&depth=D` tells the cron which epochs it still owes. The pods need no public egress.
 
 **Scanner.** `SectionScanner` tracks JSON depth on raw bytes and captures each wanted section as it streams. It stops when the fourth section closes or when `dz_serviceability` closes, then drops the `ByteStream`, which closes the connection. `MAX_SCAN_BYTES` (32 MiB) is a hard ceiling: if the layout changes so the sections move after the telemetry arrays, the scan fails with `BudgetExceeded` instead of reading 110 MB. A scan never returns a partial result. Parsing and extraction run under `spawn_blocking`.
 
@@ -258,7 +257,7 @@ The `/diff*` endpoints answer from a per-epoch index of the DoubleZero topology 
 
 **Read path.** `DiffStore::get` checks memory, then S3, then ingests from the public bucket. Concurrent misses for one epoch share a single ingest, and `MAX_CONCURRENT_INGESTS` (6) caps how many ingests run at once across the whole process, which is what bounds ingest memory and the blocking-pool queue. A failed ingest is never cached, so an epoch the bucket does not carry costs one lookup per request. `GET /diff` loads `from`, `to`, and the intermediate epochs with concurrency 10 and a 6 s deadline each; an intermediate that misses is logged and skipped, attribution for the affected entries falls back to `to`, and the response carries `x-diff-degraded: 1` so the proxy serves it `no-store` instead of caching it for a day.
 
-**Poller and backfill.** The `worker` role runs `diff_poller::run` alongside the Redis consume loop. Every 15 minutes it discovers the latest epoch (`head_object` exponential probe, then binary search) and ingests every epoch in `48..=latest` missing from the persisted set. Duplicate ingests across worker replicas write the same bytes to the same key. An epoch that fails, including one whose shape was extracted but not written, is retried on a doubling backoff from 15 minutes to a 24 hour cap. The `diff-backfill` role runs the same fill once from a terminal, ignores that backoff, and exits with a non-zero status if any epoch failed or went unwritten. The initial fill is about 165 epochs at 3.7 MB each, 2 to 5 minutes sequential.
+**Ingest and backfill.** Nothing in this service ingests. The Vercel cron asks `GET /diff/missing?latest=N&depth=31` which epochs have no record, downloads those snapshots, extracts each record with `lib/utils/diff-shape.ts`, and `PUT`s it. Writes are create-only: a second write of a readable record answers `409`, which is the normal outcome of an idempotent cron. A present-but-unreadable object is replaced rather than refused, so a corrupt write cannot wedge an epoch. Deeper history is filled once with `pnpm run backfill:diff`.
 
 **Error mapping** (by enum variant, in `src/diff_routes.rs`): 400 for window validation; 404 when `from` or `to` has no snapshot (`"epoch {n}: snapshot HTTP 404"`); 422 for a scan failure (`"snapshot scan failed"`); 502 for an HTTP, transport, or timeout failure (`"snapshot fetch failed"`). The 404 body names the epoch, since the caller supplied it. Every 4xx and 5xx body beyond that is a fixed string, with the cause in the log.
 
