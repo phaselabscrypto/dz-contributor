@@ -11,11 +11,14 @@ import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder"
 import { getEpochAvailability } from "@/lib/utils/epoch-discovery";
 import {
   JobStartError,
+  fetchMissingDiffShapes,
   getSweepStatus,
+  putDiffShape,
   startBaselinePrecompute,
   startLinkEstimateSweep,
 } from "@/lib/utils/shapley-remote";
 import { sweepTag } from "@/lib/utils/sweep-tag";
+import { extractDiffShape } from "@/lib/utils/diff-shape";
 import { reportError } from "@/lib/observability";
 
 /**
@@ -45,6 +48,36 @@ import { reportError } from "@/lib/observability";
 // enqueue — the solves run on the service's worker pool, not here).
 export const maxDuration = 300;
 
+/**
+ * How far back `GET /diff/missing` looks. Matches the 31 epochs
+ * `lib/utils/epoch-discovery.ts` offers in the changelog selector, so the cron
+ * repairs exactly the window a user can ask for.
+ */
+const DIFF_REPAIR_DEPTH = 31;
+/**
+ * Shape ingests per fire. Each is its own ~110 MB download and parse, and the
+ * function budget is 300 s. The remainder is reported and picked up next fire.
+ */
+const MAX_SHAPE_REPAIRS_PER_FIRE = 3;
+
+/**
+ * Download one epoch's snapshot, extract its diff record, and hand it to the
+ * service. `"exists"` means another writer got there first, which is a normal
+ * outcome of an idempotent cron and not a failure.
+ */
+async function ingestShape(epoch: number): Promise<"created" | "exists"> {
+  const response = await fetch(getSnapshotUrl(epoch), {
+    signal: AbortSignal.timeout(SNAPSHOT_FETCH_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`epoch ${epoch}: snapshot HTTP ${response.status}`);
+  }
+  const raw: RawSnapshot = await response.json();
+  const outcome = await putDiffShape(extractDiffShape(raw));
+  console.log(`[link-value/precompute] shape epoch=${epoch} ${outcome}`);
+  return outcome;
+}
+
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET;
   if (!secret) {
@@ -73,20 +106,79 @@ export async function GET(request: NextRequest) {
 
   const tag = sweepTag(epoch);
 
-  // Marker fast-path: a fully-swept epoch needs NO snapshot fetch, parse, or
-  // build — the steady-state cron fire is one HEAD-backed status call.
-  // Fail-open: a status-check error just means we do the full (idempotent)
-  // sweep, which is always safe.
+  // Two independent questions, because this fire owns two artifacts. Asking
+  // only about the sweep would let an epoch whose sweep succeeded but whose
+  // shape write failed skip the download forever, and the changelog would 404
+  // on that epoch for good.
+  //
+  // Fail-open on both: a failed check just means we do the full (idempotent)
+  // work, which is always safe.
+  let isSwept = false;
   try {
-    const status = await getSweepStatus(tag);
-    if (status.complete) {
-      console.log(`[link-value/precompute] epoch=${epoch} already swept (marker hit)`);
-      return NextResponse.json({ epoch, tag, status: "already-swept" });
-    }
+    isSwept = (await getSweepStatus(tag)).complete;
   } catch (err) {
     reportError(err, {
       source: "api/link-value/precompute",
       extras: { epoch, phase: "marker-check" },
+    });
+  }
+
+  let missingShapes: number[] = [];
+  try {
+    missingShapes = await fetchMissingDiffShapes(epoch, DIFF_REPAIR_DEPTH);
+  } catch (err) {
+    reportError(err, {
+      source: "api/link-value/precompute",
+      extras: { epoch, phase: "missing-shapes" },
+    });
+    // Unknown, so assume this epoch at least needs one.
+    missingShapes = [epoch];
+  }
+
+  if (isSwept && missingShapes.length === 0) {
+    console.log(
+      `[link-value/precompute] epoch=${epoch} already swept and no shape gaps`,
+    );
+    return NextResponse.json({
+      epoch,
+      tag,
+      sweep: "already-swept",
+      shapes: { repaired: 0, remaining: 0 },
+    });
+  }
+
+  // The repair leg. Each epoch here costs its own ~110 MB download, so the
+  // fire is bounded and the remainder is reported rather than dropped
+  // silently: the next fire picks it up.
+  const repairTargets = missingShapes.slice(0, MAX_SHAPE_REPAIRS_PER_FIRE);
+  const deferredShapes = missingShapes.length - repairTargets.length;
+  if (deferredShapes > 0) {
+    console.log(
+      `[link-value/precompute] ${missingShapes.length} shape gaps, repairing ` +
+        `${repairTargets.length} this fire, ${deferredShapes} deferred`,
+    );
+  }
+
+  const shapeResults: Record<number, string> = {};
+  for (const target of repairTargets) {
+    try {
+      shapeResults[target] = await ingestShape(target);
+    } catch (err) {
+      reportError(err, {
+        source: "api/link-value/precompute",
+        extras: { epoch: target, phase: "shape-ingest" },
+      });
+      shapeResults[target] = "failed";
+    }
+  }
+
+  // A swept epoch still needed its shape gaps filled, but nothing below.
+  if (isSwept) {
+    return NextResponse.json({
+      epoch,
+      tag,
+      sweep: "already-swept",
+      shapes: { ...shapeResults, deferred: deferredShapes },
     });
   }
 
@@ -152,6 +244,7 @@ export async function GET(request: NextRequest) {
       operators: operators.length,
       sweep_job_id: sweepJobId,
       baseline,
+      shapes: { ...shapeResults, deferred: deferredShapes },
     });
   } catch (err) {
     reportError(err, { source: "api/link-value/precompute", extras: { epoch } });

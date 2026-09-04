@@ -81,8 +81,9 @@ pub fn hash_input(input: &crate::model::ShapleyInputIn) -> u64 {
 /// key on inputs only, NOT the engine version or the serialized shape, so any
 /// change to either MUST bump this prefix — results from an older engine are
 /// then never served for identical inputs. Single-sourced here so all key
-/// builders (`cache_key`, `link_estimate_key`, `simulate_key`,
-/// `sweep_marker_key`, and the `S3CacheRef` mirror) move together on a bump.
+/// builders (`cache_key`, `link_estimate_key`, `link_estimate_alias_key`,
+/// `simulate_key`, `sweep_marker_key`, and the `S3CacheRef` mirror) move
+/// together on a bump.
 ///
 /// Note the hashers are std `DefaultHasher` (not stable across Rust
 /// toolchains): a toolchain change rotates the keyspace, causing a
@@ -319,6 +320,83 @@ impl S3Cache {
         });
     }
 
+    /// S3 key for the `(sweep tag, operator)` alias that names a cached
+    /// link-estimate without rebuilding the 145 KB canonical input.
+    ///
+    /// The tag is opaque here. It is minted by `lib/utils/sweep-tag.ts` as
+    /// `epoch-{n}:{version}:{fp}`, where `fp` fingerprints the offchain
+    /// parameters that shape the canonical input. That fingerprint is what
+    /// keeps a parameter flip from resolving to the pre-flip result: this
+    /// service cannot recompute it, because the parameters are baked into the
+    /// input by the Next.js builder and never travel separately.
+    ///
+    /// `tag` and `focus` are joined by NUL, which neither can contain, so
+    /// `("epoch-1:v", "a")` and `("epoch-1", "v:a")` cannot collide.
+    fn link_estimate_alias_key(tag: &str, focus: &str) -> String {
+        let hash = crate::queue::hash_payload(&format!("{tag}\u{0}{focus}"));
+        format!("{CACHE_VERSION_PREFIX}/link-estimate-alias-{hash:016x}.json")
+    }
+
+    /// Record which payload hash answers `(tag, focus)`.
+    ///
+    /// Best-effort and backgrounded, like [`S3Cache::store_link_estimate`]: a
+    /// failed alias costs a fallback, never a wrong answer. ONLY call this
+    /// where the result is known to exist, or the alias points at nothing.
+    pub fn store_link_estimate_alias(&self, tag: &str, focus: &str, payload_hash: u64) {
+        let key = Self::link_estimate_alias_key(tag, focus);
+        let body = serde_json::json!({ "payloadHash": format!("{payload_hash:016x}") }).to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let focus = focus.to_string();
+        tokio::spawn(async move {
+            match client
+                .put_object()
+                .bucket(&bucket)
+                .key(&key)
+                .content_type("application/json")
+                .body(body.into_bytes().into())
+                .send()
+                .await
+            {
+                Ok(_) => tracing::debug!(%key, focus, "stored link-estimate alias"),
+                Err(e) => {
+                    tracing::error!(error = %e, %key, focus, "failed to store link-estimate alias")
+                }
+            }
+        });
+    }
+
+    /// The payload hash recorded for `(tag, focus)`, if any. A missing or
+    /// malformed object reads as `None`, which sends the caller down the
+    /// rebuild-from-snapshot path rather than failing.
+    pub async fn load_link_estimate_alias(&self, tag: &str, focus: &str) -> Option<u64> {
+        let key = Self::link_estimate_alias_key(tag, focus);
+        let response = match self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::debug!(error = %e, %key, "no link-estimate alias in S3");
+                return None;
+            }
+        };
+        let bytes = response.body.collect().await.ok()?.into_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes)
+            .inspect_err(|e| tracing::warn!(error = %e, %key, "link-estimate alias is not JSON"))
+            .ok()?;
+        let hex = parsed.get("payloadHash").and_then(|v| v.as_str())?;
+        u64::from_str_radix(hex, 16)
+            .inspect_err(
+                |e| tracing::warn!(error = %e, %key, hex, "link-estimate alias hash is not hex"),
+            )
+            .ok()
+    }
+
     /// Derive the S3 object key for a cached simulate (what-if) result.
     ///
     /// Keyed by the WHOLE `SimulateRequest` payload hash (`queue::hash_payload`,
@@ -541,5 +619,60 @@ mod tests {
         assert_eq!(config.operation_attempt_timeout(), Some(S3_ATTEMPT_TIMEOUT));
         assert_eq!(config.operation_timeout(), Some(S3_OPERATION_TIMEOUT));
         assert!(S3_ATTEMPT_TIMEOUT <= S3_OPERATION_TIMEOUT);
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    #[test]
+    fn alias_key_is_stable_and_separates_its_two_parts() {
+        let key = S3Cache::link_estimate_alias_key("epoch-211:canonical-v1:9f2c", "tsw");
+        assert_eq!(
+            key,
+            S3Cache::link_estimate_alias_key("epoch-211:canonical-v1:9f2c", "tsw"),
+            "same pair, same key"
+        );
+        assert!(key.starts_with(CACHE_VERSION_PREFIX));
+        assert!(key.contains("link-estimate-alias-"));
+    }
+
+    #[test]
+    fn alias_key_changes_when_either_part_changes() {
+        let base = S3Cache::link_estimate_alias_key("epoch-211:v1:aa", "tsw");
+        assert_ne!(
+            base,
+            S3Cache::link_estimate_alias_key("epoch-211:v1:aa", "xyz")
+        );
+        assert_ne!(
+            base,
+            S3Cache::link_estimate_alias_key("epoch-212:v1:aa", "tsw")
+        );
+        // The fingerprint is the guard against a parameter flip resolving to a
+        // pre-flip result, so it must reach the key.
+        assert_ne!(
+            base,
+            S3Cache::link_estimate_alias_key("epoch-211:v1:bb", "tsw")
+        );
+    }
+
+    #[test]
+    fn a_nul_separator_stops_the_two_parts_from_running_together() {
+        // With a ":" separator these two would hash the same string.
+        assert_ne!(
+            S3Cache::link_estimate_alias_key("epoch-1:v", "a"),
+            S3Cache::link_estimate_alias_key("epoch-1", "v:a")
+        );
+    }
+
+    #[test]
+    fn alias_keys_cannot_collide_with_the_result_keys_they_point_at() {
+        let alias = S3Cache::link_estimate_alias_key("epoch-211:v1", "tsw");
+        for hash in [0u64, 1, u64::MAX, 0x9f2c_1234_5678_90ab] {
+            assert_ne!(alias, S3Cache::link_estimate_key(hash));
+            assert_ne!(alias, S3Cache::simulate_key(hash));
+            assert_ne!(alias, S3Cache::cache_key(hash));
+        }
     }
 }

@@ -1,7 +1,15 @@
 # ADR 0002: Snapshot diff index inside the Rust service
 
-- **Status:** Accepted
+- **Status:** Accepted; the ingest half superseded by
+  [ADR 0003](0003-cron-side-snapshot-extraction.md) on 2026-09-04
 - **Date:** 2026-09-03
+
+> [!IMPORTANT]
+> The scanner and poller described below no longer exist. The Vercel cron
+> extracts each epoch's record and `PUT`s it, because the canonical Shapley
+> input needs both ends of a snapshot and so the cron downloads the whole file
+> anyway. ADR 0003 records that change. Everything here about WHY the index is
+> immutable S3 records rather than a database still stands.
 
 > Cross-reference: see [`../shapley-service.md`](../shapley-service.md#snapshot-diff-index) for
 > the implementation detail (scanner, store, poller, routes). This ADR records the

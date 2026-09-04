@@ -3,6 +3,7 @@ import {
   shapleyEndpointUrl,
   shapleyServiceBase,
 } from "@/lib/constants/config";
+import type { DiffShapeRecord } from "@/lib/types/diff";
 import type { ShapleyInput, ShapleyOutput } from "@/lib/types/shapley";
 import { reportError } from "@/lib/observability";
 
@@ -29,6 +30,19 @@ const CANCEL_RETRY_DELAY_MS = 400;
 
 /** Server-side bearer token for the Rust service (never exposed to clients). */
 const API_TOKEN = process.env.SHAPLEY_API_TOKEN;
+/**
+ * Second token, required ON TOP of `SHAPLEY_API_TOKEN` on the ingest routes.
+ * Separate because writing a record every reader is then served is a different
+ * power from asking for a compute. Unset means the service answers 503.
+ */
+const INGEST_TOKEN = process.env.SHAPLEY_INGEST_TOKEN;
+
+/** Headers for a write to the ingest routes: both tokens, never logged. */
+function buildIngestHeaders(): Record<string, string> {
+  const headers = buildHeaders();
+  if (INGEST_TOKEN) headers["X-Ingest-Token"] = INGEST_TOKEN;
+  return headers;
+}
 
 /** Request headers, including the bearer token when configured. */
 function buildHeaders(): Record<string, string> {
@@ -738,4 +752,90 @@ export async function fetchContributorDiffRemote(
     "contributor diff",
     opts.timeoutMs ?? DIFF_TIMEOUT_MS,
   );
+}
+
+
+/**
+ * Push one epoch's extracted diff record to the service.
+ *
+ * `"exists"` is a normal outcome, not a failure: writes are create-only and the
+ * cron is idempotent, so a re-run of an already-ingested epoch conflicts by
+ * design. Callers must not log it as an error.
+ */
+export async function putDiffShape(
+  shape: DiffShapeRecord,
+): Promise<"created" | "exists"> {
+  const response = await fetch(`${jobsBase()}/diff/shape/${shape.epoch}`, {
+    method: "PUT",
+    headers: buildIngestHeaders(),
+    body: JSON.stringify(shape),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (response.status === 201) return "created";
+  if (response.status === 409) return "exists";
+  const detail = await response.text().catch(() => "");
+  // Never echo the tokens; `detail` is the service's own message.
+  throw new JobStartError(
+    `put diff shape HTTP ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`,
+    response.status,
+  );
+}
+
+/**
+ * Epochs in `[latest - depth + 1, latest]` with no persisted record.
+ *
+ * This is the repair signal. Before this existed the service ingested on
+ * demand, so a gap healed itself on the next request; now nothing fills a gap
+ * unless the cron is told about it.
+ */
+export async function fetchMissingDiffShapes(
+  latest: number,
+  depth: number,
+): Promise<number[]> {
+  const response = await fetch(
+    `${jobsBase()}/diff/missing?latest=${latest}&depth=${depth}`,
+    {
+      method: "GET",
+      headers: buildHeaders(),
+      signal: AbortSignal.timeout(15_000),
+    },
+  );
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new JobStartError(
+      `diff missing HTTP ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`,
+      response.status,
+    );
+  }
+  const data = (await response.json()) as { missing?: number[] };
+  return Array.isArray(data.missing) ? data.missing : [];
+}
+
+/**
+ * Start a link-estimate job from the precomputed `(tag, operator)` alias.
+ *
+ * `null` means the service has no precomputed result for this pair, which is
+ * the caller's cue to take the slow path. It is NOT an error: a cold epoch, or
+ * an operator over the sweep's link cap, legitimately has no alias.
+ */
+export async function startLinkEstimateJobByTag(
+  tag: string,
+  operatorFocus: string,
+): Promise<string | null> {
+  const response = await fetch(`${jobsBase()}/jobs/link-estimate/by-tag`, {
+    method: "POST",
+    headers: buildHeaders(),
+    body: JSON.stringify({ tag, operator_focus: operatorFocus }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new JobStartError(
+      `start link-estimate by tag HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
+      response.status,
+    );
+  }
+  const data = (await response.json()) as { job_id: string };
+  return data.job_id;
 }

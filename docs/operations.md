@@ -48,26 +48,32 @@ Build the image from `services/shapley-rs/Dockerfile`. The Dockerfile produces a
 
 ### Roles
 
-The binary accepts a role argument (`api`, `worker`, or `diff-backfill`, also as `--role=api` / `--role=worker` / `--role=diff-backfill`):
+The binary accepts a role argument (`api` or `worker`, also as `--role=api` / `--role=worker`):
 
 ```bash
 # API pod (HTTP server)
 docker run --env-file .env -p 8080:8080 dz-shapley-service api
 
-# Worker pod (Redis stream consumer + snapshot diff poller)
+# Worker pod (Redis stream consumer)
 docker run --env-file .env dz-shapley-service worker
 
 # One-shot diff index backfill (runs from a terminal, exits when done)
-docker run --env-file .env dz-shapley-service diff-backfill
 ```
 
 Run one or more `api` replicas behind a load balancer and one or more `worker` replicas consuming from the shared Redis stream. The job queue design and horizontal scaling rationale are documented in [adr/0001-async-compute-queue.md](adr/0001-async-compute-queue.md).
 
-The `worker` role also runs the snapshot diff poller: every 15 minutes it discovers the latest published epoch and ingests every epoch missing from the `diff/v1/` index in the result-cache bucket. Each ingest streams about 3.7 MB from the public snapshot bucket, so the cluster must allow HTTPS egress to `doublezero-contributor-rewards-mn-beta-snapshots.s3.us-east-1.amazonaws.com`. Ingests are idempotent across replicas. An epoch that fails to ingest, including one whose shape was extracted but could not be written, is retried on a doubling backoff from 15 minutes up to 24 hours, so a permanently unreadable epoch costs about one attempt a day rather than 96. The tick summary logs `deferred` alongside `ingested`, `missing` and `failed`. See [shapley-service.md](shapley-service.md#snapshot-diff-index) and [adr/0002-snapshot-diff-index.md](adr/0002-snapshot-diff-index.md).
+The `worker` role no longer ingests snapshots. Diff records are written by the Vercel cron (`/api/link-value/precompute`), which already downloads each epoch's snapshot for the Shapley sweep, and arrive over `PUT /diff/shape/:epoch`. The service therefore needs NO egress to the public snapshot bucket; it reaches only Redis and the object gateway. See [shapley-service.md](shapley-service.md#snapshot-diff-index) and [adr/0003-cron-side-snapshot-extraction.md](adr/0003-cron-side-snapshot-extraction.md).
 
-### diff-backfill
+### Backfilling the diff index
 
-`diff-backfill` runs the same fill the poller runs, once, and exits. Use it for the initial fill after the first deploy, or after a `DIFF_SHAPE_VERSION_PREFIX` bump, so the fill can be watched from a terminal instead of inferred from worker logs. It needs the same `S3_CACHE_*` and `AWS_*` variables as the worker; `REDIS_URL` is not required. With `S3_CACHE_BUCKET` unset there is no durable persistence, so the role exits non-zero at once without reading any snapshot. The process exits `0` when no epoch failed and `1` otherwise; the failure count and the failed epoch numbers are in the final log line. An epoch whose snapshot the bucket does not carry is reported as missing, which is a hole in the published range rather than a failure. The initial fill of about 165 epochs takes 2 to 5 minutes. This role attempts every missing epoch, including ones the poller has backed off.
+The cron repairs the last 31 epochs on every fire, which is the window the changelog selector offers. Deeper history is a one-off from a workstation:
+
+```bash
+pnpm run backfill:diff -- --dry-run     # report what is missing
+pnpm run backfill:diff                  # fill it, newest first
+```
+
+It needs `SHAPLEY_SERVICE_URL`, `SHAPLEY_API_TOKEN` and `SHAPLEY_INGEST_TOKEN`. Each epoch is a ~110 MB download, so the full history is a few hours. Safe to interrupt and re-run: writes are create-only, so an epoch already stored answers `409` and is counted as done. Run it after the first deploy and after any `DIFF_SHAPE_VERSION_PREFIX` bump.
 
 ### Clearing a bad diff shape
 
@@ -115,6 +121,7 @@ Consumed by the Next.js server-side code. Set via `vercel env add <NAME> product
 | `SHAPLEY_SERVICE_URL` | — | Base URL of the Rust Shapley microservice. Validated at module load (`lib/constants/config.ts`); must be `http://` or `https://`. Trailing slashes and known endpoint suffixes are stripped. | Compute routes fall back to the in-process TypeScript coalition-enumeration solver (directionally correct, not bit-comparable to Foundation output). Responses are labeled `local-ts-heuristic-DEV-ONLY`. `/api/diff*` routes return `503`; they have no fallback. |
 | `PYTHON_SHAPLEY_URL` | — | Legacy alias for `SHAPLEY_SERVICE_URL` (previous Python deployment). Checked in `lib/constants/config.ts` only when `SHAPLEY_SERVICE_URL` is unset. | Same as `SHAPLEY_SERVICE_URL` unset. |
 | `SHAPLEY_API_TOKEN` | — | Bearer token sent by the frontend to the Rust service (`lib/utils/shapley-remote.ts`). Never exposed to the browser. | Requests to the Rust service are sent without an `Authorization` header. If the service is configured fail-closed (no `SHAPLEY_ALLOW_UNAUTHENTICATED=1`), all compute calls return `401`. |
+| `SHAPLEY_INGEST_TOKEN` | — | Second token the cron sends as `X-Ingest-Token` when writing a diff record. Must match the service's value. Never exposed to the browser. | The cron's shape writes fail with `503` and are reported per fire; the sweep half still runs. |
 | `DZ_CANONICAL_INPUTS_URL` | — | URL template (with `{N}` epoch placeholder) for Foundation-published canonical Shapley input CSVs. Described in `.env.example`. | Falls back to S3 snapshot-derived inputs. |
 | `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana mainnet RPC endpoint used by on-chain routes (`lib/onchain/program-ids.ts`). The public default is rate-limited; a dedicated provider (e.g. Helius) is recommended for production. | Uses the public Solana mainnet RPC. |
 | `DZ_LEDGER_RPC_URL` | — | RPC endpoint for the DoubleZero ledger (a Solana sidechain). Required for any `/api/onchain/*` route. No default in code — a previous default embedded a paid API key in source. | On-chain routes that need the DZ ledger will fail; `ONCHAIN_ENABLED` gates whether they are attempted. |
@@ -148,8 +155,7 @@ Consumed by `services/shapley-rs/src/main.rs`, `src/cache.rs`, `src/jobs.rs`, an
 | `AWS_REGION` | `us-east-1` | AWS region for the S3 client (`cache.rs`). | Defaults to `us-east-1`. |
 | `AWS_ACCESS_KEY_ID` | — | S3 credentials via the standard AWS SDK credential chain. | SDK falls back to IAM role / instance metadata / env chain. Required when not running on AWS infrastructure with attached roles. |
 | `AWS_SECRET_ACCESS_KEY` | — | Paired with `AWS_ACCESS_KEY_ID`. | See above. |
-| `DZ_SNAPSHOT_BUCKET` | `doublezero-contributor-rewards-mn-beta-snapshots` | Public bucket the diff index reads epoch snapshots from (`snapshot::S3SnapshotReader::from_env()`). Read unsigned; no credentials are used. | Reads the DoubleZero production snapshot bucket. |
-| `DZ_SNAPSHOT_REGION` | `us-east-1` | Region of `DZ_SNAPSHOT_BUCKET`. | Defaults to `us-east-1`. |
+| `SHAPLEY_INGEST_TOKEN` | — | Second bearer token, required ON TOP of `SHAPLEY_API_TOKEN` on `PUT /diff/shape/:epoch`, sent as `X-Ingest-Token`. Constant-time comparison in `main.rs` `require_ingest_auth`. | The ingest routes answer `503` and the diff index accepts no new epochs. Reads keep working. Unlike the compute token, unset does NOT mean open. |
 
 ---
 

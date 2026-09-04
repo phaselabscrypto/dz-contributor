@@ -231,42 +231,20 @@ The same image runs in two roles, selected by the first arg (or `--role=`):
   `shapley:whatif:dead` stream. At-least-once delivery is made safe by the
   `result:{hash}` idempotency cache.
 
-- **`diff-backfill`**: `args: ["diff-backfill"]`. One-shot: discovers the
-  latest published epoch, ingests every epoch from 48 to latest that is missing
-  from the `diff/v1/` index in the result-cache bucket, prints a summary, and
-  exits. Exit status is non-zero when any epoch failed, and the role refuses to
-  read anything when `S3_CACHE_BUCKET` is unset, because nothing it ingested
-  would outlive the process. Needs the `S3_CACHE_*`
-  and `AWS_*` variables; `REDIS_URL` is not required. The `worker` role runs the
-  same fill every 15 minutes, so this role is for the initial fill and for a
-  refill after a `DIFF_SHAPE_VERSION_PREFIX` bump.
 
-The worker runs as a **fixed pool** — no autoscaler, no operator dependency.
-All replicas share the `whatif-workers` consumer group, each with a unique
-`worker-<uuid>` consumer name, so jobs fan out one-per-worker and a dead pod's
-in-flight entry is reclaimed by a sibling (XAUTOCLAIM). **Roll the worker
-deployment before (or with) the API** when upgrading — `args: [worker]`
-against an old image silently runs the API server: a "healthy" worker doing
-no queue work.
 
-### Egress to the public snapshot bucket
+### The diff index needs no egress
 
-The diff index (`/diff*`, the worker poller, and `diff-backfill`) streams the
-first 3.7 MB of each epoch snapshot from the public bucket
-`doublezero-contributor-rewards-mn-beta-snapshots` in `us-east-1`, unsigned.
-The cluster must allow HTTPS egress from both the `api` and `worker` pods to
-`doublezero-contributor-rewards-mn-beta-snapshots.s3.us-east-1.amazonaws.com`.
-Check from a running pod before the first deploy:
+`/diff*` is served from per-epoch records under `diff/v1/` in the result-cache
+bucket. Records arrive over `PUT /diff/shape/:epoch` from the Vercel cron, gated
+by `SHAPLEY_INGEST_TOKEN` on top of the compute token, and
+`GET /diff/missing?latest=N&depth=D` tells the cron which epochs it still owes.
 
-```bash
-curl -sI --max-time 10 \
-  https://doublezero-contributor-rewards-mn-beta-snapshots.s3.us-east-1.amazonaws.com/mn-epoch-211-snapshot.json | head -1
-# HTTP/1.1 200 OK
-```
-
-If egress is blocked, the poller logs the failure on every tick and the index
-never fills; the fix is a cluster-side egress rule. Override the bucket and
-region with `DZ_SNAPSHOT_BUCKET` and `DZ_SNAPSHOT_REGION`.
+The service reads no public bucket, so the pods reach only Redis and the object
+gateway. That is deliberate: the cron already downloads each snapshot for the
+Shapley sweep, and doing the extraction there means cluster egress to the
+public internet never has to be opened. See
+[ADR 0003](../../docs/adr/0003-cron-side-snapshot-extraction.md).
 
 ### Verify deploy
 

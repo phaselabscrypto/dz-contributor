@@ -211,13 +211,24 @@ async fn process_entry(
             // `focus` ⇒ a sweep child: the entry's `payload_key` references the
             // parent sweep's SHARED payload; build the request from it + focus.
             // No `focus` ⇒ self-contained `LinkEstimateRequest` (UI path).
+            // `alias_tag` is Some only for a sweep child whose parent both
+            // carried a tag and derived its own operator set. An explicit
+            // operator list may be partial and its tag is not trustworthy as a
+            // description of the epoch, which is the same reason the sweep
+            // marker is gated on `derived_operators`.
+            let mut alias_tag: Option<String> = None;
             let body: Option<LinkEstimateRequest> = match &entry.focus {
                 Some(focus) => {
                     let shared: Option<SweepPayload> =
                         store.get_payload_by_key(&entry.payload_key).await?;
-                    shared.map(|sweep| LinkEstimateRequest {
-                        input: sweep.input,
-                        operator_focus: focus.clone(),
+                    shared.map(|sweep| {
+                        if sweep.derived_operators {
+                            alias_tag = sweep.tag.clone();
+                        }
+                        LinkEstimateRequest {
+                            input: sweep.input,
+                            operator_focus: focus.clone(),
+                        }
                     })
                 }
                 None => {
@@ -243,7 +254,10 @@ async fn process_entry(
                         &entry.job_id,
                         entry_id,
                         consumer,
-                        &entry.input_hash,
+                        ResultKeys {
+                            payload_hash_hex: &entry.input_hash,
+                            alias_tag: alias_tag.as_deref(),
+                        },
                         body,
                     )
                     .await
@@ -473,6 +487,16 @@ async fn run_simulate(
     }
 }
 
+/// Where a finished link-estimate gets filed in S3.
+#[derive(Clone, Copy)]
+struct ResultKeys<'a> {
+    /// The stream entry's `input_hash`; names the result object.
+    payload_hash_hex: &'a str,
+    /// Sweep tag, when this child belongs to a tag-carrying, operator-derived
+    /// sweep. `Some` means also record the `(tag, focus)` alias on success.
+    alias_tag: Option<&'a str>,
+}
+
 /// Faithful per-link Shapley (retag-Shapley port of Python `network_linkestimate`),
 /// single-shot over the whole demand set — one cancellable coalition solve with
 /// progress, no baseline/per-city phases. Mirrors [`run_simulate`]'s control/bridge
@@ -482,15 +506,27 @@ async fn run_simulate(
 /// immutable); a fresh solve is persisted back to S3 so it is computed once,
 /// ever. `payload_hash_hex` is the stream entry's `input_hash` — the same key
 /// the sync path and the sweep derive via `routes::link_estimate_payload_hash`.
+///
+/// `alias_tag` is the sweep tag when this is a sweep child of a tag-carrying,
+/// operator-derived sweep. On success the `(tag, focus)` alias is written
+/// alongside the result, which is the ONLY moment the result is known to
+/// exist. Writing it in the sweep's expansion loop instead would point an
+/// alias at a solve that has not happened and might never happen.
 async fn run_link_estimate(
     state: &Arc<crate::AppState>,
     store: &RedisJobStore,
     job_id: &str,
     entry_id: &str,
     consumer: &str,
-    payload_hash_hex: &str,
+    keys: ResultKeys<'_>,
     body: LinkEstimateRequest,
 ) -> Outcome {
+    let ResultKeys {
+        payload_hash_hex,
+        alias_tag,
+    } = keys;
+    // Kept out of `body` because the solve consumes it.
+    let operator_focus = body.operator_focus.clone();
     let payload_hash = match u64::from_str_radix(payload_hash_hex, 16) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -545,6 +581,13 @@ async fn run_link_estimate(
             // immutable, so this result never needs recomputing.
             if let (Some(hash), Some(s3)) = (payload_hash, &state.s3_cache) {
                 s3.store_link_estimate(hash, &resp);
+                // Both writes are backgrounded and independent. A landed
+                // result with no alias costs one rebuild; the reverse would
+                // serve a dangling pointer, which is why the alias is never
+                // written anywhere the result is not already proven present.
+                if let Some(tag) = alias_tag {
+                    s3.store_link_estimate_alias(tag, &operator_focus, hash);
+                }
             }
             Outcome::Done(Box::new(
                 // Plain structs of strings/floats — serialization cannot fail.
@@ -613,6 +656,14 @@ async fn run_sweep(
     shared_payload_key: &str,
     payload: SweepPayload,
 ) -> Outcome {
+    // Same gate as the sweep marker below: an explicit operator list may be
+    // partial, so its tag does not reliably describe the epoch and must not
+    // key an alias every later reader trusts.
+    let alias_tag: Option<&str> = if payload.derived_operators {
+        payload.tag.as_deref()
+    } else {
+        None
+    };
     let mut enqueued: Vec<serde_json::Value> = Vec::new();
     let mut cached: Vec<String> = Vec::new();
     let mut skipped: Vec<serde_json::Value> = Vec::new();
@@ -650,6 +701,13 @@ async fn run_sweep(
             None => false,
         };
         if sweep_bucket(links, s3_cached, false) == SweepBucket::Cached {
+            // The one place besides the solve-success path where the result is
+            // proven to exist: the load above just returned it. This is what
+            // back-fills aliases for epochs solved before aliases existed, on
+            // the single re-sweep a tag-fingerprint bump forces.
+            if let (Some(s3), Some(tag)) = (&state.s3_cache, alias_tag) {
+                s3.store_link_estimate_alias(tag, op, hash);
+            }
             cached.push(op.clone());
             continue;
         }
