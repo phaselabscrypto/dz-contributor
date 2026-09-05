@@ -1,23 +1,4 @@
-/**
- * Per-epoch diff record extraction.
- *
- * Restored from `lib/utils/snapshot-diff.ts`, which PR 23 replaced with a
- * byte-level scanner in the Rust service. The scanner is gone again: it only
- * worked because the diff needs the first 3.7 MB of a snapshot, while the
- * canonical Shapley input needs both ends of the file, so the cron has to
- * download the whole thing anyway. Extracting here costs one pass over an
- * object already in memory.
- *
- * Field names are the wire contract shared with `DiffShape` in
- * `services/shapley-rs/src/diff.rs`; the two must change together, and
- * `DIFF_SHAPE_VERSION_PREFIX` in `diff_store.rs` must be bumped when they do.
- *
- * Record ORDER is part of the contract. The diff reports entries in snapshot
- * file order and `tests/fixtures/diff/*.json` pins it. `Object.entries`
- * preserves insertion order here because every key is a base58 pubkey and no
- * base58 string parses as an array index, which is what makes this match the
- * `OrderedMap` the Rust extractor used.
- */
+/** Extracts ordered diff records from a validated snapshot. */
 
 import type { RawSnapshot } from "@/lib/types/snapshot";
 import type { ContributorRef, DiffShapeRecord, LinkRef } from "@/lib/types/diff";
@@ -36,13 +17,11 @@ const BPS_PER_GBPS = 1e9;
 export function extractDiffShape(raw: RawSnapshot): DiffShapeRecord {
   const svc = raw.fetch_data.dz_serviceability;
 
-  // pubkey → location code.
   const locationCode = new Map<string, string>();
   for (const [pk, loc] of Object.entries(svc.locations)) {
     locationCode.set(pk, loc.code);
   }
 
-  // pubkey → contributor code.
   const contributorCode = new Map<string, string>();
   for (const [pk, c] of Object.entries(svc.contributors)) {
     contributorCode.set(pk, c.code);
@@ -73,7 +52,7 @@ export function extractDiffShape(raw: RawSnapshot): DiffShapeRecord {
     }
   }
 
-  // Link extraction. Raw bandwidth is bps; convert to Gbps for display.
+  // Snapshot insertion order is part of the diff response contract.
   const links: LinkRef[] = [];
   const linksByContributor = new Map<string, number>();
 
@@ -93,7 +72,6 @@ export function extractDiffShape(raw: RawSnapshot): DiffShapeRecord {
     );
   }
 
-  // Contributor footprint stats.
   const contributors: ContributorRef[] = [];
   for (const c of Object.values(svc.contributors)) {
     contributors.push({

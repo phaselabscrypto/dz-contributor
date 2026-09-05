@@ -1,23 +1,10 @@
-//! Failure modes of the per-epoch diff shape store.
-//!
-//! Replaces the old `SnapshotError`, which described reads against the public
-//! snapshot bucket. The service no longer reads that bucket: shapes arrive by
-//! `PUT /diff/shape/:epoch` from the Next.js cron, so the only things that can
-//! go wrong are a missing record, an unreachable object store, a duplicate
-//! write, or a body that fails validation.
-//!
-//! `Display` and `Error` are written by hand. The crate depends on `anyhow`
-//! and not on `thiserror`, and both `SnapshotError` and `ScanFailure` were
-//! hand-written before it, so this keeps one pattern in the crate.
+//! Failures from per-epoch shape reads and writes.
 
 use std::fmt;
 
 use crate::epoch::Epoch;
 
-/// Text of [`DiffStoreError::NotFound`]. Frozen: `/changelog` renders the
-/// service's 404 body verbatim for an epoch that has not landed, and
-/// `lib/utils/snapshot-diff.ts` matched it with `^epoch \d+: snapshot HTTP \d+$`
-/// before it was deleted. Changing this changes what a user reads.
+// Public text shown by the changelog.
 const NOT_FOUND_TEMPLATE: &str = "snapshot HTTP 404";
 
 /// Why a shape read or write did not succeed.

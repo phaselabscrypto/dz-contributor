@@ -1531,6 +1531,13 @@ pub async fn link_estimate_start_by_tag(
     State(state): State<Arc<crate::AppState>>,
     Json(body): Json<LinkEstimateByTagRequest>,
 ) -> impl IntoResponse {
+    if body.tag.contains('\0') || body.operator_focus.contains('\0') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "tag and operator must not contain NUL"})),
+        )
+            .into_response();
+    }
     let not_found = || {
         (
             StatusCode::NOT_FOUND,
@@ -1570,6 +1577,9 @@ pub async fn link_estimate_start_by_tag(
         );
         return not_found();
     };
+    if cached.operator_focus != body.operator_focus {
+        return not_found();
+    }
     let Ok(value) = serde_json::to_value(&cached) else {
         // Unreachable for plain structs; fall back rather than 500.
         tracing::error!("cached link-estimate failed to re-serialize");
@@ -1685,6 +1695,16 @@ pub async fn link_estimate_sweep(
         }
     };
 
+    if body.tag.as_deref().is_some_and(|tag| tag.contains('\0'))
+        || (body.tag.is_some() && operators.iter().any(|op| op.contains('\0')))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "tag and operator must not contain NUL"})),
+        )
+            .into_response();
+    }
+
     let job_id = match store.create().await {
         Ok(id) => id,
         Err(e) => {
@@ -1701,6 +1721,7 @@ pub async fn link_estimate_sweep(
         input: body.input,
         operators,
         derived_operators,
+        is_canonical_publish_authorized: true,
         tag: body.tag,
     };
     // Store the epoch input ONCE with the long sweep TTL (children reference

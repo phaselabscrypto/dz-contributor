@@ -39,6 +39,13 @@ jobs:
       - name: Lint
         run: pnpm run lint
 
+      - name: Precompute regressions
+        run: |
+          pnpm exec tsc --noEmit --incremental false
+          pnpm run test:diff-window
+          pnpm run test:diff-repair-schedule
+          pnpm run test:precompute-ingest
+
       - name: Build
         run: pnpm run build
         env:

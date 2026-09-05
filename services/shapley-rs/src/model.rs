@@ -100,27 +100,29 @@ pub struct LinkEstimateRequest {
     pub operator_focus: String,
 }
 
-/// Payload of a `JobKind::Sweep` job — stored ONCE per sweep under the sweep
-/// job's payload key (24h TTL, `queue::SWEEP_PAYLOAD_TTL_SECS`) and shared by
-/// every child link-estimate entry via `payload_key` + `focus`, so a
-/// 20-operator sweep holds one copy of the epoch input in Redis, not twenty.
+/// Stored once per sweep and shared by its queued children.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SweepPayload {
     pub input: ShapleyInputIn,
     pub operators: Vec<String>,
-    /// Whether `operators` was derived service-side from the input's devices
-    /// (⇒ guaranteed-complete set). Only derived sweeps may write the "fully
-    /// swept" marker: an explicit — possibly partial — list carrying the
-    /// canonical tag must never mark the epoch complete, or the cron would
-    /// skip the unswept remainder forever. `#[serde(default)]` so a payload
-    /// stored by a pre-field producer decodes as NOT derived (degrades to "no
-    /// marker", never to a false marker).
     #[serde(default)]
     pub derived_operators: bool,
-    /// Opaque caller tag (e.g. `epoch-{N}:canonical-v1:{params fingerprint}`)
-    /// keying the S3 "fully swept" marker. `None` ⇒ no marker is written.
+    /// Set by the ingest-authenticated producer; legacy payloads cannot publish.
+    #[serde(default)]
+    pub is_canonical_publish_authorized: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+}
+
+impl SweepPayload {
+    pub(crate) fn canonical_tag(&self) -> Option<&str> {
+        self.tag.as_deref().filter(|tag| {
+            self.is_canonical_publish_authorized
+                && self.derived_operators
+                && !tag.contains('\0')
+                && self.operators.iter().all(|op| !op.contains('\0'))
+        })
+    }
 }
 
 // One per focus-owned link, canonical `device1 < device2` orientation, mapped 1:1

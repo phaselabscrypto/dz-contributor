@@ -12,10 +12,11 @@ GET  /health           -> { status, service, version }
 POST /shapley          -> ShapleyResponse        { method, operator_count, values }
 POST /link-estimate    -> LinkEstimateResponse   (faithful retag-Shapley; sync, S3-served when precomputed)
 POST /jobs/link-estimate -> 202 { job_id }       (async: progress + cancel via /jobs/:id; done-at-submit on S3 hit)
-POST /precompute/link-estimates -> { enqueued, cached, skipped }   (epoch sweep)
+POST /precompute/link-estimates -> 202 { job_id }   (compute + ingest tokens)
 GET  /diff?from&to     -> NetworkDiffResponse      (topology diff between two epochs, from the diff index)
 GET  /diff/contributor/:code?from&to -> ContributorDiffResponse (per-contributor diff; no display name)
-POST /diff/precompute?epoch=N|depth=D -> { latest, results }   (ingest epochs into the diff index)
+PUT  /diff/shape/:epoch -> 201 created | 409 readable existing record
+GET  /diff/missing?latest=N&depth=D -> { missing }
 ```
 
 ### Epoch precompute sweep
@@ -24,20 +25,19 @@ Epoch inputs are immutable, so each `(epoch, operator)` link-estimate is
 computed once and persisted to S3 (`shapley/v3/link-estimate-{payload_hash}.bin`,
 keyed by the job payload hash). The Vercel cron `GET /api/link-value/precompute`
 (authed via `CRON_SECRET`) builds the epoch input and calls the sweep, which
-enqueues one job per operator:
+enqueues one sweep job. A worker expands it into per-operator jobs:
 
 ```bash
 curl -fsS -X POST "$BASE/precompute/link-estimates" \
   -H "authorization: Bearer $SHAPLEY_API_TOKEN" \
+  -H "X-Ingest-Token: $SHAPLEY_INGEST_TOKEN" \
   -H 'content-type: application/json' \
-  --data-binary '{ "input": { ...ShapleyInputIn... }, "operators": ["Alpha", "Beta"] }'
-# -> { "enqueued": [{"operator":"Beta","job_id":"..."}], "cached": ["Alpha"],
-#      "skipped": [{"operator":"Gamma","reason":"22 links exceeds the 20-player exact cap (19 max)"}] }
+  --data-binary @canonical-sweep.json
 ```
 
-Omit `operators` to derive them from the input's devices. The response is fully
-transparent — every operator lands in exactly one bucket. Operators above the
-19-link exact cap are reported in `skipped`, never silently dropped.
+The body contains `input` and `tag`. Omit `operators` to derive the complete set. Poll the returned `job_id` for `enqueued`, `cached`, `skipped`, `already_running`, `failed`, and `marker_written`. Explicit operator subsets and legacy stored payloads cannot publish canonical metadata.
+
+Result keys remain under `shapley/v3/`; trusted aliases and markers use `shapley/v3/canonical/v1/`. Publication awaits result and alias writes, while the claim heartbeat remains active. A failed alias leaves the marker absent so a later sweep can retry from cached results.
 
 Wire-types live in `src/model.rs` and mirror the JSON our Next.js routes
 already produce (see `lib/types/shapley.ts`).
@@ -278,3 +278,15 @@ Parity is verified against the Python reference in the engine crate
 should use `POST /jobs/link-estimate` (progress + cancellation) rather than the
 blocking sync endpoint, since a near-cap operator enumerates up to `2^20`
 coalitions.
+
+## Regression tests
+
+Use an empty, dedicated Redis database. The publication test refuses an occupied database and cleans up the keys it creates.
+
+```bash
+redis-server --bind 127.0.0.1 --port 6390 --save '' --appendonly no
+# In another shell, from services/shapley-rs:
+TEST_REDIS_URL=redis://127.0.0.1:6390/13 cargo test --locked
+```
+
+The default storage tests run a local mock S3 server with the real SDK. Gateway acceptance is separate and requires a disposable `pr24-canary-<UUID>` bucket. See [operations](../../docs/operations.md#canonical-publication-rollout) for rollout and historical warm-up.

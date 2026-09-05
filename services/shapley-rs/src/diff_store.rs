@@ -1,7 +1,4 @@
-//! Per-epoch diff shape store: memory, then durable persistence. Records are
-//! written by `PUT /diff/shape/:epoch`, which the Next.js cron calls with the
-//! shape it extracted from the snapshot it already downloaded. Reads never
-//! touch the public snapshot bucket, so an epoch nobody wrote is a 404.
+//! Durable per-epoch shapes with a process cache. Missing records are repaired by ingestion.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -14,15 +11,13 @@ use crate::diff::DiffShape;
 use crate::diff_error::DiffStoreError;
 use crate::epoch::{BoxFuture, Epoch, MIN_DZ_EPOCH};
 
-/// BUMP when `DiffShape` fields change, or when the extractor that fills them
-/// changes what it emits. That extractor now lives in the Next.js cron
-/// (`lib/utils/diff-shape.ts`), so the trigger for a bump is a change there,
-/// not in this crate. Independent of `CACHE_VERSION_PREFIX`: an LP engine bump
-/// must not orphan the diff index.
+/// Change when the persisted shape schema or extraction contract changes.
 pub const DIFF_SHAPE_VERSION_PREFIX: &str = "diff/v1";
-/// How long the highest known epoch is trusted before the shape prefix is
-/// listed again. A successful `put` advances it without waiting for the TTL.
 pub const LATEST_EPOCH_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_SHAPE_BYTES: usize = 2 * 1024 * 1024;
+const MISSING_READ_CONCURRENCY: usize = 8;
+const MISSING_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const MISSING_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SHAPE_KEY_STEM: &str = "shape-";
 const SHAPE_KEY_SUFFIX: &str = ".json";
@@ -49,30 +44,34 @@ pub(crate) fn epoch_from_key(key: &str) -> Option<Epoch> {
     digits.parse::<u32>().ok().map(Epoch)
 }
 
-/// Durable per-epoch shape storage. The S3 implementation writes JSON to the
-/// result-cache bucket; tests use a HashMap.
+#[derive(Debug)]
+pub enum ShapeRead {
+    Missing,
+    Present(Arc<DiffShape>),
+    Corrupt { etag: Option<String> },
+}
+
+#[derive(Debug)]
+pub enum ShapeWriteCondition {
+    Absent,
+    MatchEtag(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConditionalWriteOutcome {
+    Stored,
+    PreconditionFailed,
+}
+
+/// Read failures must remain errors; only downloaded bytes can prove corruption.
 pub trait ShapePersistence: Send + Sync {
-    /// The shape persisted for `epoch`. A malformed object is logged and
-    /// treated as a miss.
-    fn load(&self, epoch: Epoch) -> BoxFuture<'_, Option<Arc<DiffShape>>>;
-    /// Persist one shape, overwriting whatever is at that key.
-    ///
-    /// Create-only is enforced one level up in [`DiffStore::put`], not here,
-    /// because the repair case needs to overwrite deliberately.
-    fn store<'a>(&'a self, shape: &'a DiffShape) -> BoxFuture<'a, Result<(), anyhow::Error>>;
-    /// Whether an object exists at this epoch's key, whatever its contents.
-    ///
-    /// Distinct from `load`, which answers `None` for an absent object AND for
-    /// one that is corrupt or names another epoch. `put` needs to tell those
-    /// apart, and a transient store failure must surface as `Err` here rather
-    /// than read as absent and let a write through.
-    fn exists(&self, epoch: Epoch) -> BoxFuture<'_, Result<bool, anyhow::Error>>;
-    /// Every epoch that has a persisted shape.
+    fn load(&self, epoch: Epoch) -> BoxFuture<'_, Result<ShapeRead, anyhow::Error>>;
+    fn store_conditional<'a>(
+        &'a self,
+        shape: &'a DiffShape,
+        condition: ShapeWriteCondition,
+    ) -> BoxFuture<'a, Result<ConditionalWriteOutcome, anyhow::Error>>;
     fn persisted_epochs(&self) -> BoxFuture<'_, Result<BTreeSet<Epoch>, anyhow::Error>>;
-    /// Whether a stored shape outlives the process. `true` for any real
-    /// backing store; [`NoPersistence`] overrides it to `false`, which is what
-    /// makes the write routes answer 503 instead of accepting a record that
-    /// silently evaporates on restart.
     fn is_durable(&self) -> bool {
         true
     }
@@ -94,7 +93,7 @@ impl From<S3CacheRef> for S3ShapePersistence {
 }
 
 impl S3ShapePersistence {
-    async fn load_object(&self, epoch: Epoch) -> Option<Arc<DiffShape>> {
+    async fn load_object(&self, epoch: Epoch) -> Result<ShapeRead, anyhow::Error> {
         let key = shape_key(epoch);
         let response = match self
             .client
@@ -105,70 +104,68 @@ impl S3ShapePersistence {
             .await
         {
             Ok(response) => response,
-            Err(error) => {
-                if error
-                    .as_service_error()
-                    .is_some_and(|service_error| service_error.is_no_such_key())
-                {
-                    tracing::debug!(%key, "no persisted diff shape (miss)");
-                } else {
-                    tracing::warn!(error = %DisplayErrorContext(&error), %key,
-                        "S3 get_object failed for diff shape");
-                }
-                return None;
+            Err(error) if error.as_service_error().is_some_and(|e| e.is_no_such_key()) => {
+                return Ok(ShapeRead::Missing);
             }
+            Err(error) => return Err(anyhow::anyhow!("{}", DisplayErrorContext(&error))),
         };
-        let bytes = match response.body.collect().await {
-            Ok(aggregated) => aggregated.into_bytes(),
-            Err(error) => {
-                tracing::warn!(error = %error, %key, "failed to read persisted diff shape body");
-                return None;
-            }
-        };
+        let etag = response.e_tag().map(str::to_owned);
+        anyhow::ensure!(
+            response
+                .content_length()
+                .is_none_or(|size| size <= MAX_SHAPE_BYTES as i64),
+            "persisted diff shape exceeds body limit"
+        );
+        let mut body = response.body;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk?;
+            anyhow::ensure!(
+                chunk.len() <= MAX_SHAPE_BYTES.saturating_sub(bytes.len()),
+                "persisted diff shape exceeds body limit"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
         match serde_json::from_slice::<DiffShape>(&bytes) {
-            Ok(shape) if shape.epoch == epoch => Some(Arc::new(shape)),
-            Ok(shape) => {
-                tracing::warn!(%key, found = shape.epoch.0,
-                    "persisted diff shape names another epoch; treating as miss");
-                None
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, %key,
-                    "persisted diff shape is malformed; treating as miss");
-                None
+            Ok(shape) if shape.epoch == epoch => Ok(ShapeRead::Present(Arc::new(shape))),
+            _ => {
+                tracing::warn!(%key, "persisted diff shape is corrupt");
+                Ok(ShapeRead::Corrupt { etag })
             }
         }
     }
 
-    async fn store_object(&self, shape: &DiffShape) -> Result<(), anyhow::Error> {
+    async fn store_object(
+        &self,
+        shape: &DiffShape,
+        condition: ShapeWriteCondition,
+    ) -> Result<ConditionalWriteOutcome, anyhow::Error> {
         let key = shape_key(shape.epoch);
         let bytes = serde_json::to_vec(shape)?;
-        let size_bytes = bytes.len();
-        self.client
+        anyhow::ensure!(
+            bytes.len() <= MAX_SHAPE_BYTES,
+            "diff shape exceeds body limit"
+        );
+        let request = self
+            .client
             .put_object()
             .bucket(&self.bucket)
             .key(&key)
             .content_type(SHAPE_CONTENT_TYPE)
-            .body(bytes.into())
-            .send()
-            .await
-            .map_err(|error| anyhow::anyhow!("{}", DisplayErrorContext(&error)))?;
-        tracing::info!(%key, size_bytes, "stored diff shape to S3");
-        Ok(())
-    }
-
-    async fn head_object(&self, epoch: Epoch) -> Result<bool, anyhow::Error> {
-        let key = shape_key(epoch);
-        match self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(&key)
-            .send()
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(error) if error.as_service_error().is_some_and(|e| e.is_not_found()) => Ok(false),
+            .body(bytes.into());
+        let request = match condition {
+            ShapeWriteCondition::Absent => request.if_none_match("*"),
+            ShapeWriteCondition::MatchEtag(etag) => request.if_match(etag),
+        };
+        match request.send().await {
+            Ok(_) => Ok(ConditionalWriteOutcome::Stored),
+            Err(error)
+                if error
+                    .raw_response()
+                    .is_some_and(|r| r.status().as_u16() == 412) =>
+            {
+                Ok(ConditionalWriteOutcome::PreconditionFailed)
+            }
             Err(error) => Err(anyhow::anyhow!("{}", DisplayErrorContext(&error))),
         }
     }
@@ -206,53 +203,43 @@ impl S3ShapePersistence {
 }
 
 impl ShapePersistence for S3ShapePersistence {
-    fn load(&self, epoch: Epoch) -> BoxFuture<'_, Option<Arc<DiffShape>>> {
+    fn load(&self, epoch: Epoch) -> BoxFuture<'_, Result<ShapeRead, anyhow::Error>> {
         Box::pin(self.load_object(epoch))
     }
-
-    fn store<'a>(&'a self, shape: &'a DiffShape) -> BoxFuture<'a, Result<(), anyhow::Error>> {
-        Box::pin(self.store_object(shape))
+    fn store_conditional<'a>(
+        &'a self,
+        shape: &'a DiffShape,
+        condition: ShapeWriteCondition,
+    ) -> BoxFuture<'a, Result<ConditionalWriteOutcome, anyhow::Error>> {
+        Box::pin(self.store_object(shape, condition))
     }
-
-    fn exists(&self, epoch: Epoch) -> BoxFuture<'_, Result<bool, anyhow::Error>> {
-        Box::pin(self.head_object(epoch))
-    }
-
     fn persisted_epochs(&self) -> BoxFuture<'_, Result<BTreeSet<Epoch>, anyhow::Error>> {
         Box::pin(self.list_epochs())
     }
 }
 
-/// Persistence for a deployment without `S3_CACHE_BUCKET`: every load misses,
-/// every store succeeds, nothing is ever listed.
 pub struct NoPersistence;
 
 impl ShapePersistence for NoPersistence {
-    fn load(&self, _epoch: Epoch) -> BoxFuture<'_, Option<Arc<DiffShape>>> {
-        Box::pin(async { None })
+    fn load(&self, _epoch: Epoch) -> BoxFuture<'_, Result<ShapeRead, anyhow::Error>> {
+        Box::pin(async { Ok(ShapeRead::Missing) })
     }
-
-    fn store<'a>(&'a self, _shape: &'a DiffShape) -> BoxFuture<'a, Result<(), anyhow::Error>> {
-        Box::pin(async { Ok(()) })
+    fn store_conditional<'a>(
+        &'a self,
+        _shape: &'a DiffShape,
+        _condition: ShapeWriteCondition,
+    ) -> BoxFuture<'a, Result<ConditionalWriteOutcome, anyhow::Error>> {
+        Box::pin(async { anyhow::bail!("durable shape persistence is disabled") })
     }
-
-    fn exists(&self, _epoch: Epoch) -> BoxFuture<'_, Result<bool, anyhow::Error>> {
-        Box::pin(async { Ok(false) })
-    }
-
     fn persisted_epochs(&self) -> BoxFuture<'_, Result<BTreeSet<Epoch>, anyhow::Error>> {
         Box::pin(async { Ok(BTreeSet::new()) })
     }
-
     fn is_durable(&self) -> bool {
         false
     }
 }
 
-/// Two-tier shape store behind the `/diff*` handlers: process memory, then the
-/// persisted record. Records arrive by `PUT /diff/shape/:epoch` from the
-/// Next.js cron, which already downloads each epoch's snapshot for the Shapley
-/// sweep. Nothing here reads the public snapshot bucket, so a miss is a miss.
+/// Reads use memory; write guards and repair discovery inspect persistence.
 pub struct DiffStore {
     persistence: Arc<dyn ShapePersistence>,
     shapes: RwLock<HashMap<Epoch, Arc<DiffShape>>>,
@@ -269,63 +256,71 @@ impl DiffStore {
         }
     }
 
-    /// Memory, then persistence. Absent is [`DiffStoreError::NotFound`].
-    ///
-    /// There is no third tier. Before the extractor moved to the cron this fell
-    /// through to an ingest, so any epoch in the bucket answered eventually;
-    /// now an epoch nobody wrote is a 404 until the cron's repair pass fills it.
     pub async fn get(&self, epoch: Epoch) -> Result<Arc<DiffShape>, DiffStoreError> {
         if let Some(shape) = self.cached(epoch) {
             return Ok(shape);
         }
-        match self.persistence.load(epoch).await {
-            Some(shape) => {
+        match self
+            .persistence
+            .load(epoch)
+            .await
+            .map_err(|e| DiffStoreError::persistence(epoch, e))?
+        {
+            ShapeRead::Present(shape) => {
                 self.remember(epoch, Arc::clone(&shape));
                 Ok(shape)
             }
-            None => Err(DiffStoreError::NotFound { epoch }),
+            ShapeRead::Missing | ShapeRead::Corrupt { .. } => {
+                Err(DiffStoreError::NotFound { epoch })
+            }
         }
     }
 
-    /// Persist one epoch's shape. Create-only, with one repair case.
-    ///
-    /// Epochs are immutable, so a second write of a readable record is a
-    /// [`DiffStoreError::Conflict`] rather than an overwrite. That is what
-    /// stops a leaked ingest token from rewriting history.
-    ///
-    /// The repair case matters: [`ShapePersistence::load`] answers `None` both
-    /// for an absent object and for one that is present but corrupt or that
-    /// names another epoch. Refusing on presence alone would wedge such an
-    /// epoch forever, so presence is probed with
-    /// [`ShapePersistence::exists`] and the conflict is raised only when the
-    /// stored object also loads. A present-but-unreadable object is replaced.
-    ///
-    /// Two writers racing the same absent epoch both observe absent and both
-    /// write. That is harmless here: an epoch is immutable and both carry the
-    /// same bytes, so the loser overwrites with an identical body.
+    /// Creates an absent record or conditionally replaces proven-corrupt bytes.
     pub async fn put(&self, shape: DiffShape) -> Result<(), DiffStoreError> {
         let epoch = shape.epoch;
-        let is_present = self
+        let condition = match self
             .persistence
-            .exists(epoch)
+            .load(epoch)
             .await
-            .map_err(|error| DiffStoreError::persistence(epoch, error))?;
-        if is_present {
-            if self.persistence.load(epoch).await.is_some() {
-                return Err(DiffStoreError::Conflict { epoch });
+            .map_err(|e| DiffStoreError::persistence(epoch, e))?
+        {
+            ShapeRead::Present(_) => return Err(DiffStoreError::Conflict { epoch }),
+            ShapeRead::Missing => ShapeWriteCondition::Absent,
+            ShapeRead::Corrupt { etag: Some(etag) } => ShapeWriteCondition::MatchEtag(etag),
+            ShapeRead::Corrupt { etag: None } => {
+                return Err(DiffStoreError::persistence(
+                    epoch,
+                    "corrupt record has no ETag",
+                ));
             }
-            tracing::warn!(
-                epoch = epoch.0,
-                "persisted diff shape is unreadable; replacing it"
-            );
-        }
-        self.persistence
-            .store(&shape)
+        };
+        match self
+            .persistence
+            .store_conditional(&shape, condition)
             .await
-            .map_err(|error| DiffStoreError::persistence(epoch, error))?;
-        self.remember(epoch, Arc::new(shape));
-        self.advance_latest(epoch);
-        Ok(())
+            .map_err(|e| DiffStoreError::persistence(epoch, e))?
+        {
+            ConditionalWriteOutcome::Stored => {
+                self.remember(epoch, Arc::new(shape));
+                self.advance_latest(epoch);
+                Ok(())
+            }
+            ConditionalWriteOutcome::PreconditionFailed => {
+                match self
+                    .persistence
+                    .load(epoch)
+                    .await
+                    .map_err(|e| DiffStoreError::persistence(epoch, e))?
+                {
+                    ShapeRead::Present(_) => Err(DiffStoreError::Conflict { epoch }),
+                    _ => Err(DiffStoreError::persistence(
+                        epoch,
+                        "conditional write lost without a readable winner",
+                    )),
+                }
+            }
+        }
     }
 
     /// Highest epoch with a record, re-listed at most every
@@ -348,24 +343,49 @@ impl DiffStore {
         Ok(latest)
     }
 
-    /// Epochs in `[latest - depth + 1, latest]`, clamped at [`MIN_DZ_EPOCH`],
-    /// that have no record. Ascending. This is what the cron reads to decide
-    /// which snapshots to download, so it always re-lists rather than trusting
-    /// the TTL cache.
+    /// Returns absent or corrupt epochs in ascending order; unknown storage state fails the query.
     pub async fn missing_epochs(
         &self,
         latest: Epoch,
         depth: u32,
     ) -> Result<Vec<Epoch>, DiffStoreError> {
-        let known = self.known_epochs().await?;
         let first = latest
             .0
             .saturating_sub(depth.saturating_sub(1))
             .max(MIN_DZ_EPOCH.0);
-        Ok((first..=latest.0)
-            .map(Epoch)
-            .filter(|epoch| !known.contains(epoch))
-            .collect())
+        tokio::time::timeout(MISSING_QUERY_TIMEOUT, async {
+            let mut pending = tokio::task::JoinSet::new();
+            let mut epochs = (first..=latest.0).map(Epoch);
+            let mut missing = Vec::new();
+            loop {
+                while pending.len() < MISSING_READ_CONCURRENCY {
+                    let Some(epoch) = epochs.next() else {
+                        break;
+                    };
+                    let persistence = Arc::clone(&self.persistence);
+                    pending.spawn(async move {
+                        let read =
+                            tokio::time::timeout(MISSING_READ_TIMEOUT, persistence.load(epoch))
+                                .await
+                                .map_err(|e| DiffStoreError::persistence(epoch, e))?
+                                .map_err(|e| DiffStoreError::persistence(epoch, e))?;
+                        Ok::<_, DiffStoreError>((epoch, read))
+                    });
+                }
+                let Some(result) = pending.join_next().await else {
+                    break;
+                };
+                let (epoch, read) =
+                    result.map_err(|e| DiffStoreError::persistence(latest, e))??;
+                if matches!(read, ShapeRead::Missing | ShapeRead::Corrupt { .. }) {
+                    missing.push(epoch);
+                }
+            }
+            missing.sort_unstable();
+            Ok(missing)
+        })
+        .await
+        .map_err(|e| DiffStoreError::persistence(latest, e))?
     }
 
     /// Whether this store's persistence outlives the process. `false` means a
@@ -421,109 +441,108 @@ impl DiffStore {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::collections::HashMap;
+    use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, PoisonError};
 
-    use super::{BTreeSet, DiffShape, ShapePersistence};
-    use crate::epoch::{BoxFuture, Epoch};
-
-    /// HashMap-backed persistence that counts loads and stores.
+    #[derive(Default)]
+    struct Records {
+        shapes: HashMap<Epoch, (Option<Arc<DiffShape>>, String)>,
+        version: usize,
+    }
     #[derive(Default)]
     pub(crate) struct MemoryPersistence {
-        shapes: Mutex<HashMap<Epoch, Arc<DiffShape>>>,
-        /// Epochs whose object is present but does not load, standing in for a
-        /// corrupt body or one naming another epoch.
-        unreadable: Mutex<BTreeSet<Epoch>>,
+        records: Mutex<Records>,
         load_calls: AtomicUsize,
         store_calls: AtomicUsize,
         is_store_failing: AtomicBool,
+        is_load_failing: AtomicBool,
     }
-
     impl MemoryPersistence {
         pub(crate) fn with_shape(shape: DiffShape) -> Self {
             let persistence = Self::default();
             persistence.insert(shape);
             persistence
         }
-
         pub(crate) fn insert(&self, shape: DiffShape) {
-            self.shapes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(shape.epoch, Arc::new(shape));
+            self.set_record(shape.epoch, Some(Arc::new(shape)));
         }
-
-        /// An object that `exists` sees and `load` cannot read.
+        fn set_record(&self, epoch: Epoch, shape: Option<Arc<DiffShape>>) {
+            let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
+            records.version += 1;
+            let etag = records.version.to_string();
+            records.shapes.insert(epoch, (shape, etag));
+        }
         pub(crate) fn insert_unreadable(&self, epoch: Epoch) {
-            self.unreadable
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(epoch);
+            self.set_record(epoch, None);
         }
-
         pub(crate) fn load_calls(&self) -> usize {
             self.load_calls.load(Ordering::SeqCst)
         }
-
         pub(crate) fn store_calls(&self) -> usize {
             self.store_calls.load(Ordering::SeqCst)
         }
-
-        /// Every later `store` fails while every `load` and `persisted_epochs`
-        /// keeps working, which is what read-only credentials look like.
         pub(crate) fn fail_stores(&self) {
             self.is_store_failing.store(true, Ordering::SeqCst);
         }
+        pub(crate) fn fail_loads(&self) {
+            self.is_load_failing.store(true, Ordering::SeqCst);
+        }
     }
-
     impl ShapePersistence for MemoryPersistence {
-        fn load(&self, epoch: Epoch) -> BoxFuture<'_, Option<Arc<DiffShape>>> {
+        fn load(&self, epoch: Epoch) -> BoxFuture<'_, Result<ShapeRead, anyhow::Error>> {
             Box::pin(async move {
                 self.load_calls.fetch_add(1, Ordering::SeqCst);
-                self.shapes
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .get(&epoch)
-                    .map(Arc::clone)
+                anyhow::ensure!(
+                    !self.is_load_failing.load(Ordering::SeqCst),
+                    "injected GET failure"
+                );
+                let records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
+                Ok(match records.shapes.get(&epoch) {
+                    Some((Some(shape), _)) => ShapeRead::Present(Arc::clone(shape)),
+                    Some((None, etag)) => ShapeRead::Corrupt {
+                        etag: Some(etag.clone()),
+                    },
+                    None => ShapeRead::Missing,
+                })
             })
         }
-
-        fn store<'a>(&'a self, shape: &'a DiffShape) -> BoxFuture<'a, Result<(), anyhow::Error>> {
+        fn store_conditional<'a>(
+            &'a self,
+            shape: &'a DiffShape,
+            condition: ShapeWriteCondition,
+        ) -> BoxFuture<'a, Result<ConditionalWriteOutcome, anyhow::Error>> {
             Box::pin(async move {
                 self.store_calls.fetch_add(1, Ordering::SeqCst);
-                if self.is_store_failing.load(Ordering::SeqCst) {
-                    return Err(anyhow::anyhow!("injected store failure"));
+                anyhow::ensure!(
+                    !self.is_store_failing.load(Ordering::SeqCst),
+                    "injected store failure"
+                );
+                let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
+                let is_match = match condition {
+                    ShapeWriteCondition::Absent => !records.shapes.contains_key(&shape.epoch),
+                    ShapeWriteCondition::MatchEtag(etag) => records
+                        .shapes
+                        .get(&shape.epoch)
+                        .is_some_and(|(_, current)| *current == etag),
+                };
+                if !is_match {
+                    return Ok(ConditionalWriteOutcome::PreconditionFailed);
                 }
-                self.unreadable
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&shape.epoch);
-                self.insert(shape.clone());
-                Ok(())
+                records.version += 1;
+                let etag = records.version.to_string();
+                records
+                    .shapes
+                    .insert(shape.epoch, (Some(Arc::new(shape.clone())), etag));
+                Ok(ConditionalWriteOutcome::Stored)
             })
         }
-
-        fn exists(&self, epoch: Epoch) -> BoxFuture<'_, Result<bool, anyhow::Error>> {
-            let is_present = self
-                .shapes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains_key(&epoch)
-                || self
-                    .unreadable
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .contains(&epoch);
-            Box::pin(async move { Ok(is_present) })
-        }
-
         fn persisted_epochs(&self) -> BoxFuture<'_, Result<BTreeSet<Epoch>, anyhow::Error>> {
             Box::pin(async move {
                 Ok(self
-                    .shapes
+                    .records
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
+                    .shapes
                     .keys()
                     .copied()
                     .collect())
@@ -615,7 +634,11 @@ mod tests {
         assert_eq!(persistence.store_calls(), 1);
         let shape = store.get(Epoch(205)).await.expect("readable after put");
         assert_eq!(shape.epoch, Epoch(205));
-        assert_eq!(persistence.load_calls(), 0, "put seeded memory");
+        assert_eq!(
+            persistence.load_calls(),
+            1,
+            "only the write guard reads persistence"
+        );
     }
 
     #[tokio::test]
@@ -634,8 +657,6 @@ mod tests {
 
     #[tokio::test]
     async fn put_repairs_an_object_that_exists_but_cannot_be_read() {
-        // `load` answers None for a corrupt body, so refusing on presence alone
-        // would wedge this epoch forever.
         let persistence = Arc::new(MemoryPersistence::default());
         persistence.insert_unreadable(Epoch(207));
         let store = store_over(Arc::clone(&persistence));
@@ -728,9 +749,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_epochs_counts_memory_so_a_dev_run_is_not_all_holes() {
-        // NoPersistence lists nothing, so without the memory union every epoch
-        // this process just wrote would be reported missing.
+    async fn missing_epochs_reports_persisted_shapes() {
         let store = store_over(Arc::new(MemoryPersistence::default()));
         store
             .put(stored_shape(Epoch(211)))
@@ -748,6 +767,36 @@ mod tests {
         let store = DiffStore::new(Arc::new(NoPersistence));
         assert!(!store.has_durable_persistence());
         assert!(store.get(Epoch(204)).await.is_err());
-        assert!(!NoPersistence.exists(Epoch(204)).await.expect("probe works"));
+        assert!(matches!(
+            NoPersistence.load(Epoch(204)).await.expect("probe works"),
+            ShapeRead::Missing
+        ));
+    }
+    #[tokio::test]
+    async fn failed_get_never_writes_or_reports_no_gaps() {
+        let persistence = Arc::new(MemoryPersistence::with_shape(stored_shape(Epoch(211))));
+        persistence.fail_loads();
+        let store = store_over(Arc::clone(&persistence));
+        assert!(matches!(
+            store.put(stored_shape(Epoch(211))).await,
+            Err(DiffStoreError::Persistence { .. })
+        ));
+        assert_eq!(persistence.store_calls(), 0);
+        assert!(matches!(
+            store.get(Epoch(211)).await,
+            Err(DiffStoreError::Persistence { .. })
+        ));
+        assert!(store.missing_epochs(Epoch(211), 1).await.is_err());
+    }
+    #[tokio::test]
+    async fn corrupt_durable_record_is_missing_even_with_hot_memory() {
+        let persistence = Arc::new(MemoryPersistence::with_shape(stored_shape(Epoch(211))));
+        let store = store_over(Arc::clone(&persistence));
+        store.get(Epoch(211)).await.unwrap();
+        persistence.insert_unreadable(Epoch(211));
+        assert_eq!(
+            store.missing_epochs(Epoch(211), 1).await.unwrap(),
+            vec![Epoch(211)]
+        );
     }
 }
