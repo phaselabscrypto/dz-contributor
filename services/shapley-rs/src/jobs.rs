@@ -1,18 +1,9 @@
-//! Redis-backed async-job store: shared job state / progress / cancel so any
-//! API replica can serve any job (Phase 1 of ADR 0001 — compute still runs
-//! in-process; only the state transport moves to Redis).
-//!
-//! - Job state lives in a Redis hash `shapley:whatif:state:{id}` (TTL'd).
-//! - Cancellation is a separate key `shapley:whatif:cancel:{id}` so a worker's
-//!   progress flush can never clobber a concurrent cancel.
-//! - The in-process compute keeps using `network_shapley::ComputeControl`
-//!   verbatim; a bridge task (in routes.rs) mirrors its progress into the hash
-//!   and polls the cancel key into `control.cancel`.
+//! Redis job state, progress, cancellation, and queue payloads.
 
 use std::collections::HashMap;
 
-use deadpool_redis::Pool;
 use deadpool_redis::redis::{self, AsyncCommands};
+use deadpool_redis::{Connection, Pool};
 use serde_json::{Value, json};
 
 // Key builders + stream/queue constants live in `queue` (the single source of
@@ -36,6 +27,10 @@ const JOB_TTL_SECS: i64 = queue::JOB_TTL_SECS as i64;
 /// the result (24h — come back the next day, PSYS-557). Not heartbeat-refreshed
 /// once terminal; durable retrieval beyond it is the S3 result store.
 const TERMINAL_TTL_SECS: i64 = queue::TERMINAL_TTL_SECS as i64;
+
+/// Lua, so the state check and the EXPIRE are one atomic step.
+const REFRESH_RUNNING_TTL_SCRIPT: &str = "if redis.call('HGET', KEYS[1], 'state') == 'running' then \
+     return redis.call('EXPIRE', KEYS[1], ARGV[1]) end return 0";
 
 /// Live progress counters mirrored to Redis on each bridge tick. The `batch_*`
 /// fields describe the in-flight sampling batch so the snapshot can interpolate
@@ -284,10 +279,7 @@ impl RedisJobStore {
         }
     }
 
-    /// Idempotency-cache write (TTL'd) of the already-serialized response JSON.
-    /// The worker writes this BEFORE the terminal `set_done`, so a crash in the
-    /// gap still leaves a cache hit for a clean redelivery instead of forcing a
-    /// recompute.
+    /// One-hour result cache, written after the user-facing terminal result.
     pub async fn result_cache_set(&self, input_hash_hex: &str, resp: &Value) -> anyhow::Result<()> {
         let mut conn = self.pool.get().await?;
         let _: () = conn
@@ -315,6 +307,26 @@ impl RedisJobStore {
         Ok(id)
     }
 
+    /// Refreshes the state hash TTL only while the job is running, so a late
+    /// heartbeat cannot shorten the longer terminal retention.
+    pub(crate) async fn refresh_running_ttl(&self, id: &str) -> anyhow::Result<()> {
+        let mut conn = self.pool.get().await?;
+        Self::refresh_running_ttl_on(&mut conn, id).await
+    }
+
+    /// [`Self::refresh_running_ttl`] over a connection the caller already
+    /// holds, so a heartbeat costs one pooled connection rather than two.
+    async fn refresh_running_ttl_on(conn: &mut Connection, id: &str) -> anyhow::Result<()> {
+        let _: i64 = redis::cmd("EVAL")
+            .arg(REFRESH_RUNNING_TTL_SCRIPT)
+            .arg(1)
+            .arg(state_key(id))
+            .arg(JOB_TTL_SECS)
+            .query_async(conn)
+            .await?;
+        Ok(())
+    }
+
     /// Mirror live progress counters. SINGLE HSET, counters ONLY — never the
     /// `state` field (so a progress flush can't clobber a concurrent cancel).
     /// Includes the in-flight-batch fields so the snapshot can interpolate a
@@ -337,12 +349,7 @@ impl RedisJobStore {
             .arg(p.batch_solved)
             .query_async::<()>(&mut conn)
             .await?;
-        // Heartbeat: refresh the whole-key TTL so a long-running job can't
-        // expire out from under an active poll. Without this the state:{id}
-        // hash hard-expires JOB_TTL_SECS after create() and the poll then 404s
-        // ("job not found") while the worker is still computing.
-        let _: () = conn.expire(state_key(id), JOB_TTL_SECS).await?;
-        Ok(())
+        Self::refresh_running_ttl_on(&mut conn, id).await
     }
 
     /// Set the current compute phase label (`"baseline"` | `"modified"`). A
@@ -352,9 +359,7 @@ impl RedisJobStore {
     pub async fn set_phase(&self, id: &str, phase: &str) -> anyhow::Result<()> {
         let mut conn = self.pool.get().await?;
         let _: () = conn.hset(state_key(id), "phase", phase).await?;
-        // Heartbeat: also refresh the TTL on a phase transition (see set_progress).
-        let _: () = conn.expire(state_key(id), JOB_TTL_SECS).await?;
-        Ok(())
+        Self::refresh_running_ttl_on(&mut conn, id).await
     }
 
     /// Terminal: store the result + state=done.

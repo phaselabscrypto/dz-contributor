@@ -100,27 +100,38 @@ pub struct LinkEstimateRequest {
     pub operator_focus: String,
 }
 
-/// Payload of a `JobKind::Sweep` job — stored ONCE per sweep under the sweep
-/// job's payload key (24h TTL, `queue::SWEEP_PAYLOAD_TTL_SECS`) and shared by
-/// every child link-estimate entry via `payload_key` + `focus`, so a
-/// 20-operator sweep holds one copy of the epoch input in Redis, not twenty.
+/// Stored once per sweep and shared by its queued children.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SweepPayload {
     pub input: ShapleyInputIn,
     pub operators: Vec<String>,
-    /// Whether `operators` was derived service-side from the input's devices
-    /// (⇒ guaranteed-complete set). Only derived sweeps may write the "fully
-    /// swept" marker: an explicit — possibly partial — list carrying the
-    /// canonical tag must never mark the epoch complete, or the cron would
-    /// skip the unswept remainder forever. `#[serde(default)]` so a payload
-    /// stored by a pre-field producer decodes as NOT derived (degrades to "no
-    /// marker", never to a false marker).
+    /// True when the service derived `operators` from the input's devices.
+    /// Only a derived set is complete, so an explicit list never publishes
+    /// aliases or marks the epoch swept. A payload stored before the field
+    /// existed decodes as not derived.
     #[serde(default)]
     pub derived_operators: bool,
-    /// Opaque caller tag (e.g. `epoch-{N}:canonical-v1:{params fingerprint}`)
-    /// keying the S3 "fully swept" marker. `None` ⇒ no marker is written.
+    /// Set by the ingest-authenticated producer. A payload stored before the
+    /// field existed decodes as unauthorized and cannot publish.
+    #[serde(default)]
+    pub is_publish_authorized: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+}
+
+impl SweepPayload {
+    /// The tag this sweep may publish aliases and its marker under. `None`
+    /// when publication is not allowed: the sweep did not come through the
+    /// ingest-authenticated route, its operator list is not derived, or a
+    /// value carries the NUL byte the alias key uses as its separator.
+    pub(crate) fn publish_tag(&self) -> Option<&str> {
+        self.tag.as_deref().filter(|tag| {
+            self.is_publish_authorized
+                && self.derived_operators
+                && !tag.contains('\0')
+                && self.operators.iter().all(|op| !op.contains('\0'))
+        })
+    }
 }
 
 // One per focus-owned link, canonical `device1 < device2` orientation, mapped 1:1

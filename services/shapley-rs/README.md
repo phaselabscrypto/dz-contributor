@@ -12,10 +12,11 @@ GET  /health           -> { status, service, version }
 POST /shapley          -> ShapleyResponse        { method, operator_count, values }
 POST /link-estimate    -> LinkEstimateResponse   (faithful retag-Shapley; sync, S3-served when precomputed)
 POST /jobs/link-estimate -> 202 { job_id }       (async: progress + cancel via /jobs/:id; done-at-submit on S3 hit)
-POST /precompute/link-estimates -> { enqueued, cached, skipped }   (epoch sweep)
+POST /precompute/link-estimates -> 202 { job_id }   (compute + ingest tokens)
 GET  /diff?from&to     -> NetworkDiffResponse      (topology diff between two epochs, from the diff index)
 GET  /diff/contributor/:code?from&to -> ContributorDiffResponse (per-contributor diff; no display name)
-POST /diff/precompute?epoch=N|depth=D -> { latest, results }   (ingest epochs into the diff index)
+PUT  /diff/shape/:epoch -> 201 created | 409 readable existing record
+GET  /diff/missing?latest=N&depth=D -> { missing }
 ```
 
 ### Epoch precompute sweep
@@ -24,20 +25,19 @@ Epoch inputs are immutable, so each `(epoch, operator)` link-estimate is
 computed once and persisted to S3 (`shapley/v3/link-estimate-{payload_hash}.bin`,
 keyed by the job payload hash). The Vercel cron `GET /api/link-value/precompute`
 (authed via `CRON_SECRET`) builds the epoch input and calls the sweep, which
-enqueues one job per operator:
+enqueues one sweep job. A worker expands it into per-operator jobs:
 
 ```bash
 curl -fsS -X POST "$BASE/precompute/link-estimates" \
   -H "authorization: Bearer $SHAPLEY_API_TOKEN" \
+  -H "X-Ingest-Token: $SHAPLEY_INGEST_TOKEN" \
   -H 'content-type: application/json' \
-  --data-binary '{ "input": { ...ShapleyInputIn... }, "operators": ["Alpha", "Beta"] }'
-# -> { "enqueued": [{"operator":"Beta","job_id":"..."}], "cached": ["Alpha"],
-#      "skipped": [{"operator":"Gamma","reason":"22 links exceeds the 20-player exact cap (19 max)"}] }
+  --data-binary @sweep.json
 ```
 
-Omit `operators` to derive them from the input's devices. The response is fully
-transparent — every operator lands in exactly one bucket. Operators above the
-19-link exact cap are reported in `skipped`, never silently dropped.
+The body contains `input` and `tag`. Omit `operators` to derive the complete set. Poll the returned `job_id` for `enqueued`, `cached`, `skipped`, `already_running`, `failed`, and `marker_written`. Explicit operator subsets and payloads stored before the authorization field existed cannot publish aliases or markers.
+
+Result keys remain under `shapley/v3/`; trusted aliases and markers use `shapley/v3/publication/v1/`. Publication awaits result and alias writes, while the claim heartbeat remains active. A failed alias leaves the marker absent so a later sweep can retry from cached results.
 
 Wire-types live in `src/model.rs` and mirror the JSON our Next.js routes
 already produce (see `lib/types/shapley.ts`).
@@ -231,42 +231,20 @@ The same image runs in two roles, selected by the first arg (or `--role=`):
   `shapley:whatif:dead` stream. At-least-once delivery is made safe by the
   `result:{hash}` idempotency cache.
 
-- **`diff-backfill`**: `args: ["diff-backfill"]`. One-shot: discovers the
-  latest published epoch, ingests every epoch from 48 to latest that is missing
-  from the `diff/v1/` index in the result-cache bucket, prints a summary, and
-  exits. Exit status is non-zero when any epoch failed, and the role refuses to
-  read anything when `S3_CACHE_BUCKET` is unset, because nothing it ingested
-  would outlive the process. Needs the `S3_CACHE_*`
-  and `AWS_*` variables; `REDIS_URL` is not required. The `worker` role runs the
-  same fill every 15 minutes, so this role is for the initial fill and for a
-  refill after a `DIFF_SHAPE_VERSION_PREFIX` bump.
 
-The worker runs as a **fixed pool** — no autoscaler, no operator dependency.
-All replicas share the `whatif-workers` consumer group, each with a unique
-`worker-<uuid>` consumer name, so jobs fan out one-per-worker and a dead pod's
-in-flight entry is reclaimed by a sibling (XAUTOCLAIM). **Roll the worker
-deployment before (or with) the API** when upgrading — `args: [worker]`
-against an old image silently runs the API server: a "healthy" worker doing
-no queue work.
 
-### Egress to the public snapshot bucket
+### The diff index needs no egress
 
-The diff index (`/diff*`, the worker poller, and `diff-backfill`) streams the
-first 3.7 MB of each epoch snapshot from the public bucket
-`doublezero-contributor-rewards-mn-beta-snapshots` in `us-east-1`, unsigned.
-The cluster must allow HTTPS egress from both the `api` and `worker` pods to
-`doublezero-contributor-rewards-mn-beta-snapshots.s3.us-east-1.amazonaws.com`.
-Check from a running pod before the first deploy:
+`/diff*` is served from per-epoch records under `diff/v1/` in the result-cache
+bucket. Records arrive over `PUT /diff/shape/:epoch` from the Vercel cron, gated
+by `SHAPLEY_INGEST_TOKEN` on top of the compute token, and
+`GET /diff/missing?latest=N&depth=D` tells the cron which epochs it still owes.
 
-```bash
-curl -sI --max-time 10 \
-  https://doublezero-contributor-rewards-mn-beta-snapshots.s3.us-east-1.amazonaws.com/mn-epoch-211-snapshot.json | head -1
-# HTTP/1.1 200 OK
-```
-
-If egress is blocked, the poller logs the failure on every tick and the index
-never fills; the fix is a cluster-side egress rule. Override the bucket and
-region with `DZ_SNAPSHOT_BUCKET` and `DZ_SNAPSHOT_REGION`.
+The service reads no public bucket, so the pods reach only Redis and the object
+gateway. That is deliberate: the cron already downloads each snapshot for the
+Shapley sweep, and doing the extraction there means cluster egress to the
+public internet never has to be opened. See
+[ADR 0003](../../docs/adr/0003-cron-side-snapshot-extraction.md).
 
 ### Verify deploy
 
@@ -300,3 +278,15 @@ Parity is verified against the Python reference in the engine crate
 should use `POST /jobs/link-estimate` (progress + cancellation) rather than the
 blocking sync endpoint, since a near-cap operator enumerates up to `2^20`
 coalitions.
+
+## Regression tests
+
+Use an empty, dedicated Redis database. The publication test refuses an occupied database and cleans up the keys it creates.
+
+```bash
+redis-server --bind 127.0.0.1 --port 6390 --save '' --appendonly no
+# In another shell, from services/shapley-rs:
+TEST_REDIS_URL=redis://127.0.0.1:6390/13 cargo test --locked
+```
+
+The default storage tests run a local mock S3 server with the real SDK. Gateway acceptance is separate and requires a disposable `pr24-canary-<UUID>` bucket. See [operations](../../docs/operations.md#alias-publication-rollout) for rollout and historical warm-up.

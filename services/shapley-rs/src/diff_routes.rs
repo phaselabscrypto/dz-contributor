@@ -1,16 +1,18 @@
 //! `/diff*` handlers: validate the window, read shapes from the store, run
-//! the pure diff, and map `SnapshotError` variants to status codes.
+//! the pure diff, and map [`DiffStoreError`] variants to status codes. Also
+//! the two routes the Next.js cron drives: `GET /diff/missing` to learn which
+//! epochs have no record, and `PUT /diff/shape/:epoch` to supply one.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, put},
 };
 use serde::{Deserialize, Serialize};
 use tokio::task::{Id, JoinSet};
@@ -20,39 +22,51 @@ use crate::diff::{
     DiffShape, EpochWindow, MAX_DIFF_EPOCH, compute_contributor_diff, compute_network_diff,
     now_rfc3339, validate_window,
 };
+use crate::diff_error::DiffStoreError;
 use crate::diff_store::DiffStore;
-use crate::snapshot::{Epoch, MIN_DZ_EPOCH, SNAPSHOT_FETCH_TIMEOUT, SnapshotError};
+use crate::epoch::{Epoch, MIN_DZ_EPOCH};
 
 /// Concurrent shape reads for the intermediate epochs of one `GET /diff`.
 pub(crate) const INTERMEDIATE_CONCURRENCY: usize = 10;
-/// Concurrent shape reads for one `POST /diff/precompute`.
-pub(crate) const PRECOMPUTE_CONCURRENCY: usize = 3;
 /// Deadline for one intermediate shape read. Short, because a missed
 /// intermediate only degrades `first_observed_epoch`, while the Next.js proxy
 /// abandons the whole request at 20 s.
 pub(crate) const INTERMEDIATE_READ_TIMEOUT: Duration = Duration::from_secs(6);
-/// Deadline for one shape read in a precompute, which exists to pay the
-/// cold-ingest cost and so gets the full snapshot budget.
-pub(crate) const PRECOMPUTE_READ_TIMEOUT: Duration = SNAPSHOT_FETCH_TIMEOUT;
 /// Marks a body whose attribution was computed without every intermediate
 /// epoch, so the proxy can refuse to cache it.
 pub(crate) const DEGRADED_HEADER: &str = "x-diff-degraded";
-/// Epochs warmed by `POST /diff/precompute` when `depth` is absent.
-pub(crate) const DEFAULT_PRECOMPUTE_DEPTH: u32 = 8;
-/// Largest `depth` `POST /diff/precompute` accepts.
-pub(crate) const MAX_PRECOMPUTE_DEPTH: u32 = 30;
+/// Epochs `GET /diff/missing` inspects when `depth` is absent. Matches the 31
+/// epochs `lib/utils/epoch-discovery.ts` offers in the changelog selector, so
+/// the cron repairs exactly the window a user can ask for.
+pub(crate) const DEFAULT_MISSING_DEPTH: u32 = 31;
+/// Largest `depth` `GET /diff/missing` accepts.
+pub(crate) const MAX_MISSING_DEPTH: u32 = 200;
+/// Largest link count a submitted shape may carry.
+pub(crate) const MAX_SHAPE_LINKS: usize = 10_000;
+/// Largest contributor count a submitted shape may carry.
+pub(crate) const MAX_SHAPE_CONTRIBUTORS: usize = 1_000;
+/// Largest plausible link bandwidth, in Gbps.
+pub(crate) const MAX_SHAPE_BANDWIDTH_GBPS: f64 = 1.0e6;
 
 const FETCH_FAILED_MESSAGE: &str = "snapshot fetch failed";
-const SCAN_FAILED_MESSAGE: &str = "snapshot scan failed";
-const DEPTH_MESSAGE: &str = "depth must be an integer in [1, 30]";
+const DEPTH_MESSAGE: &str = "depth must be an integer in [1, 200]";
 const EPOCH_MESSAGE: &str = "epoch must be an integer in [48, 100000]";
+const LATEST_MESSAGE: &str = "latest must be an integer in [48, 100000]";
+const NO_PERSISTENCE_MESSAGE: &str = "shape store is not durable; refusing the write";
 
 /// The diff routes, mounted by `main.rs` inside the auth-gated compute router.
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/diff", get(network_diff))
         .route("/diff/contributor/:code", get(contributor_diff))
-        .route("/diff/precompute", post(precompute))
+        .route("/diff/missing", get(missing))
+}
+
+/// The ingest routes. Mounted separately by `main.rs` so a second bearer token
+/// gates them on top of the compute token: writing a record every reader then
+/// serves is a different power from asking for a compute.
+pub fn ingest_routes() -> Router<Arc<AppState>> {
+    Router::new().route("/diff/shape/:epoch", put(put_shape))
 }
 
 /// Query of `GET /diff` and `GET /diff/contributor/:code`. Raw strings so
@@ -65,51 +79,9 @@ pub(crate) struct WindowQuery {
     pub to: Option<String>,
 }
 
-/// Query of `POST /diff/precompute`. `epoch` wins over `depth`.
-#[derive(Debug, Deserialize)]
-pub(crate) struct PrecomputeQuery {
-    /// Warm exactly this epoch.
-    pub epoch: Option<u32>,
-    /// Warm the `depth` most recent epochs; default [`DEFAULT_PRECOMPUTE_DEPTH`].
-    pub depth: Option<u32>,
-}
-
-/// Outcome of one epoch in a precompute.
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum PrecomputeStatus {
-    /// The shape is now in memory.
-    Ok,
-    /// The bucket has no snapshot for the epoch.
-    Missing,
-    /// Fetch or scan failed; the cause is in the log.
-    Error,
-}
-
-/// One row of a precompute report.
-#[derive(Serialize, Debug, PartialEq, Eq)]
-pub(crate) struct PrecomputeResult {
-    /// The epoch warmed.
-    pub epoch: Epoch,
-    /// What happened.
-    pub status: PrecomputeStatus,
-    /// Wall time of the read in milliseconds.
-    pub ms: u128,
-}
-
-/// Body of `POST /diff/precompute`.
-#[derive(Serialize, Debug, PartialEq, Eq)]
-pub(crate) struct PrecomputeResponse {
-    /// The discovered latest epoch; `None` when `epoch` was given.
-    pub latest: Option<Epoch>,
-    /// One row per target epoch, ascending.
-    pub results: Vec<PrecomputeResult>,
-}
-
 struct ShapeRead {
     epoch: Epoch,
-    result: Result<Arc<DiffShape>, SnapshotError>,
-    elapsed: Duration,
+    result: Result<Arc<DiffShape>, DiffStoreError>,
 }
 
 /// `GET /diff?from&to`: network-wide diff with change attribution over the
@@ -165,87 +137,10 @@ async fn contributor_diff(
     }
 }
 
-/// `POST /diff/precompute?epoch=N` or `?depth=D`: warm shapes into memory
-/// and persistence. 502 only when every target epoch errored.
-async fn precompute(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<PrecomputeQuery>,
-) -> Response {
-    let (latest, targets) = match precompute_targets(&state.diff_store, &query).await {
-        Ok(plan) => plan,
-        Err(response) => return response,
-    };
-    let reads = read_bounded(
-        &state.diff_store,
-        targets,
-        PRECOMPUTE_CONCURRENCY,
-        PRECOMPUTE_READ_TIMEOUT,
-    )
-    .await;
-    let results: Vec<PrecomputeResult> = reads
-        .iter()
-        .map(|read| PrecomputeResult {
-            epoch: read.epoch,
-            status: precompute_status(read),
-            ms: read.elapsed.as_millis(),
-        })
-        .collect();
-    let has_only_errors = !results.is_empty()
-        && results
-            .iter()
-            .all(|result| result.status == PrecomputeStatus::Error);
-    if has_only_errors {
-        return error_json(StatusCode::BAD_GATEWAY, FETCH_FAILED_MESSAGE);
-    }
-    Json(PrecomputeResponse { latest, results }).into_response()
-}
-
-/// Epochs a precompute warms: `[epoch]`, or the `depth` most recent epochs
-/// ending at the latest, never below `MIN_DZ_EPOCH`.
-pub(crate) fn precompute_epochs(latest: Epoch, depth: u32) -> Vec<Epoch> {
-    let first = latest
-        .0
-        .saturating_sub(depth.saturating_sub(1))
-        .max(MIN_DZ_EPOCH.0);
-    (first..=latest.0).map(Epoch).collect()
-}
-
-async fn precompute_targets(
-    store: &Arc<DiffStore>,
-    query: &PrecomputeQuery,
-) -> Result<(Option<Epoch>, Vec<Epoch>), Response> {
-    if let Some(epoch) = query.epoch {
-        if !(MIN_DZ_EPOCH.0..=MAX_DIFF_EPOCH.0).contains(&epoch) {
-            return Err(error_json(StatusCode::BAD_REQUEST, EPOCH_MESSAGE));
-        }
-        return Ok((None, vec![Epoch(epoch)]));
-    }
-    let depth = query.depth.unwrap_or(DEFAULT_PRECOMPUTE_DEPTH);
-    if !(1..=MAX_PRECOMPUTE_DEPTH).contains(&depth) {
-        return Err(error_json(StatusCode::BAD_REQUEST, DEPTH_MESSAGE));
-    }
-    let latest = store
-        .latest_epoch()
-        .await
-        .map_err(|error| snapshot_error_response(&error))?;
-    Ok((Some(latest), precompute_epochs(latest, depth)))
-}
-
-fn precompute_status(read: &ShapeRead) -> PrecomputeStatus {
-    match &read.result {
-        Ok(_) => PrecomputeStatus::Ok,
-        Err(SnapshotError::NotFound { .. }) => PrecomputeStatus::Missing,
-        Err(error) => {
-            tracing::error!(epoch = read.epoch.0, error = %error, "diff precompute: epoch failed");
-            PrecomputeStatus::Error
-        }
-    }
-}
-
 async fn load_window_ends(
     store: &Arc<DiffStore>,
     window: EpochWindow,
-) -> Result<(Arc<DiffShape>, Arc<DiffShape>), SnapshotError> {
+) -> Result<(Arc<DiffShape>, Arc<DiffShape>), DiffStoreError> {
     let (before, after) = tokio::join!(store.get(window.from), store.get(window.to));
     Ok((before?, after?))
 }
@@ -297,16 +192,11 @@ async fn read_bounded(
         {
             let store = Arc::clone(store);
             let handle = tasks.spawn(async move {
-                let started = Instant::now();
                 let result = match tokio::time::timeout(per_read, store.get(epoch)).await {
                     Ok(result) => result,
-                    Err(_) => Err(SnapshotError::Timeout { epoch }),
+                    Err(_) => Err(DiffStoreError::persistence(epoch, "read deadline elapsed")),
                 };
-                ShapeRead {
-                    epoch,
-                    result,
-                    elapsed: started.elapsed(),
-                }
+                ShapeRead { epoch, result }
             });
             epoch_by_task.insert(handle.id(), epoch);
         }
@@ -326,11 +216,7 @@ async fn read_bounded(
                     "diff: shape read task failed");
                 reads.push(ShapeRead {
                     epoch,
-                    result: Err(SnapshotError::Transport {
-                        epoch,
-                        message: join_error.to_string(),
-                    }),
-                    elapsed: Duration::ZERO,
+                    result: Err(DiffStoreError::persistence(epoch, join_error)),
                 });
             }
         }
@@ -339,19 +225,152 @@ async fn read_bounded(
     reads
 }
 
-/// Status for a store failure. 5xx bodies are fixed strings; the cause goes
-/// to the log. The 404 body is the error text the UI already shows.
-pub(crate) fn snapshot_error_response(error: &SnapshotError) -> Response {
-    match error {
-        SnapshotError::NotFound { .. } => error_json(StatusCode::NOT_FOUND, error.to_string()),
-        SnapshotError::Scan { .. } => {
-            tracing::error!(error = %error, "diff: snapshot scan failed");
-            error_json(StatusCode::UNPROCESSABLE_ENTITY, SCAN_FAILED_MESSAGE)
+/// Query of `GET /diff/missing`. `latest` is the caller's, because the service
+/// no longer discovers epochs: all bucket knowledge lives in
+/// `lib/utils/epoch-discovery.ts` on the Next.js side.
+#[derive(Debug, Deserialize)]
+pub(crate) struct MissingQuery {
+    /// Newest epoch to consider.
+    pub latest: Option<u32>,
+    /// How many epochs back from `latest` to inspect; default
+    /// [`DEFAULT_MISSING_DEPTH`].
+    pub depth: Option<u32>,
+}
+
+/// Body of `GET /diff/missing`.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub(crate) struct MissingResponse {
+    /// Epochs in the window with no record, ascending. Empty means nothing to do.
+    pub missing: Vec<Epoch>,
+}
+
+/// `GET /diff/missing?latest=N&depth=D`: which epochs in the window have no
+/// record. The cron reads this to decide which snapshots to download, which is
+/// also the repair path for a gap left by a skipped fire or a deploy window.
+async fn missing(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<MissingQuery>,
+) -> Response {
+    let Some(latest) = query.latest else {
+        return error_json(StatusCode::BAD_REQUEST, LATEST_MESSAGE);
+    };
+    if !(MIN_DZ_EPOCH.0..=MAX_DIFF_EPOCH.0).contains(&latest) {
+        return error_json(StatusCode::BAD_REQUEST, LATEST_MESSAGE);
+    }
+    let depth = query.depth.unwrap_or(DEFAULT_MISSING_DEPTH);
+    if !(1..=MAX_MISSING_DEPTH).contains(&depth) {
+        return error_json(StatusCode::BAD_REQUEST, DEPTH_MESSAGE);
+    }
+    match state.diff_store.missing_epochs(Epoch(latest), depth).await {
+        Ok(missing) => Json(MissingResponse { missing }).into_response(),
+        Err(error) => snapshot_error_response(&error),
+    }
+}
+
+/// `PUT /diff/shape/:epoch`: persist one epoch's extracted shape.
+///
+/// Create-only, so a second write of a readable record is a 409 rather than an
+/// overwrite. The body is validated before it reaches persistence: a record is
+/// read by every later diff request, so a caller holding the ingest token still
+/// cannot store nonsense.
+async fn put_shape(
+    State(state): State<Arc<AppState>>,
+    Path(epoch): Path<u32>,
+    Json(shape): Json<DiffShape>,
+) -> Response {
+    if !(MIN_DZ_EPOCH.0..=MAX_DIFF_EPOCH.0).contains(&epoch) {
+        return error_json(StatusCode::BAD_REQUEST, EPOCH_MESSAGE);
+    }
+    let epoch = Epoch(epoch);
+    // Persistence keys the object off the BODY's epoch (`store_object` calls
+    // `shape_key(shape.epoch)`), so a disagreeing path would silently write to
+    // another epoch's key. Refuse instead.
+    if shape.epoch != epoch {
+        return snapshot_error_response(&DiffStoreError::malformed(
+            epoch,
+            format!(
+                "body names epoch {} but the path names {epoch}",
+                shape.epoch
+            ),
+        ));
+    }
+    if !state.diff_store.has_durable_persistence() {
+        return error_json(StatusCode::SERVICE_UNAVAILABLE, NO_PERSISTENCE_MESSAGE);
+    }
+    if let Err(reason) = validate_shape(&shape) {
+        return snapshot_error_response(&DiffStoreError::malformed(epoch, reason));
+    }
+    let link_count = shape.links.len();
+    let contributor_count = shape.contributors.len();
+    match state.diff_store.put(shape).await {
+        Ok(()) => {
+            tracing::info!(
+                epoch = epoch.0,
+                link_count,
+                contributor_count,
+                "stored diff shape from ingest"
+            );
+            (
+                StatusCode::CREATED,
+                Json(MissingResponse { missing: vec![] }),
+            )
+                .into_response()
         }
-        SnapshotError::Http { .. }
-        | SnapshotError::Transport { .. }
-        | SnapshotError::Timeout { .. } => {
-            tracing::error!(error = %error, "diff: snapshot fetch failed");
+        Err(error) => snapshot_error_response(&error),
+    }
+}
+
+/// Reject a shape that cannot have come from a real snapshot. Every message is
+/// safe to return: it describes the caller's own body.
+fn validate_shape(shape: &DiffShape) -> Result<(), String> {
+    if shape.links.is_empty() {
+        return Err("links must not be empty".to_string());
+    }
+    if shape.links.len() > MAX_SHAPE_LINKS {
+        return Err(format!("links must not exceed {MAX_SHAPE_LINKS}"));
+    }
+    if shape.contributors.is_empty() {
+        return Err("contributors must not be empty".to_string());
+    }
+    if shape.contributors.len() > MAX_SHAPE_CONTRIBUTORS {
+        return Err(format!(
+            "contributors must not exceed {MAX_SHAPE_CONTRIBUTORS}"
+        ));
+    }
+    let mut seen_links = std::collections::HashSet::with_capacity(shape.links.len());
+    for link in &shape.links {
+        if !link.bandwidth_gbps.is_finite()
+            || link.bandwidth_gbps < 0.0
+            || link.bandwidth_gbps > MAX_SHAPE_BANDWIDTH_GBPS
+        {
+            return Err(format!(
+                "link {} has bandwidth_gbps {} outside [0, {MAX_SHAPE_BANDWIDTH_GBPS}]",
+                link.pubkey, link.bandwidth_gbps
+            ));
+        }
+        if !seen_links.insert(link.pubkey.as_str()) {
+            return Err(format!("link {} appears twice", link.pubkey));
+        }
+    }
+    let mut seen_codes = std::collections::HashSet::with_capacity(shape.contributors.len());
+    for contributor in &shape.contributors {
+        if !seen_codes.insert(contributor.code.as_str()) {
+            return Err(format!("contributor {} appears twice", contributor.code));
+        }
+    }
+    Ok(())
+}
+
+/// Status for a store failure. 5xx bodies are fixed strings; the cause goes to
+/// the log. The 404 body is the error text `/changelog` already shows, so it
+/// passes through verbatim.
+pub(crate) fn snapshot_error_response(error: &DiffStoreError) -> Response {
+    match error {
+        DiffStoreError::NotFound { .. } => error_json(StatusCode::NOT_FOUND, error.to_string()),
+        DiffStoreError::Conflict { .. } => error_json(StatusCode::CONFLICT, error.to_string()),
+        DiffStoreError::Malformed { .. } => error_json(StatusCode::BAD_REQUEST, error.to_string()),
+        DiffStoreError::Persistence { .. } => {
+            tracing::error!(error = ?error, "diff: shape store failed");
             error_json(StatusCode::BAD_GATEWAY, FETCH_FAILED_MESSAGE)
         }
     }
@@ -367,26 +386,100 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use tokio::sync::RwLock;
     use tower::ServiceExt;
 
     use super::*;
+    use crate::diff::{ContributorRef, LinkRef};
     use crate::diff_store::NoPersistence;
-    use crate::diff_store::test_support::{FakeReader, MemoryPersistence};
-    use crate::snapshot::ScanFailure;
+    use crate::diff_store::test_support::MemoryPersistence;
 
-    fn state_over(reader: Arc<FakeReader>) -> Arc<AppState> {
+    /// One epoch's shape. `extra_link` adds a second link so consecutive
+    /// epochs differ, which is what makes a diff non-empty.
+    fn shape(epoch: u32, extra_link: bool) -> DiffShape {
+        let mut links = vec![LinkRef {
+            pubkey: "K1".to_string(),
+            contributor_code: "alpha".to_string(),
+            side_a_code: "nyc".to_string(),
+            side_z_code: "lon".to_string(),
+            bandwidth_gbps: 10.0,
+            link_type: "WAN".to_string(),
+        }];
+        if extra_link {
+            links.push(LinkRef {
+                pubkey: "K2".to_string(),
+                contributor_code: "beta".to_string(),
+                side_a_code: "fra".to_string(),
+                side_z_code: "ams".to_string(),
+                bandwidth_gbps: 40.0,
+                link_type: "WAN".to_string(),
+            });
+        }
+        let mut contributors = vec![ContributorRef {
+            code: "alpha".to_string(),
+            link_count: 1,
+            device_count: 1,
+            metro_count: 1,
+        }];
+        if extra_link {
+            contributors.push(ContributorRef {
+                code: "beta".to_string(),
+                link_count: 1,
+                device_count: 1,
+                metro_count: 1,
+            });
+        }
+        DiffShape {
+            epoch: Epoch(epoch),
+            links,
+            contributors,
+        }
+    }
+
+    fn state_with(persistence: Arc<MemoryPersistence>) -> Arc<AppState> {
         Arc::new(AppState {
             epoch_cache: RwLock::new(None),
             s3_cache: None,
             api_token: None,
+            ingest_token: None,
             jobs: None,
-            diff_store: Arc::new(DiffStore::new(
-                reader,
-                Arc::new(MemoryPersistence::default()),
-            )),
+            diff_store: Arc::new(DiffStore::new(persistence)),
         })
+    }
+
+    /// A store holding an identical shape for each named epoch.
+    fn state_over(epochs: &[u32]) -> Arc<AppState> {
+        let persistence = Arc::new(MemoryPersistence::default());
+        for &epoch in epochs {
+            persistence.insert(shape(epoch, false));
+        }
+        state_with(persistence)
+    }
+
+    fn state_without_persistence() -> Arc<AppState> {
+        Arc::new(AppState {
+            epoch_cache: RwLock::new(None),
+            s3_cache: None,
+            api_token: None,
+            ingest_token: None,
+            jobs: None,
+            diff_store: Arc::new(DiffStore::new(Arc::new(NoPersistence))),
+        })
+    }
+
+    async fn read_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body collects")
+            .to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     async fn call(state: Arc<AppState>, method: &str, uri: &str) -> (StatusCode, Value) {
@@ -401,21 +494,28 @@ mod tests {
             )
             .await
             .expect("router answers");
-        let status = response.status();
-        let bytes = response
-            .into_body()
-            .collect()
+        read_json(response).await
+    }
+
+    async fn put_shape_call(state: Arc<AppState>, epoch: u32, body: Value) -> (StatusCode, Value) {
+        let response = ingest_routes()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/diff/shape/{epoch}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request builds"),
+            )
             .await
-            .expect("body collects")
-            .to_bytes();
-        let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        (status, json)
+            .expect("router answers");
+        read_json(response).await
     }
 
     #[tokio::test]
     async fn network_diff_answers_a_valid_window() {
-        let state = state_over(Arc::new(FakeReader::with_epochs([48, 49, 50])));
-        let (status, body) = call(state, "GET", "/diff?from=48&to=50").await;
+        let (status, body) = call(state_over(&[48, 49, 50]), "GET", "/diff?from=48&to=50").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["from"], 48);
         assert_eq!(body["to"], 50);
@@ -424,112 +524,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn network_diff_rejects_a_bad_window_and_reports_a_missing_epoch() {
-        let state = state_over(Arc::new(FakeReader::with_epochs([48, 49])));
-        let (status, body) = call(Arc::clone(&state), "GET", "/diff?from=1&to=2").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "from and to must be in [48, 100000]");
+    async fn network_diff_reports_a_link_added_between_the_ends() {
+        let persistence = Arc::new(MemoryPersistence::default());
+        persistence.insert(shape(48, false));
+        persistence.insert(shape(49, true));
+        let (status, body) = call(state_with(persistence), "GET", "/diff?from=48&to=49").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["summary"]["linksAdded"], 1);
+    }
 
-        let (status, body) = call(state, "GET", "/diff?from=48&to=200").await;
+    #[tokio::test]
+    async fn an_epoch_with_no_record_is_a_404_carrying_the_ui_text() {
+        let (status, body) = call(state_over(&[48]), "GET", "/diff?from=48&to=60").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(body["error"], "epoch 200: snapshot HTTP 404");
+        assert_eq!(body["error"], "epoch 60: snapshot HTTP 404");
     }
 
     #[tokio::test]
-    async fn contributor_diff_omits_the_display_name() {
-        let state = state_over(Arc::new(FakeReader::with_epochs([48, 49])));
-        let (status, body) = call(state, "GET", "/diff/contributor/alpha?from=48&to=49").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["code"], "alpha");
-        assert!(body.get("name").is_none());
-        assert_eq!(body["footprint"]["after"]["linkCount"], 1);
-    }
-
-    #[tokio::test]
-    async fn precompute_by_epoch_and_by_depth() {
-        let reader = Arc::new(FakeReader::with_epochs([48, 49, 50, 51]));
-        let state = state_over(Arc::clone(&reader));
-        let (status, body) = call(Arc::clone(&state), "POST", "/diff/precompute?epoch=49").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body["latest"].is_null());
-        assert_eq!(body["results"].as_array().map(Vec::len), Some(1));
-        assert_eq!(body["results"][0]["status"], "ok");
-        assert_eq!(reader.fetch_calls(), 1);
-
-        let (status, body) = call(Arc::clone(&state), "POST", "/diff/precompute?depth=3").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["latest"], 51);
-        let epochs: Vec<u64> = body["results"]
-            .as_array()
-            .expect("results array")
-            .iter()
-            .map(|row| row["epoch"].as_u64().expect("epoch number"))
-            .collect();
-        assert_eq!(epochs, vec![49, 50, 51]);
-        assert_eq!(reader.fetch_calls(), 3);
-
-        let (status, body) = call(Arc::clone(&state), "POST", "/diff/precompute?depth=31").await;
+    async fn window_validation_emits_the_route_messages() {
+        let state = state_over(&[48, 49]);
+        let (status, body) = call(Arc::clone(&state), "GET", "/diff?from=48").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], DEPTH_MESSAGE);
-
-        let (status, body) = call(state, "POST", "/diff/precompute?epoch=1").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], EPOCH_MESSAGE);
-    }
-
-    #[tokio::test]
-    async fn precompute_reports_missing_and_fails_only_when_every_epoch_errored() {
-        let reader = Arc::new(FakeReader::with_epochs([48]));
-        let state = state_over(Arc::clone(&reader));
-        let (status, body) = call(Arc::clone(&state), "POST", "/diff/precompute?epoch=60").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["results"][0]["status"], "missing");
-
-        reader.fail_next_fetches(1);
-        let (status, body) = call(state, "POST", "/diff/precompute?epoch=48").await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert_eq!(body["error"], FETCH_FAILED_MESSAGE);
-    }
-
-    #[test]
-    fn precompute_epochs_count_back_from_latest_and_clamp() {
-        assert_eq!(
-            precompute_epochs(Epoch(211), 3),
-            vec![Epoch(209), Epoch(210), Epoch(211)]
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("error text")
+                .contains("required")
         );
-        assert_eq!(precompute_epochs(Epoch(211), 1), vec![Epoch(211)]);
-        assert_eq!(precompute_epochs(Epoch(49), 30), vec![Epoch(48), Epoch(49)]);
+
+        let (status, _) = call(state, "GET", "/diff?from=1&to=2").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
-    async fn read_bounded_keeps_epoch_order_and_skipped_intermediates_do_not_fail() {
-        let reader = Arc::new(FakeReader::with_epochs([48, 49, 50, 51, 52]));
-        let store = Arc::new(DiffStore::new(
-            Arc::clone(&reader) as Arc<dyn crate::snapshot::SnapshotReader>,
-            Arc::new(NoPersistence),
-        ));
-        let reads = read_bounded(&store, (48..=52).map(Epoch), 2, INTERMEDIATE_READ_TIMEOUT).await;
-        let epochs: Vec<Epoch> = reads.iter().map(|read| read.epoch).collect();
-        assert_eq!(epochs, (48..=52).map(Epoch).collect::<Vec<_>>());
-        assert!(reads.iter().all(|read| read.result.is_ok()));
-
-        let window = EpochWindow {
-            from: Epoch(48),
-            to: Epoch(55),
-        };
-        let (intermediates, skipped) = load_intermediates(&store, window).await;
-        let epochs: Vec<Epoch> = intermediates.iter().map(|shape| shape.epoch).collect();
-        assert_eq!(epochs, vec![Epoch(49), Epoch(50), Epoch(51), Epoch(52)]);
-        assert_eq!(skipped, 2, "epochs 53 and 54 have no snapshot");
-    }
-
-    #[tokio::test]
-    async fn a_skipped_intermediate_marks_the_body_degraded() {
-        let reader = Arc::new(FakeReader::with_epochs([48, 49, 51]));
-        let state = state_over(Arc::clone(&reader));
-
+    async fn a_missing_intermediate_marks_the_body_degraded() {
         let response = routes()
-            .with_state(Arc::clone(&state))
+            .with_state(state_over(&[48, 49, 51]))
             .oneshot(
                 Request::builder()
                     .uri("/diff?from=48&to=51")
@@ -543,48 +573,171 @@ mod tests {
             response
                 .headers()
                 .get(DEGRADED_HEADER)
-                .map(|v| v.as_bytes()),
-            Some(b"1".as_slice()),
-            "epoch 50 is absent, so attribution fell back to `to`"
+                .map(|v| v.to_str().unwrap_or("")),
+            Some("1"),
+            "epoch 50 has no record, so attribution is incomplete"
         );
+    }
 
-        let (status, body) = call(state, "GET", "/diff?from=48&to=49").await;
+    #[tokio::test]
+    async fn contributor_diff_scopes_to_the_code() {
+        let persistence = Arc::new(MemoryPersistence::default());
+        persistence.insert(shape(48, false));
+        persistence.insert(shape(49, true));
+        let (status, body) = call(
+            state_with(persistence),
+            "GET",
+            "/diff/contributor/beta?from=48&to=49",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["to"], 49, "a window with no intermediates is complete");
+        assert_eq!(body["code"], "beta");
+    }
+
+    #[tokio::test]
+    async fn missing_lists_the_holes_in_the_window() {
+        let (status, body) = call(
+            state_over(&[48, 50]),
+            "GET",
+            "/diff/missing?latest=51&depth=4",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["missing"], json!([49, 51]));
+    }
+
+    #[tokio::test]
+    async fn missing_requires_a_latest_and_bounds_the_depth() {
+        let state = state_over(&[48]);
+        let (status, body) = call(Arc::clone(&state), "GET", "/diff/missing").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], LATEST_MESSAGE);
+
+        let (status, body) = call(Arc::clone(&state), "GET", "/diff/missing?latest=1").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], LATEST_MESSAGE);
+
+        let (status, body) = call(state, "GET", "/diff/missing?latest=200&depth=201").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], DEPTH_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn put_shape_creates_then_conflicts() {
+        let persistence = Arc::new(MemoryPersistence::default());
+        let state = state_with(Arc::clone(&persistence));
+        let body = serde_json::to_value(shape(204, false)).expect("shape serializes");
+
+        let (status, _) = put_shape_call(Arc::clone(&state), 204, body.clone()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(persistence.store_calls(), 1);
+
+        let (status, error) = put_shape_call(state, 204, body).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(error["error"], "epoch 204: shape already persisted");
+        assert_eq!(persistence.store_calls(), 1, "the conflict wrote nothing");
+    }
+
+    #[tokio::test]
+    async fn put_shape_refuses_a_body_naming_another_epoch() {
+        // Persistence keys the object off the BODY's epoch, so a disagreeing
+        // path would write to epoch 210's key under a 211 request.
+        let state = state_with(Arc::new(MemoryPersistence::default()));
+        let body = serde_json::to_value(shape(210, false)).expect("shape serializes");
+        let (status, error) = put_shape_call(state, 211, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"],
+            "epoch 211: body names epoch 210 but the path names 211"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_shape_rejects_an_out_of_range_epoch() {
+        let state = state_with(Arc::new(MemoryPersistence::default()));
+        let body = serde_json::to_value(shape(47, false)).expect("shape serializes");
+        let (status, error) = put_shape_call(state, 47, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"], EPOCH_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn put_shape_rejects_bodies_that_cannot_come_from_a_snapshot() {
+        let state = state_with(Arc::new(MemoryPersistence::default()));
+
+        let mut empty = shape(204, false);
+        empty.links.clear();
+        let (status, error) = put_shape_call(
+            Arc::clone(&state),
+            204,
+            serde_json::to_value(&empty).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"], "epoch 204: links must not be empty");
+
+        let mut no_contributors = shape(204, false);
+        no_contributors.contributors.clear();
+        let (status, error) = put_shape_call(
+            Arc::clone(&state),
+            204,
+            serde_json::to_value(&no_contributors).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"], "epoch 204: contributors must not be empty");
+
+        let mut duplicate = shape(204, true);
+        duplicate.links[1].pubkey = "K1".to_string();
+        let (status, error) = put_shape_call(
+            Arc::clone(&state),
+            204,
+            serde_json::to_value(&duplicate).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"], "epoch 204: link K1 appears twice");
+
+        // NaN survives serde_json as `null`, so drive the check through a
+        // literal body rather than a serialized struct.
+        let mut huge = shape(204, false);
+        huge.links[0].bandwidth_gbps = 1.0e9;
+        let (status, error) =
+            put_shape_call(state, 204, serde_json::to_value(&huge).unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error["error"]
+                .as_str()
+                .expect("error text")
+                .contains("outside [0, 1000000]"),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_shape_refuses_when_persistence_would_not_survive_a_restart() {
+        let body = serde_json::to_value(shape(204, false)).expect("shape serializes");
+        let (status, _) = put_shape_call(state_without_persistence(), 204, body).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
-    fn snapshot_errors_map_to_status_codes() {
-        let epoch = Epoch(5);
+    fn store_errors_map_onto_the_statuses_the_proxy_expects() {
+        let epoch = Epoch(204);
         let cases = [
-            (SnapshotError::NotFound { epoch }, StatusCode::NOT_FOUND),
+            (DiffStoreError::NotFound { epoch }, StatusCode::NOT_FOUND),
+            (DiffStoreError::Conflict { epoch }, StatusCode::CONFLICT),
             (
-                SnapshotError::Http { epoch, status: 500 },
-                StatusCode::BAD_GATEWAY,
+                DiffStoreError::malformed(epoch, "bad"),
+                StatusCode::BAD_REQUEST,
             ),
             (
-                SnapshotError::Transport {
-                    epoch,
-                    message: "x".to_string(),
-                },
+                DiffStoreError::persistence(epoch, "gateway down"),
                 StatusCode::BAD_GATEWAY,
-            ),
-            (SnapshotError::Timeout { epoch }, StatusCode::BAD_GATEWAY),
-            (
-                SnapshotError::Scan {
-                    epoch,
-                    bytes_read: 1,
-                    failure: ScanFailure::Truncated,
-                },
-                StatusCode::UNPROCESSABLE_ENTITY,
             ),
         ];
         for (error, expected) in cases {
-            assert_eq!(
-                snapshot_error_response(&error).status(),
-                expected,
-                "{error}"
-            );
+            assert_eq!(snapshot_error_response(&error).status(), expected);
         }
     }
 }

@@ -31,7 +31,12 @@
     "test:simulate-eta": "tsx scripts/test-simulate-eta.ts",
     "test:stake": "tsx scripts/test-validator-stake.ts",
     "test:estimate": "tsx scripts/test-validator-estimate.ts",
-    "test:diff-window": "tsx scripts/test-diff-window.ts"
+    "test:diff-window": "tsx scripts/test-diff-window.ts",
+    "test:diff-shape": "tsx scripts/test-diff-shape.ts",
+    "test:diff-shape-offline": "node --import tsx scripts/test-diff-shape-offline.ts",
+    "backfill:diff": "tsx scripts/backfill-diff-shapes.ts",
+    "test:precompute-ingest": "node --import tsx scripts/test-precompute-ingest.ts",
+    "test:diff-repair-schedule": "node --import tsx scripts/test-diff-repair-schedule.ts"
   },
   "dependencies": {
     "@solana/web3.js": "1.98.4",

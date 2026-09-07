@@ -137,3 +137,18 @@ export interface ContributorDiffResponse {
   changed: LinkChange[];
   fetchedAt: string;
 }
+
+/**
+ * One epoch's extracted diff record, the wire body of
+ * `PUT {service}/diff/shape/:epoch`.
+ *
+ * Mirrors `DiffShape` in `services/shapley-rs/src/diff.rs`. The Rust side
+ * deserializes into a struct, so field ORDER does not matter, but the order of
+ * `links` and `contributors` does: the diff reports entries in file order and
+ * `tests/fixtures/diff/*.json` pins it.
+ */
+export interface DiffShapeRecord {
+  epoch: number;
+  links: LinkRef[];
+  contributors: ContributorRef[];
+}

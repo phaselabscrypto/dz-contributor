@@ -1,20 +1,23 @@
-/**
- * Tag identifying one epoch's canonical link-value sweep — the key of the
- * Rust service's "fully swept" S3 marker (`GET
- * /precompute/link-estimates/status?tag=…`). The cron route checks the marker
- * FIRST and skips the 70MB snapshot fetch + canonical build when the epoch is
- * already swept, so the tag must be computable WITHOUT the snapshot.
- *
- * BUMP `CANONICAL_SWEEP_VERSION` whenever the canonical input builder
- * (`lib/utils/canonical-input-builder.ts`) or solver-facing parameters change
- * in a way that alters built inputs: the per-operator S3 results are keyed by
- * payload hash and would naturally miss, but a stale marker would stop the
- * cron from ever re-sweeping the epoch under the new inputs. Epochs themselves
- * are immutable, so a marker for a given (epoch, version) never goes stale.
- */
+import { CANONICAL_SHAPLEY_PARAMS } from "@/lib/constants/config";
+
 export const CANONICAL_SWEEP_VERSION = "canonical-v1";
 
-/** The sweep tag for an epoch under the current builder version. */
+function fnv1a(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+export function canonicalParamsFingerprint(): string {
+  const params = CANONICAL_SHAPLEY_PARAMS;
+  return fnv1a(
+    `ibrl=${params.ibrlPriority};plm=${params.publicLatencyMultiplier}`,
+  );
+}
+
 export function sweepTag(epoch: number): string {
-  return `epoch-${epoch}:${CANONICAL_SWEEP_VERSION}`;
+  return `epoch-${epoch}:${CANONICAL_SWEEP_VERSION}:${canonicalParamsFingerprint()}`;
 }

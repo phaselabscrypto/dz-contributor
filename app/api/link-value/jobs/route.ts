@@ -6,7 +6,12 @@ import {
 } from "@/lib/constants/config";
 import type { RawSnapshot } from "@/lib/types/snapshot";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
-import { JobStartError, startLinkEstimateJob } from "@/lib/utils/shapley-remote";
+import {
+  JobStartError,
+  startLinkEstimateJob,
+  startLinkEstimateJobByTag,
+} from "@/lib/utils/shapley-remote";
+import { sweepTag } from "@/lib/utils/sweep-tag";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
 import { reportError } from "@/lib/observability";
 
@@ -66,6 +71,30 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    // Fast path: the epoch sweep already computed this operator's estimate and
+    // recorded which payload hash answers (tag, operator). Two S3 reads inside
+    // the cluster, instead of a 113 MB snapshot download whose only purpose was
+    // to rebuild the 145 KB input that names an object we already hold.
+    //
+    // The tag carries a fingerprint of the offchain parameters, so a parameter
+    // change misses here and falls through to a rebuild rather than serving a
+    // pre-change value.
+    const aliasJobId = await startLinkEstimateJobByTag(
+      sweepTag(epoch),
+      contributorCode,
+    );
+    if (aliasJobId) {
+      console.log(
+        `[link-value/jobs] epoch=${epoch} contributor=${contributorCode} served_from=alias`,
+      );
+      return NextResponse.json({ jobId: aliasJobId }, { status: 202 });
+    }
+
+    // No alias: a cold epoch, an operator over the sweep's link cap, or a
+    // parameter change since the sweep. Rebuild from the snapshot.
+    console.log(
+      `[link-value/jobs] epoch=${epoch} contributor=${contributorCode} served_from=snapshot`,
+    );
     const snapRes = await fetch(getSnapshotUrl(epoch), {
       signal: AbortSignal.timeout(30_000),
     });
