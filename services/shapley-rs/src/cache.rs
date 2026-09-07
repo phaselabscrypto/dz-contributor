@@ -124,8 +124,12 @@ pub struct S3Cache {
     bucket: String,
 }
 
+/// Where the result behind an alias currently lives. An `Unpersisted` result
+/// is written to S3 before its alias, so an alias never points at nothing.
 pub(crate) enum PublicationSource<'a> {
+    /// Already read back from S3.
     Persisted(&'a crate::model::LinkEstimateResponse),
+    /// Freshly solved, or recovered from the Redis result cache.
     Unpersisted(&'a crate::model::LinkEstimateResponse),
 }
 
@@ -298,20 +302,30 @@ impl S3Cache {
         }
     }
 
+    /// Best-effort background persistence of a finished link estimate. A
+    /// failure is logged and never fails the compute that produced it.
     pub fn store_link_estimate(
         &self,
         payload_hash: u64,
         resp: &crate::model::LinkEstimateResponse,
     ) {
+        let bytes = match bincode::serialize(resp) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::error!(%error, "failed to serialize link estimate");
+                return;
+            }
+        };
         let cache = self.clone();
-        let resp = resp.clone();
         tokio::spawn(async move {
-            if let Err(error) = cache.persist_link_estimate(payload_hash, &resp).await {
+            if let Err(error) = cache.put_link_estimate_bytes(payload_hash, bytes).await {
                 tracing::error!(%error, "failed to persist link estimate");
             }
         });
     }
 
+    /// Awaited persistence of a finished link estimate, for callers that must
+    /// know the result is durable before pointing an alias at it.
     pub(crate) async fn persist_link_estimate(
         &self,
         payload_hash: u64,
@@ -319,6 +333,15 @@ impl S3Cache {
     ) -> anyhow::Result<()> {
         use anyhow::Context;
         let bytes = bincode::serialize(resp).context("serialize link estimate")?;
+        self.put_link_estimate_bytes(payload_hash, bytes).await
+    }
+
+    async fn put_link_estimate_bytes(
+        &self,
+        payload_hash: u64,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
         self.client
             .put_object()
             .bucket(&self.bucket)
@@ -342,14 +365,15 @@ impl S3Cache {
             !tag.contains('\0') && !focus.contains('\0'),
             "invalid alias key"
         );
-        let result = match source {
-            PublicationSource::Persisted(result) | PublicationSource::Unpersisted(result) => result,
+        let (result, is_persisted) = match source {
+            PublicationSource::Persisted(result) => (result, true),
+            PublicationSource::Unpersisted(result) => (result, false),
         };
         anyhow::ensure!(
             result.operator_focus == focus,
             "cached result has a different operator focus"
         );
-        if let PublicationSource::Unpersisted(result) = source {
+        if !is_persisted {
             self.persist_link_estimate(payload_hash, result).await?;
         }
         self.store_link_estimate_alias(tag, focus, payload_hash)

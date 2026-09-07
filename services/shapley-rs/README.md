@@ -32,12 +32,12 @@ curl -fsS -X POST "$BASE/precompute/link-estimates" \
   -H "authorization: Bearer $SHAPLEY_API_TOKEN" \
   -H "X-Ingest-Token: $SHAPLEY_INGEST_TOKEN" \
   -H 'content-type: application/json' \
-  --data-binary @canonical-sweep.json
+  --data-binary @sweep.json
 ```
 
-The body contains `input` and `tag`. Omit `operators` to derive the complete set. Poll the returned `job_id` for `enqueued`, `cached`, `skipped`, `already_running`, `failed`, and `marker_written`. Explicit operator subsets and legacy stored payloads cannot publish canonical metadata.
+The body contains `input` and `tag`. Omit `operators` to derive the complete set. Poll the returned `job_id` for `enqueued`, `cached`, `skipped`, `already_running`, `failed`, and `marker_written`. Explicit operator subsets and payloads stored before the authorization field existed cannot publish aliases or markers.
 
-Result keys remain under `shapley/v3/`; trusted aliases and markers use `shapley/v3/canonical/v1/`. Publication awaits result and alias writes, while the claim heartbeat remains active. A failed alias leaves the marker absent so a later sweep can retry from cached results.
+Result keys remain under `shapley/v3/`; trusted aliases and markers use `shapley/v3/publication/v1/`. Publication awaits result and alias writes, while the claim heartbeat remains active. A failed alias leaves the marker absent so a later sweep can retry from cached results.
 
 Wire-types live in `src/model.rs` and mirror the JSON our Next.js routes
 already produce (see `lib/types/shapley.ts`).
@@ -289,4 +289,4 @@ redis-server --bind 127.0.0.1 --port 6390 --save '' --appendonly no
 TEST_REDIS_URL=redis://127.0.0.1:6390/13 cargo test --locked
 ```
 
-The default storage tests run a local mock S3 server with the real SDK. Gateway acceptance is separate and requires a disposable `pr24-canary-<UUID>` bucket. See [operations](../../docs/operations.md#canonical-publication-rollout) for rollout and historical warm-up.
+The default storage tests run a local mock S3 server with the real SDK. Gateway acceptance is separate and requires a disposable `pr24-canary-<UUID>` bucket. See [operations](../../docs/operations.md#alias-publication-rollout) for rollout and historical warm-up.

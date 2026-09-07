@@ -1,7 +1,5 @@
-import { boundedSignal, type RequestDeadline } from "@/lib/utils/request-deadline";
-import { MIN_DZ_EPOCH } from "@/lib/constants/config";
-
 import {
+  MIN_DZ_EPOCH,
   SHAPLEY_SERVICE_URL,
   shapleyEndpointUrl,
   shapleyServiceBase,
@@ -9,6 +7,10 @@ import {
 import type { DiffShapeRecord } from "@/lib/types/diff";
 import type { ShapleyInput, ShapleyOutput } from "@/lib/types/shapley";
 import { reportError } from "@/lib/observability";
+import {
+  boundedSignal,
+  type RequestDeadline,
+} from "@/lib/utils/request-deadline";
 
 /**
  * Single source of truth for talking to the Rust Shapley microservice
@@ -42,7 +44,9 @@ const INGEST_TOKEN = process.env.SHAPLEY_INGEST_TOKEN;
 
 /** Headers for a write to the ingest routes: both tokens, never logged. */
 function buildIngestHeaders(): Record<string, string> {
-  if (!INGEST_TOKEN) throw new JobStartError("SHAPLEY_INGEST_TOKEN not configured", 503);
+  if (!INGEST_TOKEN) {
+    throw new JobStartError("SHAPLEY_INGEST_TOKEN not configured", 503);
+  }
   const headers = buildHeaders();
   headers["X-Ingest-Token"] = INGEST_TOKEN;
   return headers;
@@ -445,12 +449,20 @@ export interface LinkEstimateJobStatus {
  * and must surface as a 503, not masquerade as an internal error.
  */
 export class JobStartError extends Error {
+  /** The service's own response text, truncated, for the server-side log only. */
+  readonly detail?: string;
+
   constructor(
     message: string,
     readonly status: number,
+    options: { cause?: unknown; detail?: string } = {},
   ) {
-    super(message);
+    super(
+      message,
+      options.cause === undefined ? undefined : { cause: options.cause },
+    );
     this.name = "JobStartError";
+    this.detail = options.detail;
   }
 }
 
@@ -481,7 +493,22 @@ export interface LinkEstimateSweepSummary {
   tag: string | null;
 }
 
-async function precomputeRequest(path: string, init: RequestInit, options: RequestDeadline, defaultTimeoutMs = 15_000): Promise<{ status: number; text: string }> {
+interface PrecomputeResponse {
+  status: number;
+  text: string;
+}
+
+/**
+ * One call to the service's precompute surface under a deadline. The thrown
+ * message is fixed because it can reach a response body; the connection
+ * error travels as the cause, for the log.
+ */
+async function precomputeRequest(
+  path: string,
+  init: RequestInit,
+  options: RequestDeadline,
+  defaultTimeoutMs = 15_000,
+): Promise<PrecomputeResponse> {
   const signal = boundedSignal(options, defaultTimeoutMs);
   try {
     signal.throwIfAborted();
@@ -491,41 +518,119 @@ async function precomputeRequest(path: string, init: RequestInit, options: Reque
     return { status: response.status, text };
   } catch (error) {
     if (error instanceof JobStartError) throw error;
-    throw new JobStartError(signal.aborted ? "precompute service request timed out or aborted" : "precompute service unavailable", signal.aborted ? 504 : 502);
+    if (signal.aborted) {
+      throw new JobStartError(
+        "precompute service request timed out or aborted",
+        504,
+        { cause: error },
+      );
+    }
+    throw new JobStartError("precompute service unavailable", 502, {
+      cause: error,
+    });
   }
 }
 
-function precomputeObject(response: { status: number; text: string }): Record<string, unknown> {
-  if (response.status < 200 || response.status >= 300) throw new JobStartError(`precompute service HTTP ${response.status}`, response.status);
+/** The JSON object body of a 2xx response; anything else is a JobStartError. */
+function precomputeObject(
+  response: PrecomputeResponse,
+): Record<string, unknown> {
+  if (response.status < 200 || response.status >= 300) {
+    throw new JobStartError(
+      `precompute service HTTP ${response.status}`,
+      response.status,
+      { detail: response.text.slice(0, 200) },
+    );
+  }
   let data: unknown;
-  try { data = JSON.parse(response.text); } catch { throw new JobStartError("invalid precompute service JSON", 502); }
-  if (typeof data !== "object" || data === null || Array.isArray(data)) throw new JobStartError("invalid precompute service response", 502);
+  try {
+    data = JSON.parse(response.text);
+  } catch (error) {
+    throw new JobStartError("invalid precompute service JSON", 502, {
+      cause: error,
+    });
+  }
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new JobStartError("invalid precompute service response", 502);
+  }
   return data as Record<string, unknown>;
 }
 
-export async function startLinkEstimateSweep(input: ShapleyInput, tag: string, options: RequestDeadline = {}): Promise<{ job_id: string }> {
-  const data = precomputeObject(await precomputeRequest("/precompute/link-estimates", {
-    method: "POST", headers: buildIngestHeaders(), body: JSON.stringify({ input, tag }),
-  }, options));
-  if (typeof data.job_id !== "string" || data.job_id.length === 0) throw new JobStartError("sweep response has no job ID", 502);
+/**
+ * Enqueue the epoch sweep. The operator set is not sent: the service derives
+ * the complete set, and only a derived set may publish aliases or mark the
+ * epoch swept. Needs both tokens.
+ */
+export async function startLinkEstimateSweep(
+  input: ShapleyInput,
+  tag: string,
+  options: RequestDeadline = {},
+): Promise<{ job_id: string }> {
+  const response = await precomputeRequest(
+    "/precompute/link-estimates",
+    {
+      method: "POST",
+      headers: buildIngestHeaders(),
+      body: JSON.stringify({ input, tag }),
+    },
+    options,
+  );
+  const data = precomputeObject(response);
+  if (typeof data.job_id !== "string" || data.job_id.length === 0) {
+    throw new JobStartError("sweep response has no job ID", 502);
+  }
   return { job_id: data.job_id };
 }
 
-export async function getSweepStatus(tag: string, options: RequestDeadline = {}): Promise<{ complete: boolean; tag: string }> {
-  const data = precomputeObject(await precomputeRequest(`/precompute/link-estimates/status?tag=${encodeURIComponent(tag)}`, {
-    method: "GET", headers: buildHeaders(),
-  }, options));
-  if (typeof data.complete !== "boolean" || data.tag !== tag) throw new JobStartError("invalid sweep status response", 502);
+/** Whether the "fully swept" marker exists for this tag. */
+export async function getSweepStatus(
+  tag: string,
+  options: RequestDeadline = {},
+): Promise<{ complete: boolean; tag: string }> {
+  const response = await precomputeRequest(
+    `/precompute/link-estimates/status?tag=${encodeURIComponent(tag)}`,
+    { method: "GET", headers: buildHeaders() },
+    options,
+  );
+  const data = precomputeObject(response);
+  if (typeof data.complete !== "boolean" || data.tag !== tag) {
+    throw new JobStartError("invalid sweep status response", 502);
+  }
   return { complete: data.complete, tag };
 }
 
-export async function startBaselinePrecompute(input: ShapleyInput, options: RequestDeadline = {}): Promise<{ status: "already-cached" | "accepted"; job_id?: string; input_hash: string }> {
-  const data = precomputeObject(await precomputeRequest("/precompute", {
-    method: "POST", headers: buildHeaders(), body: JSON.stringify(input),
-  }, options));
-  if ((data.status !== "already-cached" && data.status !== "accepted") || typeof data.input_hash !== "string"
-      || (data.status === "accepted" && typeof data.job_id !== "string")) throw new JobStartError("invalid baseline response", 502);
-  return { status: data.status, input_hash: data.input_hash, ...(typeof data.job_id === "string" ? { job_id: data.job_id } : {}) };
+export interface BaselinePrecompute {
+  status: "already-cached" | "accepted";
+  job_id?: string;
+  input_hash: string;
+}
+
+/** Warm the epoch's baseline cache as a queued job. */
+export async function startBaselinePrecompute(
+  input: ShapleyInput,
+  options: RequestDeadline = {},
+): Promise<BaselinePrecompute> {
+  const response = await precomputeRequest(
+    "/precompute",
+    { method: "POST", headers: buildHeaders(), body: JSON.stringify(input) },
+    options,
+  );
+  const { status, input_hash: inputHash, job_id: jobId } =
+    precomputeObject(response);
+  if (status !== "already-cached" && status !== "accepted") {
+    throw new JobStartError("invalid baseline response", 502);
+  }
+  if (
+    typeof inputHash !== "string" ||
+    (status === "accepted" && typeof jobId !== "string")
+  ) {
+    throw new JobStartError("invalid baseline response", 502);
+  }
+  return {
+    status,
+    input_hash: inputHash,
+    ...(typeof jobId === "string" ? { job_id: jobId } : {}),
+  };
 }
 
 /** Start a background link-estimate job. Returns the job id to poll. */
@@ -711,25 +816,70 @@ export async function fetchContributorDiffRemote(
 }
 
 
-/** A conflict means the service verified a readable existing record. */
-export async function putDiffShape(expectedEpoch: number, shape: DiffShapeRecord, options: RequestDeadline = {}): Promise<"created" | "exists"> {
-  if (shape.epoch !== expectedEpoch) throw new JobStartError(`epoch ${expectedEpoch}: shape epoch mismatch`, 422);
-  const response = await precomputeRequest(`/diff/shape/${expectedEpoch}`, {
-    method: "PUT", headers: buildIngestHeaders(), body: JSON.stringify(shape),
-  }, options, 30_000);
+/**
+ * Push one epoch's extracted diff record to the service. `"exists"` is a
+ * normal outcome: the service verified a readable record is already there.
+ */
+export async function putDiffShape(
+  expectedEpoch: number,
+  shape: DiffShapeRecord,
+  options: RequestDeadline = {},
+): Promise<"created" | "exists"> {
+  if (shape.epoch !== expectedEpoch) {
+    throw new JobStartError(
+      `epoch ${expectedEpoch}: shape epoch mismatch`,
+      422,
+    );
+  }
+  const response = await precomputeRequest(
+    `/diff/shape/${expectedEpoch}`,
+    {
+      method: "PUT",
+      headers: buildIngestHeaders(),
+      body: JSON.stringify(shape),
+    },
+    options,
+    30_000,
+  );
   if (response.status === 201) return "created";
   if (response.status === 409) return "exists";
-  throw new JobStartError(`put diff shape HTTP ${response.status}`, response.status);
+  throw new JobStartError(
+    `put diff shape HTTP ${response.status}`,
+    response.status,
+    { detail: response.text.slice(0, 200) },
+  );
 }
 
-export async function fetchMissingDiffShapes(latest: number, depth: number, options: RequestDeadline = {}): Promise<number[]> {
-  const data = precomputeObject(await precomputeRequest(`/diff/missing?latest=${latest}&depth=${depth}`, {
-    method: "GET", headers: buildHeaders(),
-  }, options));
+/**
+ * Epochs in `[latest - depth + 1, latest]` with no readable record. The list
+ * is validated against that window so a bad response cannot steer the cron
+ * at epochs it never asked about.
+ */
+export async function fetchMissingDiffShapes(
+  latest: number,
+  depth: number,
+  options: RequestDeadline = {},
+): Promise<number[]> {
+  const response = await precomputeRequest(
+    `/diff/missing?latest=${latest}&depth=${depth}`,
+    { method: "GET", headers: buildHeaders() },
+    options,
+  );
+  const { missing } = precomputeObject(response);
   const first = Math.max(MIN_DZ_EPOCH, latest - depth + 1);
-  if (!Array.isArray(data.missing) || !data.missing.every((epoch: unknown) => typeof epoch === "number" && Number.isInteger(epoch) && epoch >= first && epoch <= latest)
-      || new Set(data.missing).size !== data.missing.length) throw new JobStartError("invalid missing-shape response", 502);
-  return data.missing;
+  const isEpochInWindow = (epoch: unknown): epoch is number =>
+    typeof epoch === "number" &&
+    Number.isInteger(epoch) &&
+    epoch >= first &&
+    epoch <= latest;
+  if (
+    !Array.isArray(missing) ||
+    !missing.every(isEpochInWindow) ||
+    new Set(missing).size !== missing.length
+  ) {
+    throw new JobStartError("invalid missing-shape response", 502);
+  }
+  return missing;
 }
 
 /**

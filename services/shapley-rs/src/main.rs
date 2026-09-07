@@ -471,7 +471,7 @@ mod tests {
         assert!(ct_eq(b"", b""));
     }
     #[tokio::test]
-    async fn actual_sweep_route_requires_both_tokens() {
+    async fn sweep_route_requires_both_tokens() {
         for (api, ingest, expected) in [
             (Some("compute"), None, StatusCode::UNAUTHORIZED),
             (None, Some("ingest"), StatusCode::UNAUTHORIZED),
@@ -505,7 +505,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn actual_routes_keep_compute_separate_from_publication() {
+    async fn unset_ingest_token_closes_sweep_route_but_not_compute() {
         let state = state_with_tokens(None, None);
         let response = api_router(state.clone(), true)
             .oneshot(

@@ -44,19 +44,29 @@ pub(crate) fn epoch_from_key(key: &str) -> Option<Epoch> {
     digits.parse::<u32>().ok().map(Epoch)
 }
 
+/// What a durable read found at an epoch's key.
 #[derive(Debug)]
 pub enum ShapeRead {
+    /// No object at the key.
     Missing,
     Present(Arc<DiffShape>),
-    Corrupt { etag: Option<String> },
+    /// Bytes exist but do not parse as this epoch's shape. Without an ETag the
+    /// object cannot be replaced conditionally, so repair refuses it.
+    Corrupt {
+        etag: Option<String>,
+    },
 }
 
+/// Precondition for a write: create only, or replace exactly the bytes a
+/// corrupt read returned.
 #[derive(Debug)]
 pub enum ShapeWriteCondition {
     Absent,
     MatchEtag(String),
 }
 
+/// `PreconditionFailed` means another writer won; the caller decides whether
+/// that winner is readable before calling it a conflict.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConditionalWriteOutcome {
     Stored,

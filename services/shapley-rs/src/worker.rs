@@ -15,8 +15,8 @@ use network_shapley::shapley::ComputeControl;
 use crate::cache;
 use crate::jobs::RedisJobStore;
 use crate::model::{
-    LinkEstimateRequest, ShapleyInputIn, ShapleyResponse, SimulateRequest, SimulateResponse,
-    SimulateStats, SweepPayload,
+    LinkEstimateRequest, LinkEstimateResponse, ShapleyInputIn, ShapleyResponse, SimulateRequest,
+    SimulateResponse, SimulateStats, SweepPayload,
 };
 use crate::queue::{self, JobKind};
 use crate::routes::{
@@ -148,6 +148,8 @@ async fn process_entry(
         return Ok(());
     }
 
+    // The heartbeat covers everything from here to the terminal write, so a
+    // long read or an awaited publication cannot look like an abandoned entry.
     let heartbeat = claim_heartbeat(store, consumer, entry_id, &entry);
     let mut shared: Option<SweepPayload> =
         if entry.kind == JobKind::LinkEstimate && entry.focus.is_some() {
@@ -160,50 +162,17 @@ async fn process_entry(
         .and_then(SweepPayload::publish_tag)
         .map(str::to_owned);
 
+    // 3. Idempotency: a cached result is republished instead of recomputed.
+    //    Sweep summaries are never cached, so a sweep always re-expands.
     if entry.kind != JobKind::Sweep
         && let Some(resp) = store.result_cache_get(&entry.input_hash).await?
+        && reconcile_cached_result(state, store, &entry, alias_tag.as_deref(), &resp).await?
     {
-        let is_valid = if entry.kind == JobKind::LinkEstimate {
-            match serde_json::from_value::<crate::model::LinkEstimateResponse>(resp.clone()) {
-                Ok(result)
-                    if entry
-                        .focus
-                        .as_ref()
-                        .is_none_or(|focus| result.operator_focus == *focus) =>
-                {
-                    if let (Some(tag), Some(focus), Ok(hash)) = (
-                        alias_tag.as_deref(),
-                        entry.focus.as_deref(),
-                        u64::from_str_radix(&entry.input_hash, 16),
-                    ) && !store.is_cancelled(&entry.job_id).await?
-                    {
-                        publish_result(
-                            state,
-                            &entry.job_id,
-                            tag,
-                            focus,
-                            hash,
-                            crate::cache::PublicationSource::Unpersisted(&result),
-                        )
-                        .await;
-                    }
-                    true
-                }
-                _ => {
-                    tracing::warn!(job_id = %entry.job_id, "invalid cached link estimate");
-                    false
-                }
-            }
-        } else {
-            true
-        };
-        if is_valid {
-            heartbeat.stop().await;
-            store.set_done(&entry.job_id, &resp).await?;
-            clear_inflight_for(store, &entry).await;
-            ack(store, entry_id).await?;
-            return Ok(());
-        }
+        heartbeat.stop().await;
+        store.set_done(&entry.job_id, &resp).await?;
+        clear_inflight_for(store, &entry).await;
+        ack(store, entry_id).await?;
+        return Ok(());
     }
 
     // 4. A job whose state hash expired while QUEUED (waited > JOB_TTL_SECS —
@@ -298,6 +267,8 @@ async fn process_entry(
         },
     };
 
+    // 6. Terminal handling. process_entry owns the XACK/cache/state ordering,
+    //    and the heartbeat stops before any terminal write.
     heartbeat.stop().await;
     match outcome {
         Outcome::Done(resp) => {
@@ -531,28 +502,30 @@ async fn run_link_estimate(
         && let Some(s3) = &state.s3_cache
         && let Some(cached) = s3.load_link_estimate(hash).await
     {
-        if cached.operator_focus != operator_focus {
-            return Outcome::Transient("cached result has a different operator focus".to_string());
+        if cached.operator_focus == operator_focus {
+            if let Some(tag) = alias_tag
+                && !should_skip_publication(store, job_id).await
+            {
+                publish_result(
+                    state,
+                    job_id,
+                    tag,
+                    &operator_focus,
+                    hash,
+                    cache::PublicationSource::Persisted(&cached),
+                )
+                .await;
+            }
+            tracing::info!(job = %job_id, focus = %body.operator_focus, served_from = "s3",
+                "link-estimate served from S3");
+            return Outcome::Done(Box::new(
+                // Plain structs of strings/floats — serialization cannot fail.
+                serde_json::to_value(cached).expect("LinkEstimateResponse serializes to JSON"),
+            ));
         }
-        if let Some(tag) = alias_tag
-            && !should_skip_publication(store, job_id).await
-        {
-            publish_result(
-                state,
-                job_id,
-                tag,
-                &operator_focus,
-                hash,
-                crate::cache::PublicationSource::Persisted(&cached),
-            )
-            .await;
-        }
-        tracing::info!(job = %job_id, focus = %body.operator_focus, served_from = "s3",
-            "link-estimate served from S3");
-        return Outcome::Done(Box::new(
-            // Plain structs of strings/floats — serialization cannot fail.
-            serde_json::to_value(cached).expect("LinkEstimateResponse serializes to JSON"),
-        ));
+        // A miss, not a failure: the fresh solve below overwrites the object.
+        tracing::error!(job = %job_id, focus = %operator_focus, found = %cached.operator_focus,
+            "persisted link estimate names another operator; recomputing");
     }
 
     let control = ComputeControl::default();
@@ -580,21 +553,25 @@ async fn run_link_estimate(
         Ok(resp) => {
             tracing::info!(job = %job_id, elapsed_ms, link_count = resp.links.len(),
                 "link-estimate phase done");
+            // The result is always persisted: epoch inputs are immutable, so it
+            // never needs recomputing. Only the alias is gated on authority and
+            // on the job not having been cancelled.
             if let (Some(hash), Some(s3)) = (payload_hash, &state.s3_cache) {
-                if let Some(tag) = alias_tag {
-                    if !should_skip_publication(store, job_id).await {
+                let is_publishable =
+                    alias_tag.is_some() && !should_skip_publication(store, job_id).await;
+                match alias_tag {
+                    Some(tag) if is_publishable => {
                         publish_result(
                             state,
                             job_id,
                             tag,
                             &operator_focus,
                             hash,
-                            crate::cache::PublicationSource::Unpersisted(&resp),
+                            cache::PublicationSource::Unpersisted(&resp),
                         )
                         .await;
                     }
-                } else {
-                    s3.store_link_estimate(hash, &resp);
+                    _ => s3.store_link_estimate(hash, &resp),
                 }
             }
             Outcome::Done(Box::new(
@@ -696,65 +673,34 @@ async fn run_sweep(
         let hash = link_estimate_payload_hash(&payload.input, op);
         let hash_hex = format!("{hash:016x}");
 
-        if should_skip_publication(store, job_id).await {
-            return Outcome::Cancelled;
-        }
-        let mut is_s3_cached = false;
-        if let Some(s3) = &state.s3_cache {
-            let persisted = s3.load_link_estimate(hash).await;
-            let recovered = if persisted.is_none() {
-                match store.result_cache_get(&hash_hex).await {
-                    Ok(Some(value)) => {
-                        match serde_json::from_value::<crate::model::LinkEstimateResponse>(value) {
-                            Ok(result) if result.operator_focus == *op => Some(result),
-                            _ => {
-                                tracing::warn!(operator = %op, "invalid cached link estimate");
-                                None
-                            }
-                        }
-                    }
-                    Ok(None) => None,
-                    Err(error) => {
-                        tracing::warn!(%error, operator = %op, "Redis result lookup failed");
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            if let Some(result) = persisted.as_ref().or(recovered.as_ref()) {
-                let publication = if result.operator_focus != *op {
-                    Err(anyhow::anyhow!(
-                        "cached result has a different operator focus"
-                    ))
-                } else if let Some(tag) = alias_tag {
-                    let source = if persisted.is_some() {
-                        crate::cache::PublicationSource::Persisted(result)
-                    } else {
-                        crate::cache::PublicationSource::Unpersisted(result)
-                    };
-                    s3.publish_link_estimate(tag, op, hash, source).await
-                } else if persisted.is_none() {
-                    s3.persist_link_estimate(hash, result).await
-                } else {
-                    Ok(())
-                };
-                match publication {
-                    Ok(()) => {
-                        is_s3_cached = true;
-                        cached.push(op.clone());
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, operator = %op, "alias publication failed");
-                        failed.push(serde_json::json!({"operator": op, "error": "result or alias persistence failed"}));
-                    }
-                }
-                if !is_s3_cached {
-                    continue;
-                }
+        // A cancel between operators ends the expansion. An unreadable flag is
+        // an infrastructure failure, so the entry is left for a retry rather
+        // than reported as a cancel nobody requested.
+        match store.is_cancelled(job_id).await {
+            Ok(true) => return Outcome::Cancelled,
+            Ok(false) => {}
+            Err(error) => {
+                return Outcome::Transient(format!("cancel check failed: {error}"));
             }
         }
-        if is_s3_cached {
+
+        // Gate 2 — completed work. A result already in S3, or one still in the
+        // Redis result cache, is made durable and aliased here instead of being
+        // solved again. A failed write is recorded so the marker stays absent
+        // and the next sweep retries from the same cached result.
+        if let Some(s3) = &state.s3_cache
+            && let Some(found) = find_cached_estimate(store, s3, hash, &hash_hex, op).await
+        {
+            match reconcile_cached_estimate(s3, alias_tag, op, hash, &found).await {
+                Ok(()) => cached.push(op.clone()),
+                Err(error) => {
+                    tracing::error!(%error, operator = %op, "alias publication failed");
+                    failed.push(serde_json::json!({
+                        "operator": op,
+                        "error": "result or alias persistence failed",
+                    }));
+                }
+            }
             continue;
         }
 
@@ -780,7 +726,7 @@ async fn run_sweep(
                 false
             }
         };
-        if sweep_bucket(links, is_s3_cached, inflight_elsewhere) != SweepBucket::Enqueue {
+        if sweep_bucket(links, false, inflight_elsewhere) != SweepBucket::Enqueue {
             continue;
         }
 
@@ -1052,6 +998,9 @@ fn claim_heartbeat(
     })
 }
 
+/// Whether an alias write must be withheld. An unreadable cancel flag counts
+/// as cancelled: the result itself is still stored, only its alias waits for
+/// a later sweep.
 async fn should_skip_publication(store: &RedisJobStore, job_id: &str) -> bool {
     match store.is_cancelled(job_id).await {
         Ok(is_cancelled) => is_cancelled,
@@ -1074,6 +1023,123 @@ async fn publish_result(
         && let Err(error) = s3.publish_link_estimate(tag, focus, hash, source).await
     {
         tracing::error!(%error, job_id, tag, focus, "alias publication failed");
+    }
+}
+
+/// Whether a cached response can complete `entry` without a solve. A link
+/// estimate must parse and name this entry's operator; when it does and the
+/// sweep is authorized, its alias is published here, because this is the only
+/// moment the result is known to exist. Other kinds are republished as stored.
+async fn reconcile_cached_result(
+    state: &Arc<crate::AppState>,
+    store: &RedisJobStore,
+    entry: &queue::StreamEntry,
+    alias_tag: Option<&str>,
+    resp: &serde_json::Value,
+) -> anyhow::Result<bool> {
+    if entry.kind != JobKind::LinkEstimate {
+        return Ok(true);
+    }
+    let Some(estimate) = cached_link_estimate(entry, resp) else {
+        tracing::warn!(job_id = %entry.job_id, "invalid cached link estimate; recomputing");
+        return Ok(false);
+    };
+    if let (Some(tag), Some(focus), Ok(hash)) = (
+        alias_tag,
+        entry.focus.as_deref(),
+        u64::from_str_radix(&entry.input_hash, 16),
+    ) && !store.is_cancelled(&entry.job_id).await?
+    {
+        publish_result(
+            state,
+            &entry.job_id,
+            tag,
+            focus,
+            hash,
+            cache::PublicationSource::Unpersisted(&estimate),
+        )
+        .await;
+    }
+    Ok(true)
+}
+
+/// The cached JSON as a link estimate for this entry's operator, or `None`
+/// when it does not parse or names another operator.
+fn cached_link_estimate(
+    entry: &queue::StreamEntry,
+    resp: &serde_json::Value,
+) -> Option<LinkEstimateResponse> {
+    let estimate = serde_json::from_value::<LinkEstimateResponse>(resp.clone()).ok()?;
+    let is_own_operator = entry
+        .focus
+        .as_ref()
+        .is_none_or(|focus| estimate.operator_focus == *focus);
+    is_own_operator.then_some(estimate)
+}
+
+/// A finished link estimate found outside the solver, and where it lives.
+enum CachedEstimate {
+    /// Durable in S3; at most the alias is missing.
+    Persisted(LinkEstimateResponse),
+    /// Only in the one-hour Redis result cache; must be persisted before an
+    /// alias may point at it.
+    RedisOnly(LinkEstimateResponse),
+}
+
+/// Looks for a finished estimate for `op` in S3, then in the Redis result
+/// cache. A result naming another operator counts as absent, so the sweep
+/// enqueues a solve whose result overwrites it.
+async fn find_cached_estimate(
+    store: &RedisJobStore,
+    s3: &cache::S3Cache,
+    hash: u64,
+    hash_hex: &str,
+    op: &str,
+) -> Option<CachedEstimate> {
+    if let Some(result) = s3.load_link_estimate(hash).await {
+        if result.operator_focus == op {
+            return Some(CachedEstimate::Persisted(result));
+        }
+        tracing::error!(operator = %op, found = %result.operator_focus,
+            "persisted link estimate names another operator; recomputing");
+        return None;
+    }
+    match store.result_cache_get(hash_hex).await {
+        Ok(Some(value)) => match serde_json::from_value::<LinkEstimateResponse>(value) {
+            Ok(result) if result.operator_focus == op => Some(CachedEstimate::RedisOnly(result)),
+            _ => {
+                tracing::warn!(operator = %op, "invalid cached link estimate; recomputing");
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, operator = %op, "Redis result lookup failed");
+            None
+        }
+    }
+}
+
+/// Makes a found estimate durable and, for an authorized sweep, publishes its
+/// alias. A persisted result without a tag needs nothing.
+async fn reconcile_cached_estimate(
+    s3: &cache::S3Cache,
+    alias_tag: Option<&str>,
+    op: &str,
+    hash: u64,
+    found: &CachedEstimate,
+) -> anyhow::Result<()> {
+    match (found, alias_tag) {
+        (CachedEstimate::Persisted(result), Some(tag)) => {
+            s3.publish_link_estimate(tag, op, hash, cache::PublicationSource::Persisted(result))
+                .await
+        }
+        (CachedEstimate::RedisOnly(result), Some(tag)) => {
+            s3.publish_link_estimate(tag, op, hash, cache::PublicationSource::Unpersisted(result))
+                .await
+        }
+        (CachedEstimate::RedisOnly(result), None) => s3.persist_link_estimate(hash, result).await,
+        (CachedEstimate::Persisted(_), None) => Ok(()),
     }
 }
 

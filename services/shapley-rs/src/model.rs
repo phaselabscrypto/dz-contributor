@@ -105,9 +105,14 @@ pub struct LinkEstimateRequest {
 pub struct SweepPayload {
     pub input: ShapleyInputIn,
     pub operators: Vec<String>,
+    /// True when the service derived `operators` from the input's devices.
+    /// Only a derived set is complete, so an explicit list never publishes
+    /// aliases or marks the epoch swept. A payload stored before the field
+    /// existed decodes as not derived.
     #[serde(default)]
     pub derived_operators: bool,
-    /// Set by the ingest-authenticated producer; legacy payloads cannot publish.
+    /// Set by the ingest-authenticated producer. A payload stored before the
+    /// field existed decodes as unauthorized and cannot publish.
     #[serde(default)]
     pub is_publish_authorized: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,6 +120,10 @@ pub struct SweepPayload {
 }
 
 impl SweepPayload {
+    /// The tag this sweep may publish aliases and its marker under. `None`
+    /// when publication is not allowed: the sweep did not come through the
+    /// ingest-authenticated route, its operator list is not derived, or a
+    /// value carries the NUL byte the alias key uses as its separator.
     pub(crate) fn publish_tag(&self) -> Option<&str> {
         self.tag.as_deref().filter(|tag| {
             self.is_publish_authorized
