@@ -86,11 +86,11 @@ Storage reads distinguish absence, readable data, and proven-corrupt bytes. Tran
 
 The deployed object gateway must enforce these conditions. The ignored `gateway_conditional_contract` test checks this in a disposable bucket before rollout. A process lock cannot protect concurrent API replicas; a lease without a storage predicate cannot fence a delayed writer.
 
-### Canonical publication
+### Alias publication
 
-`POST /precompute/link-estimates` also requires both tokens. The API records `is_canonical_publish_authorized` in the shared sweep payload. Legacy payloads default to false. Publication requires this authority and a service-derived complete operator set.
+`POST /precompute/link-estimates` also requires both tokens. The API records `is_publish_authorized` in the shared sweep payload. Legacy payloads default to false. Publication requires this authority and a service-derived complete operator set.
 
-Aliases and sweep markers use `shapley/v3/canonical/v1/`. Readers never fall back to legacy metadata because its origin cannot be established. Solver result keys and the numerical input stay unchanged. Historical aliases need explicit warming.
+Aliases and sweep markers use `shapley/v3/publication/v1/`. Readers never fall back to legacy metadata because its origin cannot be established. Solver result keys and the numerical input stay unchanged. Historical aliases need explicit warming.
 
 Workers await result persistence before alias persistence. A sweep writes its marker only after every eligible cached operator's alias succeeds. Subsequent sweeps reconcile failures from S3 or the one-hour Redis result cache. A valid numerical result remains usable when publication fails. Claim heartbeats cover the full job, including reads and awaited writes, and stop before terminal state handling.
 

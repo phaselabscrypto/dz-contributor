@@ -1,4 +1,4 @@
-//! Redis Streams consumption, solver outcomes, and durable canonical publication.
+//! Redis Streams consumption, solver outcomes, and durable alias publication.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -157,7 +157,7 @@ async fn process_entry(
         };
     let alias_tag = shared
         .as_ref()
-        .and_then(SweepPayload::canonical_tag)
+        .and_then(SweepPayload::publish_tag)
         .map(str::to_owned);
 
     if entry.kind != JobKind::Sweep
@@ -502,7 +502,7 @@ struct ResultKeys<'a> {
     alias_tag: Option<&'a str>,
 }
 
-/// Returns a solver outcome after attempting any authorized canonical publication.
+/// Returns a solver outcome after attempting any authorized alias publication.
 async fn run_link_estimate(
     state: &Arc<crate::AppState>,
     store: &RedisJobStore,
@@ -664,7 +664,7 @@ async fn run_sweep(
     shared_payload_key: &str,
     payload: SweepPayload,
 ) -> Outcome {
-    let alias_tag = payload.canonical_tag();
+    let alias_tag = payload.publish_tag();
     let mut enqueued: Vec<serde_json::Value> = Vec::new();
     let mut cached: Vec<String> = Vec::new();
     let mut skipped: Vec<serde_json::Value> = Vec::new();
@@ -745,7 +745,7 @@ async fn run_sweep(
                         cached.push(op.clone());
                     }
                     Err(error) => {
-                        tracing::error!(%error, operator = %op, "canonical publication failed");
+                        tracing::error!(%error, operator = %op, "alias publication failed");
                         failed.push(serde_json::json!({"operator": op, "error": "result or alias persistence failed"}));
                     }
                 }
@@ -1073,7 +1073,7 @@ async fn publish_result(
     if let Some(s3) = &state.s3_cache
         && let Err(error) = s3.publish_link_estimate(tag, focus, hash, source).await
     {
-        tracing::error!(%error, job_id, tag, focus, "canonical publication failed");
+        tracing::error!(%error, job_id, tag, focus, "alias publication failed");
     }
 }
 

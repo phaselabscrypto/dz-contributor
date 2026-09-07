@@ -110,7 +110,7 @@ export async function runPrecomputeIngest(epochParam: string | null, options: { 
       if (!isSwept) {
         try {
           const built = buildCanonicalShapleyInput(raw);
-          if (!built.canonical) throw new JobStartError(`epoch ${epoch}: canonical input unavailable (${built.reason ?? "unknown"})`, 422);
+          if (!built.canonical) throw new JobStartError(`epoch ${epoch}: Shapley input unavailable (${built.reason ?? "unknown"})`, 422);
           body.operators = parseSnapshot(raw).contributors.filter(contributor => contributor.linkCount > 0).length;
           const sweep = await startLinkEstimateSweep(built.input, tag, callOptions());
           body.sweep = "accepted";

@@ -1721,7 +1721,7 @@ pub async fn link_estimate_sweep(
         input: body.input,
         operators,
         derived_operators,
-        is_canonical_publish_authorized: true,
+        is_publish_authorized: true,
         tag: body.tag,
     };
     // Store the epoch input ONCE with the long sweep TTL (children reference

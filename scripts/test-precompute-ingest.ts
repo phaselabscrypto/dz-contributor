@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   let missing: unknown = [181, 182, 183, 211];
   let isSwept = false;
   let mismatch = false;
-  let isCanonical = true;
+  let inputBuildable = true;
   let hasBaselineFailure = false;
   let hasCurrentPutFailure = false;
   let statusDelayMs = 0;
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
     assert.ok(epoch, `unexpected snapshot URL ${url}`);
     if (epoch !== 211) { now += historyDelayMs; return new Response("missing", { status: 404 }); }
     const raw = snapshot(mismatch ? 210 : epoch);
-    if (!isCanonical) delete raw.fetch_data.start_us;
+    if (!inputBuildable) delete raw.fetch_data.start_us;
     if (shouldAbortSnapshot) controller.abort();
     return Response.json(raw);
   };
@@ -100,11 +100,11 @@ async function main(): Promise<void> {
     assert.ok(!calls.some(call => call.startsWith("PUT ") || call.startsWith("POST ")));
     mismatch = false;
 
-    reset(); isCanonical = false;
+    reset(); inputBuildable = false;
     result = await run();
     assert.equal(result.status, 422);
     assert.equal(result.body.shapes?.[211], "created");
-    isCanonical = true;
+    inputBuildable = true;
 
     reset(); hasBaselineFailure = true;
     result = await run();

@@ -109,15 +109,15 @@ pub struct SweepPayload {
     pub derived_operators: bool,
     /// Set by the ingest-authenticated producer; legacy payloads cannot publish.
     #[serde(default)]
-    pub is_canonical_publish_authorized: bool,
+    pub is_publish_authorized: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
 }
 
 impl SweepPayload {
-    pub(crate) fn canonical_tag(&self) -> Option<&str> {
+    pub(crate) fn publish_tag(&self) -> Option<&str> {
         self.tag.as_deref().filter(|tag| {
-            self.is_canonical_publish_authorized
+            self.is_publish_authorized
                 && self.derived_operators
                 && !tag.contains('\0')
                 && self.operators.iter().all(|op| !op.contains('\0'))

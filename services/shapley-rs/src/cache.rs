@@ -91,7 +91,7 @@ pub fn hash_input(input: &crate::model::ShapleyInputIn) -> u64 {
 /// forever-persisted `simulate-`/`link-estimate-` objects (no TTL to age out a
 /// rotated key), but it is a recompute cost, not a correctness risk.
 const CACHE_VERSION_PREFIX: &str = "shapley/v3";
-const CANONICAL_PUBLICATION_VERSION_PREFIX: &str = "canonical/v1";
+const PUBLICATION_VERSION_PREFIX: &str = "publication/v1";
 
 /// TCP connect timeout for every S3 client this service builds.
 pub(crate) const S3_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -360,7 +360,7 @@ impl S3Cache {
     fn link_estimate_alias_key(tag: &str, focus: &str) -> String {
         let hash = crate::queue::hash_payload(&format!("{tag}\u{0}{focus}"));
         format!(
-            "{CACHE_VERSION_PREFIX}/{CANONICAL_PUBLICATION_VERSION_PREFIX}/link-estimate-alias-{hash:016x}.json"
+            "{CACHE_VERSION_PREFIX}/{PUBLICATION_VERSION_PREFIX}/link-estimate-alias-{hash:016x}.json"
         )
     }
 
@@ -532,9 +532,7 @@ impl S3Cache {
     /// stored INSIDE the marker object for debuggability.
     fn sweep_marker_key(tag: &str) -> String {
         let hash = crate::queue::hash_payload(tag);
-        format!(
-            "{CACHE_VERSION_PREFIX}/{CANONICAL_PUBLICATION_VERSION_PREFIX}/sweep-marker-{hash:016x}.json"
-        )
+        format!("{CACHE_VERSION_PREFIX}/{PUBLICATION_VERSION_PREFIX}/sweep-marker-{hash:016x}.json")
     }
 
     /// Whether the "fully swept" marker exists for this tag (epoch inputs are
@@ -634,16 +632,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_metadata_uses_a_new_namespace_without_rotating_results() {
+    fn publication_metadata_uses_a_new_namespace_without_rotating_results() {
         assert_eq!(
             S3Cache::link_estimate_key(42),
             "shapley/v3/link-estimate-000000000000002a.bin"
         );
         assert!(
             S3Cache::link_estimate_alias_key("tag", "focus")
-                .starts_with("shapley/v3/canonical/v1/")
+                .starts_with("shapley/v3/publication/v1/")
         );
-        assert!(S3Cache::sweep_marker_key("tag").starts_with("shapley/v3/canonical/v1/"));
+        assert!(S3Cache::sweep_marker_key("tag").starts_with("shapley/v3/publication/v1/"));
     }
 
     #[test]

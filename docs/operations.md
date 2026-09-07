@@ -26,7 +26,7 @@ Implemented in `app/api/link-value/precompute/route.ts`. Key behaviors:
 
 - **Auth:** Vercel sends `Authorization: Bearer ${CRON_SECRET}` on cron invocations when `CRON_SECRET` is set. The handler checks this with a constant-time comparison (`timingSafeEqual` from `node:crypto`; the equal-length pre-check it requires reveals only token length, never content). If `CRON_SECRET` is unset the route returns `503`; a header mismatch returns `401`. Manual backfill is possible by passing `?epoch=N` with a valid bearer token.
 - **Idempotency:** Before fetching the snapshot, the handler checks the S3 "fully swept" marker via the Shapley service. If the marker is present and the shape window has no gaps, it returns `sweep: "already-swept"` without fetching snapshots. Idempotent end-to-end: the sweep skips S3-cached contributors and attaches to in-flight duplicates.
-- **What it enqueues:** If the marker is absent, the handler fetches the ~110 MB epoch snapshot, builds the canonical Shapley input (same key derivation as the UI flow so cache keys align), enqueues one sweep job on the Rust service (`202 {job_id}`), and also enqueues a baseline precompute for the what-if simulator. Enqueued children run on the worker pool, not inside this function.
+- **What it enqueues:** If the marker is absent, the handler fetches the ~110 MB epoch snapshot, builds the Shapley input (same key derivation as the UI flow so cache keys align), enqueues one sweep job on the Rust service (`202 {job_id}`), and also enqueues a baseline precompute for the what-if simulator. Enqueued children run on the worker pool, not inside this function.
 - **`maxDuration = 300`:** The snapshot fetch + parse measured 7–27 s locally. Vercel's default function duration would kill the cron mid-parse; 300 s gives headroom for the worst-case download while keeping the actual enqueue sub-second. See the comment in `app/api/link-value/precompute/route.ts`.
 - **Error handling:** A `404` is returned when the epoch's snapshot does not exist upstream; other snapshot/upstream failures return `502`; a generic `500` covers everything else (raw error messages are not surfaced to avoid leaking the internal service host).
 
@@ -119,7 +119,7 @@ Consumed by the Next.js server-side code. Set via `vercel env add <NAME> product
 | `SHAPLEY_SERVICE_URL` | — | Base URL of the Rust Shapley microservice. Validated at module load (`lib/constants/config.ts`); must be `http://` or `https://`. Trailing slashes and known endpoint suffixes are stripped. | Compute routes fall back to the in-process TypeScript coalition-enumeration solver (directionally correct, not bit-comparable to Foundation output). Responses are labeled `local-ts-heuristic-DEV-ONLY`. `/api/diff*` routes return `503`; they have no fallback. |
 | `PYTHON_SHAPLEY_URL` | — | Legacy alias for `SHAPLEY_SERVICE_URL` (previous Python deployment). Checked in `lib/constants/config.ts` only when `SHAPLEY_SERVICE_URL` is unset. | Same as `SHAPLEY_SERVICE_URL` unset. |
 | `SHAPLEY_API_TOKEN` | — | Bearer token sent by the frontend to the Rust service (`lib/utils/shapley-remote.ts`). Never exposed to the browser. | Requests to the Rust service are sent without an `Authorization` header. If the service is configured fail-closed (no `SHAPLEY_ALLOW_UNAUTHENTICATED=1`), all compute calls return `401`. |
-| `SHAPLEY_INGEST_TOKEN` | — | Second token the cron sends as `X-Ingest-Token` when writing a diff record or submitting a canonical sweep. Must match the service's value. Never exposed to the browser. | Shape writes and canonical sweep submissions fail locally with `503` and are reported per fire. |
+| `SHAPLEY_INGEST_TOKEN` | — | Second token the cron sends as `X-Ingest-Token` when writing a diff record or submitting a sweep. Must match the service's value. Never exposed to the browser. | Shape writes and sweep submissions fail locally with `503` and are reported per fire. |
 | `DZ_CANONICAL_INPUTS_URL` | — | URL template (with `{N}` epoch placeholder) for Foundation-published canonical Shapley input CSVs. Described in `.env.example`. | Falls back to S3 snapshot-derived inputs. |
 | `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana mainnet RPC endpoint used by on-chain routes (`lib/onchain/program-ids.ts`). The public default is rate-limited; a dedicated provider (e.g. Helius) is recommended for production. | Uses the public Solana mainnet RPC. |
 | `DZ_LEDGER_RPC_URL` | — | RPC endpoint for the DoubleZero ledger (a Solana sidechain). Required for any `/api/onchain/*` route. No default in code — a previous default embedded a paid API key in source. | On-chain routes that need the DZ ledger will fail; `ONCHAIN_ENABLED` gates whether they are attempted. |
@@ -153,7 +153,7 @@ Consumed by `services/shapley-rs/src/main.rs`, `src/cache.rs`, `src/jobs.rs`, an
 | `AWS_REGION` | `us-east-1` | AWS region for the S3 client (`cache.rs`). | Defaults to `us-east-1`. |
 | `AWS_ACCESS_KEY_ID` | — | S3 credentials via the standard AWS SDK credential chain. | SDK falls back to IAM role / instance metadata / env chain. Required when not running on AWS infrastructure with attached roles. |
 | `AWS_SECRET_ACCESS_KEY` | — | Paired with `AWS_ACCESS_KEY_ID`. | See above. |
-| `SHAPLEY_INGEST_TOKEN` | — | Second bearer token, required ON TOP of `SHAPLEY_API_TOKEN` on `PUT /diff/shape/:epoch` and `POST /precompute/link-estimates`, sent as `X-Ingest-Token`. Constant-time comparison in `main.rs` `require_ingest_auth`. | Ingest and canonical-sweep routes answer `503`. Reads keep working. Unlike the compute token, unset does NOT mean open. |
+| `SHAPLEY_INGEST_TOKEN` | — | Second bearer token, required ON TOP of `SHAPLEY_API_TOKEN` on `PUT /diff/shape/:epoch` and `POST /precompute/link-estimates`, sent as `X-Ingest-Token`. Constant-time comparison in `main.rs` `require_ingest_auth`. | Ingest and trusted-sweep routes answer `503`. Reads keep working. Unlike the compute token, unset does NOT mean open. |
 
 ---
 
@@ -273,7 +273,7 @@ curl -H "Authorization: Bearer <CRON_SECRET>" \
   "https://your-deploy.vercel.app/api/shapley/precompute?epoch=<N>"
 ```
 
-### Canonical publication rollout
+### Alias publication rollout
 
 Before deployment, verify conditional writes on the actual gateway. Provision a disposable bucket named `pr24-canary-<UUID>` and set `TEST_S3_ENDPOINT` and `TEST_S3_BUCKET`. Use test credentials through the environment. From `services/shapley-rs`, run:
 
@@ -284,14 +284,14 @@ cargo test --locked --test diff_persistence gateway_conditional_contract -- --ig
 The test rejects the production bucket and pre-existing canary keys. It checks concurrent create and repair conditions and surviving bytes. It deletes its canary object on success. Record the gateway version and result, then remove the disposable bucket. Unsupported or ignored conditions block deployment of the write path. Do not substitute unconditional retries.
 
 1. Verify deployed API and worker images and prepare the frontend ingest token.
-2. Pause canonical cron calls, then roll every worker to the fixed image.
+2. Pause sweep cron calls, then roll every worker to the fixed image.
 3. Roll API replicas, then deploy the frontend that sends both tokens. Resume the cron.
 4. Warm the latest epoch through `/api/link-value/precompute`. Check its sweep summary and child job results, then repeat until it reports `already-swept`.
 5. Warm the agreed historical window, initially the latest 31 epochs, newest first with `?epoch=N`. Process one epoch at a time and repeat its sweep after children finish. Record failed or unfinished epochs for resumption.
 6. Inspect deeper shape gaps with `pnpm run backfill:diff -- --dry-run`, then run the intended bounded backfill.
 
-The trusted metadata namespace is `shapley/v3/canonical/v1/`. Solver results keep their existing keys. Historical aliases are not migrated from untrusted metadata and need explicit warm-up; existing snapshot fallback handles unwarmed epochs.
+The trusted metadata namespace is `shapley/v3/publication/v1/`. Solver results keep their existing keys. Historical aliases are not migrated from untrusted metadata and need explicit warm-up; existing snapshot fallback handles unwarmed epochs.
 
 The cron reserves current-epoch work before historical repairs. Work stops at 270 seconds inside its 300-second runtime. Historical repairs have 90 seconds, 40 seconds per attempt, and at most three total shape attempts per fire. One history slot selects the newest gap and remaining slots rotate every six hours. The response records failed and deferred epochs separately. Measure snapshot parse time and memory in staging before rollout.
 
-If rollback is needed, keep canonical publication disabled until an API and worker pair with the fixed authorization contract is available. Preserve stored results and metadata; do not restore a reader that trusts legacy aliases.
+If rollback is needed, keep alias publication disabled until an API and worker pair with the fixed authorization contract is available. Preserve stored results and metadata; do not restore a reader that trusts legacy aliases.

@@ -39,13 +39,13 @@ fn result(focus: &str) -> LinkEstimateResponse {
 }
 fn alias(tag: &str, focus: &str) -> String {
     format!(
-        "shapley/v3/canonical/v1/link-estimate-alias-{:016x}.json",
+        "shapley/v3/publication/v1/link-estimate-alias-{:016x}.json",
         queue::hash_payload(&format!("{tag}\0{focus}"))
     )
 }
 fn marker(tag: &str) -> String {
     format!(
-        "shapley/v3/canonical/v1/sweep-marker-{:016x}.json",
+        "shapley/v3/publication/v1/sweep-marker-{:016x}.json",
         queue::hash_payload(tag)
     )
 }
@@ -124,14 +124,14 @@ async fn publication_reconciles_cached_results_and_keeps_claims_alive() {
     }
     let mut worker = Worker(tokio::spawn(worker::run(state.clone())));
     s3.put(
-        &alias("untrusted", "Alpha").replace("canonical/v1/", ""),
+        &alias("untrusted", "Alpha").replace("publication/v1/", ""),
         json!({"payloadHash": format!("{:016x}", hash(&input, "Alpha"))})
             .to_string()
             .into_bytes(),
         None,
     );
     s3.put(
-        &marker("untrusted").replace("canonical/v1/", ""),
+        &marker("untrusted").replace("publication/v1/", ""),
         b"{}".to_vec(),
         None,
     );
@@ -197,7 +197,7 @@ async fn publication_reconciles_cached_results_and_keeps_claims_alive() {
         input: input.clone(),
         operators: vec!["Alpha".into(), "Beta".into()],
         derived_operators: true,
-        is_canonical_publish_authorized: true,
+        is_publish_authorized: true,
         tag: Some("child".into()),
     };
     let parent = store.create().await.unwrap();
@@ -223,10 +223,10 @@ async fn publication_reconciles_cached_results_and_keeps_claims_alive() {
     legacy
         .as_object_mut()
         .unwrap()
-        .remove("is_canonical_publish_authorized");
+        .remove("is_publish_authorized");
     legacy["tag"] = json!("legacy");
     let legacy_payload: SweepPayload = serde_json::from_value(legacy).unwrap();
-    assert!(!legacy_payload.is_canonical_publish_authorized);
+    assert!(!legacy_payload.is_publish_authorized);
     let id = store.create().await.unwrap();
     store
         .enqueue(&id, JobKind::Sweep, &legacy_payload)

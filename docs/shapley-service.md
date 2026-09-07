@@ -174,7 +174,7 @@ sequenceDiagram
 
 Keys in the diagram are shown without their `shapley:whatif:` / `shapley:linkest:` prefixes for readability — the full patterns are in the [Redis keyspace](#redis-keyspace) table.
 
-**Schema versioning and mixed-version rollouts**: every stream entry carries a `schema` field (`whatif/v1`, `linkest/v1`, `sweep/v1`, `baseline/v1`, defined in `src/queue.rs`). A worker that reads an entry with an unrecognized schema dead-letters it immediately instead of mis-decoding a newer payload. Canonical publication also checks the stored authorization field. Roll workers before APIs so the new producer and trusted readers share the same publication contract.
+**Schema versioning and mixed-version rollouts**: every stream entry carries a `schema` field (`whatif/v1`, `linkest/v1`, `sweep/v1`, `baseline/v1`, defined in `src/queue.rs`). A worker that reads an entry with an unrecognized schema dead-letters it immediately instead of mis-decoding a newer payload. Alias publication also checks the stored authorization field. Roll workers before APIs so the new producer and trusted readers share the same publication contract.
 
 ---
 
@@ -233,16 +233,16 @@ When `S3_CACHE_ENDPOINT` is set, the AWS SDK client is configured with that URL 
 | `shapley/v3/cache-{hash:016x}.bin` | `shapley/v3/cache-0000abcd1234ef56.bin` | bincode-serialized `EpochCache` (per-city Shapley values + aggregated baseline) |
 | `shapley/v3/link-estimate-{hash:016x}.bin` | `shapley/v3/link-estimate-0000abcd1234ef56.bin` | bincode-serialized `LinkEstimateResponse` |
 | `shapley/v3/simulate-{hash:016x}.json` | `shapley/v3/simulate-0000abcd1234ef56.json` | JSON-serialized `SimulateResponse` (what-if result, persisted forever by whole-request payload hash; PSYS-557) |
-| `shapley/v3/canonical/v1/sweep-marker-{hash:016x}.json` | `shapley/v3/canonical/v1/sweep-marker-0000abcd1234ef56.json` | JSON `{"tag": "..."}` marker indicating a fully swept epoch; tag is hashed before use as the key suffix |
+| `shapley/v3/publication/v1/sweep-marker-{hash:016x}.json` | `shapley/v3/publication/v1/sweep-marker-0000abcd1234ef56.json` | JSON `{"tag": "..."}` marker indicating a fully swept epoch; tag is hashed before use as the key suffix |
 | `diff/v1/shape-{epoch:06}.json` | `diff/v1/shape-000211.json` | JSON-serialized `DiffShape` (lean links and contributors for one epoch); its own version prefix, see [Snapshot diff index](#snapshot-diff-index) |
 
 The `v3` prefix must be bumped on any change to the serialized shape or the engine that produced the values, so results from an older engine are never served for the same input hash.
 
-Canonical publication awaits result storage, then the alias write. Completion markers require successful alias writes. Ordinary synchronous cache writes remain best-effort. Without S3, the service is stateless across restarts (cold start on every pod recycle); the precompute cron mitigates this by warming the cache before the first client request of an epoch.
+Alias publication awaits result storage, then the alias write. Completion markers require successful alias writes. Ordinary synchronous cache writes remain best-effort. Without S3, the service is stateless across restarts (cold start on every pod recycle); the precompute cron mitigates this by warming the cache before the first client request of an epoch.
 
 ---
 
-Canonical aliases use `shapley/v3/canonical/v1/link-estimate-alias-{hash}.json`. A worker publishes only for an ingest-authorized sweep with a derived operator set. Old aliases and markers are not read. S3 and Redis result reuse both retry publication; a failed alias withholds the completion marker.
+Aliases use `shapley/v3/publication/v1/link-estimate-alias-{hash}.json`. A worker publishes only for an ingest-authorized sweep with a derived operator set. Old aliases and markers are not read. S3 and Redis result reuse both retry publication; a failed alias withholds the completion marker.
 
 ## Snapshot diff index
 

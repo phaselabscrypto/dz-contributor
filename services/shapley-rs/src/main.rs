@@ -496,7 +496,7 @@ mod tests {
             let response = api_router(state, true)
                 .oneshot(
                     request
-                        .body(Body::from(r#"{"is_canonical_publish_authorized":true}"#))
+                        .body(Body::from(r#"{"is_publish_authorized":true}"#))
                         .unwrap(),
                 )
                 .await
