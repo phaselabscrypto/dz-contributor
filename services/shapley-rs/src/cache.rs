@@ -386,7 +386,9 @@ impl S3Cache {
 
     /// The payload hash recorded for `(tag, focus)`, if any. A missing or
     /// malformed object reads as `None`, which sends the caller down the
-    /// rebuild-from-snapshot path rather than failing.
+    /// rebuild-from-snapshot path rather than failing. A storage failure also
+    /// reads as `None`, but logs at `warn` so an outage on this path does not
+    /// look like an ordinary miss.
     pub async fn load_link_estimate_alias(&self, tag: &str, focus: &str) -> Option<u64> {
         let key = Self::link_estimate_alias_key(tag, focus);
         let response = match self
@@ -398,8 +400,16 @@ impl S3Cache {
             .await
         {
             Ok(response) => response,
+            Err(e) if e.as_service_error().is_some_and(|se| se.is_no_such_key()) => {
+                tracing::debug!(%key, "no link-estimate alias in S3");
+                return None;
+            }
             Err(e) => {
-                tracing::debug!(error = %e, %key, "no link-estimate alias in S3");
+                tracing::warn!(
+                    error = %e,
+                    %key,
+                    "link-estimate alias read failed; treating as a miss"
+                );
                 return None;
             }
         };

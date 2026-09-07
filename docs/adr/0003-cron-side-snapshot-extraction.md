@@ -115,8 +115,12 @@ snapshot bucket, not from the diff index, so the cron schedules bounded repairs 
 fills the deeper history once.
 
 Extraction correctness moved to TypeScript, so the Rust parity test can no
-longer catch a drifting extractor on its own. `tests/diff_parity.rs` asserts the
-response bodies against the production captures using committed shape fixtures,
-and `pnpm run test:diff-shape` regenerates those fixtures from the real
-snapshots and fails on any difference. Together they cover what the single live
-test used to.
+longer catch a drifting extractor on its own. Three checks share that job.
+`tests/diff_parity.rs` asserts the diff response bodies against production
+captures using committed shape fixtures, so it covers the diff computation but
+not extraction. `pnpm run test:diff-shape-offline` runs in CI and feeds a small
+synthetic snapshot through the extractor, checking link order, code resolution,
+the unknown-contributor fallback, bandwidth units, and footprint counts.
+`pnpm run test:diff-shape` compares the extractor against the eight real
+snapshots behind the fixtures; it needs the network, so it runs by hand before a
+release rather than in CI.

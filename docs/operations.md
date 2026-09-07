@@ -56,8 +56,6 @@ docker run --env-file .env -p 8080:8080 dz-shapley-service api
 
 # Worker pod (Redis stream consumer)
 docker run --env-file .env dz-shapley-service worker
-
-# One-shot diff index backfill (runs from a terminal, exits when done)
 ```
 
 Run one or more `api` replicas behind a load balancer and one or more `worker` replicas consuming from the shared Redis stream. The job queue design and horizontal scaling rationale are documented in [adr/0001-async-compute-queue.md](adr/0001-async-compute-queue.md).
@@ -140,7 +138,7 @@ Consumed by the Next.js server-side code. Set via `vercel env add <NAME> product
 
 ## 4. Environment variables — shapley service
 
-Consumed by `services/shapley-rs/src/main.rs`, `src/cache.rs`, `src/jobs.rs`, and `src/snapshot.rs`.
+Consumed by `services/shapley-rs/src/main.rs`, `src/cache.rs`, `src/jobs.rs`, and `src/diff_store.rs`.
 
 | Variable | Default | Effect | Behavior when unset |
 |---|---|---|---|

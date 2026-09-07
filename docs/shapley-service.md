@@ -67,7 +67,6 @@ All compute endpoints require auth (see above). `/health` is always open.
 | `GET` | `/precompute/link-estimates/status` | Required | Check whether the S3 "fully swept" marker exists for `?tag=`; the cron route uses this to skip the snapshot build on a warm epoch | — |
 | `GET` | `/diff?from&to` | Required | Network topology diff between two epochs: summary, per-contributor rollup, `added`, `removed`, `changed` links with first-observed attribution; served from the diff index | `from` and `to` each in `[48, 100000]`, `from != to`, `abs(to - from) <= 200`; the order is not enforced, so `from > to` returns a backward diff |
 | `GET` | `/diff/contributor/{code}?from&to` | Required | Per-contributor diff between two epochs: footprint before and after, added, removed, and changed links (no display `name`; the Next.js proxy adds it) | same window rules |
-| `POST` | `/diff/precompute?epoch=N` or `?depth=D` | Required | Ingest one epoch, or the latest `D` epochs (default 8, max 30); returns `{ latest, results: [{ epoch, status, ms }] }` | 502 only when every epoch errored |
 
 Router source: `src/main.rs` (`run_api`), route handlers in `src/routes.rs`, and the `/diff*` handlers in `src/diff_routes.rs`.
 

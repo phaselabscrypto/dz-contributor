@@ -45,6 +45,7 @@ jobs:
           pnpm run test:diff-window
           pnpm run test:diff-repair-schedule
           pnpm run test:precompute-ingest
+          pnpm run test:diff-shape-offline
 
       - name: Build
         run: pnpm run build
