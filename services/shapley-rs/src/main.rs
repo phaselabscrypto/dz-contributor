@@ -125,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
 /// API role: HTTP server — synchronous compute endpoints plus the async
 /// `/jobs/*` enqueue/poll/cancel surface. The heavy what-if solve is enqueued
 /// for the worker pool rather than run here.
-async fn run_api(state: Arc<AppState>, serve_compute: bool) -> anyhow::Result<()> {
+fn api_router(state: Arc<AppState>, serve_compute: bool) -> Router {
     let cors = build_cors();
 
     // `/health` is always open for probes. The compute routes are mounted ONLY
@@ -139,10 +139,6 @@ async fn run_api(state: Arc<AppState>, serve_compute: bool) -> anyhow::Result<()
             .route("/simulate", post(routes::simulate))
             .route("/link-estimate", post(routes::link_estimate))
             .route("/precompute", post(routes::precompute))
-            .route(
-                "/precompute/link-estimates",
-                post(routes::link_estimate_sweep),
-            )
             .route(
                 "/precompute/link-estimates/status",
                 get(routes::link_estimate_sweep_status),
@@ -164,23 +160,30 @@ async fn run_api(state: Arc<AppState>, serve_compute: bool) -> anyhow::Result<()
             // too and a write must clear both gates: `require_auth` outermost,
             // then `require_ingest_auth`.
             .merge(
-                diff_routes::ingest_routes().route_layer(middleware::from_fn_with_state(
-                    state.clone(),
-                    require_ingest_auth,
-                )),
+                diff_routes::ingest_routes()
+                    .route(
+                        "/precompute/link-estimates",
+                        post(routes::link_estimate_sweep),
+                    )
+                    .route_layer(middleware::from_fn_with_state(
+                        state.clone(),
+                        require_ingest_auth,
+                    )),
             )
             .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
         app = app.merge(compute_routes);
     }
 
-    let app = app
-        .with_state(state)
+    app.with_state(state)
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::new(Duration::from_secs(120)))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
         .layer(CatchPanicLayer::new())
-        .layer(cors);
+        .layer(cors)
+}
 
+async fn run_api(state: Arc<AppState>, serve_compute: bool) -> anyhow::Result<()> {
+    let app = api_router(state, serve_compute);
     let addr = SocketAddr::from(([0, 0, 0, 0], bind_port()));
     tracing::info!(%addr, "starting dz-shapley-service (api)");
 
@@ -192,14 +195,7 @@ async fn run_api(state: Arc<AppState>, serve_compute: bool) -> anyhow::Result<()
     Ok(())
 }
 
-/// Worker role: a minimal `/health` listener for K8s probes, the Stream
-/// consume loop, and the diff index poller, raced by one `select!`. The health
-/// server and the consume loop share a graceful-shutdown signal, so a SIGTERM
-/// stops accepting and lets the in-flight solve wind down (the
-/// terminationGracePeriod). Anything interrupted is recovered by the worker's
-/// XAUTOCLAIM sweep under at-least-once delivery, made safe by the result
-/// cache. The poller has no such signal: a SIGTERM drops it mid-ingest, which
-/// is safe because a shape is written in one PUT and the next tick refills.
+/// Runs the health listener and Redis consumer until shutdown.
 async fn run_worker(state: Arc<AppState>) -> anyhow::Result<()> {
     let health = Router::new().route("/health", get(routes::health));
     let addr = SocketAddr::from(([0, 0, 0, 0], bind_port()));
@@ -473,5 +469,67 @@ mod tests {
         assert!(!ct_eq(b"token", b"token "));
         assert!(!ct_eq(b"", b"x"));
         assert!(ct_eq(b"", b""));
+    }
+    #[tokio::test]
+    async fn sweep_route_requires_both_tokens() {
+        for (api, ingest, expected) in [
+            (Some("compute"), None, StatusCode::UNAUTHORIZED),
+            (None, Some("ingest"), StatusCode::UNAUTHORIZED),
+            (Some("compute"), Some("wrong"), StatusCode::UNAUTHORIZED),
+            (
+                Some("compute"),
+                Some("ingest"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            let state = state_with_tokens(Some("compute"), Some("ingest"));
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/precompute/link-estimates")
+                .header("content-type", "application/json");
+            if let Some(token) = api {
+                request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+            }
+            if let Some(token) = ingest {
+                request = request.header(INGEST_TOKEN_HEADER, token);
+            }
+            let response = api_router(state, true)
+                .oneshot(
+                    request
+                        .body(Body::from(r#"{"is_publish_authorized":true}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+    #[tokio::test]
+    async fn unset_ingest_token_closes_sweep_route_but_not_compute() {
+        let state = state_with_tokens(None, None);
+        let response = api_router(state.clone(), true)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/precompute/link-estimates")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let response = api_router(state, true)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/jobs/link-estimate")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

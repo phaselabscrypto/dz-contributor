@@ -82,10 +82,25 @@ Epochs are immutable, so no legitimate caller rewrites one. A second write of a
 readable record is a 409. This caps a leaked ingest token to filling epochs
 nobody has ingested yet, which is visible and repaired by a version bump.
 
-One repair case: `load` answers `None` both for an absent object and for one
-that is corrupt or names another epoch, so refusing on presence alone would
-wedge such an epoch forever. Presence is probed with `head_object`, and the
-conflict is raised only when the stored object also loads.
+Storage reads distinguish absence, readable data, and proven-corrupt bytes. Transport failures remain errors. Creation uses `If-None-Match: *`. Repair uses `If-Match` with the ETag from the corrupt GET response. A corrupt object without an ETag cannot be repaired automatically. A lost condition becomes HTTP 409 only after a readable winner is verified.
+
+The deployed object gateway must enforce these conditions. The ignored `gateway_conditional_contract` test checks this in a disposable bucket before rollout. A process lock cannot protect concurrent API replicas; a lease without a storage predicate cannot fence a delayed writer.
+
+### Alias publication
+
+`POST /precompute/link-estimates` also requires both tokens. The API records `is_publish_authorized` in the shared sweep payload. Legacy payloads default to false. Publication requires this authority and a service-derived complete operator set.
+
+Aliases and sweep markers use `shapley/v3/publication/v1/`. Readers never fall back to legacy metadata because its origin cannot be established. Solver result keys and the numerical input stay unchanged. Historical aliases need explicit warming.
+
+Workers await result persistence before alias persistence. A sweep writes its marker only after every eligible cached operator's alias succeeds. Subsequent sweeps reconcile failures from S3 or the one-hour Redis result cache. A valid numerical result remains usable when publication fails. Claim heartbeats cover the full job, including reads and awaited writes, and stop before terminal state handling.
+
+### Cron scheduling and identity
+
+The shared snapshot loader checks `dz_epoch` against the requested epoch before extraction or submission. Cron, backfill, and fixture verification use that loader.
+
+The cron checks sweep and shape state concurrently. It downloads the current snapshot once, submits current work, then attempts historical repairs. Discovery and service calls count against a 270-second work deadline inside the 300-second function limit. Historical work has a 90-second budget and a 40-second limit per attempt. Each fire permits at most three shape attempts, including the current shape. One historical slot selects the newest gap; remaining slots rotate every six hours.
+
+Gap discovery reads durable records with concurrency eight, a two-second per-read timeout, and a ten-second whole-query timeout. Corruption is a repair candidate. Unknown storage state fails the query.
 
 ## Consequences
 
@@ -96,13 +111,16 @@ newly published epoch moves from 15 minutes to 6 hours; epochs land about every
 
 On-demand ingest is gone, so an epoch nobody wrote is a 404 rather than a slow
 first request. The changelog selector offers the latest 31 epochs from the
-snapshot bucket, not from the diff index, so the cron repairs that whole window
-each fire rather than only the current epoch. `scripts/backfill-diff-shapes.ts`
+snapshot bucket, not from the diff index, so the cron schedules bounded repairs across that window. `scripts/backfill-diff-shapes.ts`
 fills the deeper history once.
 
 Extraction correctness moved to TypeScript, so the Rust parity test can no
-longer catch a drifting extractor on its own. `tests/diff_parity.rs` asserts the
-response bodies against the production captures using committed shape fixtures,
-and `pnpm run test:diff-shape` regenerates those fixtures from the real
-snapshots and fails on any difference. Together they cover what the single live
-test used to.
+longer catch a drifting extractor on its own. Three checks share that job.
+`tests/diff_parity.rs` asserts the diff response bodies against production
+captures using committed shape fixtures, so it covers the diff computation but
+not extraction. `pnpm run test:diff-shape-offline` runs in CI and feeds a small
+synthetic snapshot through the extractor, checking link order, code resolution,
+the unknown-contributor fallback, bandwidth units, and footprint counts.
+`pnpm run test:diff-shape` compares the extractor against the eight real
+snapshots behind the fixtures; it needs the network, so it runs by hand before a
+release rather than in CI.

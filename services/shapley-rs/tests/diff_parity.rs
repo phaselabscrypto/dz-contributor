@@ -122,11 +122,9 @@ fn diffs_over_the_committed_shapes_match_the_production_captures() {
                 shapes.push(Arc::new(shape));
             }
             None => {
-                eprintln!(
-                    "SKIP diff_parity: tests/fixtures/diff/shapes is not populated. \
-                     Generate it with `pnpm run test:diff-shape -- --write`."
+                panic!(
+                    "missing committed fixture: tests/fixtures/diff/shapes/epoch-{number:06}.json"
                 );
-                return;
             }
         }
     }

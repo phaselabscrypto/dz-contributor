@@ -1,24 +1,8 @@
-//! Worker role (ADR 0001, Phase 2): consume the what-if work Stream, run the
-//! cancellable simulate, persist the result + state, and `XACK`.
-//!
-//! The producer (`routes::simulate_start`) `XADD`s a tiny entry; this loop
-//! `XREADGROUP`s one at a time, reuses the *same* compute path as the old
-//! in-process job (`routes::{build_input, try_cached_baseline,
-//! compute_and_store_baseline}` + the crate's `ComputeControl`), and bridges
-//! progress/cancel through Redis so poll/cancel work from any replica.
-//!
-//! Delivery is at-least-once. Safety rests on three things:
-//! - **Idempotency:** a finished `SimulateResponse` is cached under
-//!   `result:{input_hash}`; a redelivery republishes it instead of recomputing.
-//! - **Bounded retries:** only the `XAUTOCLAIM` reclaim sweep redelivers (a
-//!   `>` read never does), and an entry delivered more than [`MAX_DELIVERIES`]
-//!   (`queue`) times is moved to the dead-letter Stream and `XACK`'d.
-//! - **Failure classification:** input-deterministic failures (`ShapleyError`)
-//!   are terminal and `XACK`'d immediately; only a task panic is treated as
-//!   transient (left pending for a bounded reclaim retry).
+//! Redis Streams consumption, solver outcomes, and durable alias publication.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
 use deadpool_redis::redis::streams::{
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamPendingCountReply, StreamReadOptions,
@@ -31,8 +15,8 @@ use network_shapley::shapley::ComputeControl;
 use crate::cache;
 use crate::jobs::RedisJobStore;
 use crate::model::{
-    LinkEstimateRequest, ShapleyInputIn, ShapleyResponse, SimulateRequest, SimulateResponse,
-    SimulateStats, SweepPayload,
+    LinkEstimateRequest, LinkEstimateResponse, ShapleyInputIn, ShapleyResponse, SimulateRequest,
+    SimulateResponse, SimulateStats, SweepPayload,
 };
 use crate::queue::{self, JobKind};
 use crate::routes::{
@@ -164,11 +148,27 @@ async fn process_entry(
         return Ok(());
     }
 
-    // 3. Idempotency: a cached full result (raw JSON) → republish + XACK, no
-    //    recompute. The cached value is the response JSON; republish it verbatim
-    //    (kind-agnostic — no need to re-type it). This is a terminal `done`, so
-    //    it releases the in-flight claim like every other terminal path.
-    if let Some(resp) = store.result_cache_get(&entry.input_hash).await? {
+    // The heartbeat covers everything from here to the terminal write, so a
+    // long read or an awaited publication cannot look like an abandoned entry.
+    let heartbeat = claim_heartbeat(store, consumer, entry_id, &entry);
+    let mut shared: Option<SweepPayload> =
+        if entry.kind == JobKind::LinkEstimate && entry.focus.is_some() {
+            store.get_payload_by_key(&entry.payload_key).await?
+        } else {
+            None
+        };
+    let alias_tag = shared
+        .as_ref()
+        .and_then(SweepPayload::publish_tag)
+        .map(str::to_owned);
+
+    // 3. Idempotency: a cached result is republished instead of recomputed.
+    //    Sweep summaries are never cached, so a sweep always re-expands.
+    if entry.kind != JobKind::Sweep
+        && let Some(resp) = store.result_cache_get(&entry.input_hash).await?
+        && reconcile_cached_result(state, store, &entry, alias_tag.as_deref(), &resp).await?
+    {
+        heartbeat.stop().await;
         store.set_done(&entry.job_id, &resp).await?;
         clear_inflight_for(store, &entry).await;
         ack(store, entry_id).await?;
@@ -183,6 +183,7 @@ async fn process_entry(
     if store.snapshot(&entry.job_id).await?.is_none() {
         tracing::warn!(job_id = %entry.job_id,
             "job state expired while queued — failing without compute");
+        heartbeat.stop().await;
         store
             .set_failed(
                 &entry.job_id,
@@ -201,36 +202,18 @@ async fn process_entry(
     //    sweep's delivery-count guard dead-letters it after MAX_DELIVERIES.
     let outcome = match entry.kind {
         JobKind::Simulate => match store.get_payload::<SimulateRequest>(&entry.job_id).await? {
-            Some(body) => run_simulate(state, store, &entry.job_id, entry_id, consumer, body).await,
+            Some(body) => run_simulate(state, store, &entry.job_id, body).await,
             None => {
                 tracing::warn!(job_id = %entry.job_id, "payload missing — leaving pending for reclaim");
                 return Ok(());
             }
         },
         JobKind::LinkEstimate => {
-            // `focus` ⇒ a sweep child: the entry's `payload_key` references the
-            // parent sweep's SHARED payload; build the request from it + focus.
-            // No `focus` ⇒ self-contained `LinkEstimateRequest` (UI path).
-            // `alias_tag` is Some only for a sweep child whose parent both
-            // carried a tag and derived its own operator set. An explicit
-            // operator list may be partial and its tag is not trustworthy as a
-            // description of the epoch, which is the same reason the sweep
-            // marker is gated on `derived_operators`.
-            let mut alias_tag: Option<String> = None;
             let body: Option<LinkEstimateRequest> = match &entry.focus {
-                Some(focus) => {
-                    let shared: Option<SweepPayload> =
-                        store.get_payload_by_key(&entry.payload_key).await?;
-                    shared.map(|sweep| {
-                        if sweep.derived_operators {
-                            alias_tag = sweep.tag.clone();
-                        }
-                        LinkEstimateRequest {
-                            input: sweep.input,
-                            operator_focus: focus.clone(),
-                        }
-                    })
-                }
+                Some(focus) => shared.take().map(|sweep| LinkEstimateRequest {
+                    input: sweep.input,
+                    operator_focus: focus.clone(),
+                }),
                 None => {
                     store
                         .get_payload::<LinkEstimateRequest>(&entry.job_id)
@@ -252,8 +235,6 @@ async fn process_entry(
                         state,
                         store,
                         &entry.job_id,
-                        entry_id,
-                        consumer,
                         ResultKeys {
                             payload_hash_hex: &entry.input_hash,
                             alias_tag: alias_tag.as_deref(),
@@ -278,9 +259,7 @@ async fn process_entry(
             }
         },
         JobKind::Baseline => match store.get_payload::<ShapleyInputIn>(&entry.job_id).await? {
-            Some(input) => {
-                run_baseline(state, store, &entry.job_id, entry_id, consumer, input).await
-            }
+            Some(input) => run_baseline(state, store, &entry.job_id, input).await,
             None => {
                 tracing::warn!(job_id = %entry.job_id, "payload missing — leaving pending for reclaim");
                 return Ok(());
@@ -288,7 +267,9 @@ async fn process_entry(
         },
     };
 
-    // 6. Terminal handling. process_entry owns the XACK/cache/state ordering.
+    // 6. Terminal handling. process_entry owns the XACK/cache/state ordering,
+    //    and the heartbeat stops before any terminal write.
+    heartbeat.stop().await;
     match outcome {
         Outcome::Done(resp) => {
             // User-facing result first, then best-effort cache (so a cache-write
@@ -360,8 +341,6 @@ async fn run_simulate(
     state: &Arc<crate::AppState>,
     store: &RedisJobStore,
     job_id: &str,
-    entry_id: &str,
-    consumer: &str,
     body: SimulateRequest,
 ) -> Outcome {
     // ── Progress bridge ─────────────────────────────────────────────────
@@ -373,11 +352,9 @@ async fn run_simulate(
     // per-phase 0–100% bar. `control` is moved into the blocking solves via cheap
     // Arc clones, so all phases share the same progress/cancel.
     let control = ComputeControl::default();
-    let bridge = tokio::spawn(bridge_control(
+    let bridge = TaskGuard::spawn(bridge_control(
         store.clone(),
         job_id.to_string(),
-        entry_id.to_string(),
-        consumer.to_string(),
         control.clone(),
     ));
 
@@ -396,7 +373,7 @@ async fn run_simulate(
             {
                 Ok(resp) => (resp, false),
                 Err(e) => {
-                    bridge.abort();
+                    bridge.stop().await;
                     // A cancel during the baseline surfaces as an error string;
                     // map it to Cancelled (terminal, XACK'd) rather than a failure.
                     if control.cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -443,7 +420,7 @@ async fn run_simulate(
     })
     .await;
     let modified_ms = modified_start.elapsed().as_millis() as u64;
-    bridge.abort();
+    bridge.stop().await;
 
     match mod_result {
         Ok(Ok(per_city_result)) => {
@@ -492,32 +469,15 @@ async fn run_simulate(
 struct ResultKeys<'a> {
     /// The stream entry's `input_hash`; names the result object.
     payload_hash_hex: &'a str,
-    /// Sweep tag, when this child belongs to a tag-carrying, operator-derived
-    /// sweep. `Some` means also record the `(tag, focus)` alias on success.
+    /// Present only for an ingest-authorized, operator-derived sweep.
     alias_tag: Option<&'a str>,
 }
 
-/// Faithful per-link Shapley (retag-Shapley port of Python `network_linkestimate`),
-/// single-shot over the whole demand set — one cancellable coalition solve with
-/// progress, no baseline/per-city phases. Mirrors [`run_simulate`]'s control/bridge
-/// + transient-panic handling; returns an [`Outcome`] (no terminal write / XACK).
-///
-/// Served from the S3 link-estimate cache when present (epoch inputs are
-/// immutable); a fresh solve is persisted back to S3 so it is computed once,
-/// ever. `payload_hash_hex` is the stream entry's `input_hash` — the same key
-/// the sync path and the sweep derive via `routes::link_estimate_payload_hash`.
-///
-/// `alias_tag` is the sweep tag when this is a sweep child of a tag-carrying,
-/// operator-derived sweep. On success the `(tag, focus)` alias is written
-/// alongside the result, which is the ONLY moment the result is known to
-/// exist. Writing it in the sweep's expansion loop instead would point an
-/// alias at a solve that has not happened and might never happen.
+/// Returns a solver outcome after attempting any authorized alias publication.
 async fn run_link_estimate(
     state: &Arc<crate::AppState>,
     store: &RedisJobStore,
     job_id: &str,
-    entry_id: &str,
-    consumer: &str,
     keys: ResultKeys<'_>,
     body: LinkEstimateRequest,
 ) -> Outcome {
@@ -542,20 +502,36 @@ async fn run_link_estimate(
         && let Some(s3) = &state.s3_cache
         && let Some(cached) = s3.load_link_estimate(hash).await
     {
-        tracing::info!(job = %job_id, focus = %body.operator_focus, served_from = "s3",
-            "link-estimate served from S3");
-        return Outcome::Done(Box::new(
-            // Plain structs of strings/floats — serialization cannot fail.
-            serde_json::to_value(cached).expect("LinkEstimateResponse serializes to JSON"),
-        ));
+        if cached.operator_focus == operator_focus {
+            if let Some(tag) = alias_tag
+                && !should_skip_publication(store, job_id).await
+            {
+                publish_result(
+                    state,
+                    job_id,
+                    tag,
+                    &operator_focus,
+                    hash,
+                    cache::PublicationSource::Persisted(&cached),
+                )
+                .await;
+            }
+            tracing::info!(job = %job_id, focus = %body.operator_focus, served_from = "s3",
+                "link-estimate served from S3");
+            return Outcome::Done(Box::new(
+                // Plain structs of strings/floats — serialization cannot fail.
+                serde_json::to_value(cached).expect("LinkEstimateResponse serializes to JSON"),
+            ));
+        }
+        // A miss, not a failure: the fresh solve below overwrites the object.
+        tracing::error!(job = %job_id, focus = %operator_focus, found = %cached.operator_focus,
+            "persisted link estimate names another operator; recomputing");
     }
 
     let control = ComputeControl::default();
-    let bridge = tokio::spawn(bridge_control(
+    let bridge = TaskGuard::spawn(bridge_control(
         store.clone(),
         job_id.to_string(),
-        entry_id.to_string(),
-        consumer.to_string(),
         control.clone(),
     ));
     let _ = store.set_phase(job_id, "link-estimate").await;
@@ -571,22 +547,31 @@ async fn run_link_estimate(
         crate::routes::run_link_estimate(&body.input, &body.operator_focus, Some(control.clone()))
             .await;
     let elapsed_ms = start.elapsed().as_millis() as u64;
-    bridge.abort();
+    bridge.stop().await;
 
     match result {
         Ok(resp) => {
             tracing::info!(job = %job_id, elapsed_ms, link_count = resp.links.len(),
                 "link-estimate phase done");
-            // Persist for good (best-effort, background): epoch inputs are
-            // immutable, so this result never needs recomputing.
+            // The result is always persisted: epoch inputs are immutable, so it
+            // never needs recomputing. Only the alias is gated on authority and
+            // on the job not having been cancelled.
             if let (Some(hash), Some(s3)) = (payload_hash, &state.s3_cache) {
-                s3.store_link_estimate(hash, &resp);
-                // Both writes are backgrounded and independent. A landed
-                // result with no alias costs one rebuild; the reverse would
-                // serve a dangling pointer, which is why the alias is never
-                // written anywhere the result is not already proven present.
-                if let Some(tag) = alias_tag {
-                    s3.store_link_estimate_alias(tag, &operator_focus, hash);
+                let is_publishable =
+                    alias_tag.is_some() && !should_skip_publication(store, job_id).await;
+                match alias_tag {
+                    Some(tag) if is_publishable => {
+                        publish_result(
+                            state,
+                            job_id,
+                            tag,
+                            &operator_focus,
+                            hash,
+                            cache::PublicationSource::Unpersisted(&resp),
+                        )
+                        .await;
+                    }
+                    _ => s3.store_link_estimate(hash, &resp),
                 }
             }
             Outcome::Done(Box::new(
@@ -656,14 +641,7 @@ async fn run_sweep(
     shared_payload_key: &str,
     payload: SweepPayload,
 ) -> Outcome {
-    // Same gate as the sweep marker below: an explicit operator list may be
-    // partial, so its tag does not reliably describe the epoch and must not
-    // key an alias every later reader trusts.
-    let alias_tag: Option<&str> = if payload.derived_operators {
-        payload.tag.as_deref()
-    } else {
-        None
-    };
+    let alias_tag = payload.publish_tag();
     let mut enqueued: Vec<serde_json::Value> = Vec::new();
     let mut cached: Vec<String> = Vec::new();
     let mut skipped: Vec<serde_json::Value> = Vec::new();
@@ -695,20 +673,34 @@ async fn run_sweep(
         let hash = link_estimate_payload_hash(&payload.input, op);
         let hash_hex = format!("{hash:016x}");
 
-        // Gate 2 — S3 (completed-work dedup; results are permanent).
-        let s3_cached = match &state.s3_cache {
-            Some(s3) => s3.load_link_estimate(hash).await.is_some(),
-            None => false,
-        };
-        if sweep_bucket(links, s3_cached, false) == SweepBucket::Cached {
-            // The one place besides the solve-success path where the result is
-            // proven to exist: the load above just returned it. This is what
-            // back-fills aliases for epochs solved before aliases existed, on
-            // the single re-sweep a tag-fingerprint bump forces.
-            if let (Some(s3), Some(tag)) = (&state.s3_cache, alias_tag) {
-                s3.store_link_estimate_alias(tag, op, hash);
+        // A cancel between operators ends the expansion. An unreadable flag is
+        // an infrastructure failure, so the entry is left for a retry rather
+        // than reported as a cancel nobody requested.
+        match store.is_cancelled(job_id).await {
+            Ok(true) => return Outcome::Cancelled,
+            Ok(false) => {}
+            Err(error) => {
+                return Outcome::Transient(format!("cancel check failed: {error}"));
             }
-            cached.push(op.clone());
+        }
+
+        // Gate 2 — completed work. A result already in S3, or one still in the
+        // Redis result cache, is made durable and aliased here instead of being
+        // solved again. A failed write is recorded so the marker stays absent
+        // and the next sweep retries from the same cached result.
+        if let Some(s3) = &state.s3_cache
+            && let Some(found) = find_cached_estimate(store, s3, hash, &hash_hex, op).await
+        {
+            match reconcile_cached_estimate(s3, alias_tag, op, hash, &found).await {
+                Ok(()) => cached.push(op.clone()),
+                Err(error) => {
+                    tracing::error!(%error, operator = %op, "alias publication failed");
+                    failed.push(serde_json::json!({
+                        "operator": op,
+                        "error": "result or alias persistence failed",
+                    }));
+                }
+            }
             continue;
         }
 
@@ -734,7 +726,7 @@ async fn run_sweep(
                 false
             }
         };
-        if sweep_bucket(links, s3_cached, inflight_elsewhere) != SweepBucket::Enqueue {
+        if sweep_bucket(links, false, inflight_elsewhere) != SweepBucket::Enqueue {
             continue;
         }
 
@@ -798,17 +790,12 @@ async fn run_sweep(
         ));
     }
 
-    // Fully swept (nothing left to run, nothing in flight, nothing failed) →
-    // write the S3 marker so the next cron fire skips the snapshot build.
-    // ONLY for service-derived operator sets: an explicit list may be partial,
-    // and a partial sweep marking the epoch complete would make the cron skip
-    // the unswept remainder forever.
+    // Every eligible operator must have a durable result and alias before this marker.
     let mut marker_written = false;
-    if payload.derived_operators
-        && enqueued.is_empty()
+    if enqueued.is_empty()
         && already_running.is_empty()
         && failed.is_empty()
-        && let Some(tag) = &payload.tag
+        && let Some(tag) = alias_tag
         && let Some(s3) = &state.s3_cache
     {
         marker_written = s3.store_sweep_marker(tag).await;
@@ -842,8 +829,6 @@ async fn run_baseline(
     state: &Arc<crate::AppState>,
     store: &RedisJobStore,
     job_id: &str,
-    entry_id: &str,
-    consumer: &str,
     input: ShapleyInputIn,
 ) -> Outcome {
     let input_hash = cache::hash_input(&input);
@@ -856,11 +841,9 @@ async fn run_baseline(
     }
 
     let control = ComputeControl::default();
-    let bridge = tokio::spawn(bridge_control(
+    let bridge = TaskGuard::spawn(bridge_control(
         store.clone(),
         job_id.to_string(),
-        entry_id.to_string(),
-        consumer.to_string(),
         control.clone(),
     ));
     let _ = store.set_phase(job_id, "baseline").await;
@@ -869,7 +852,7 @@ async fn run_baseline(
     let start = std::time::Instant::now();
     let result = compute_and_store_baseline(state, &input, input_hash, Some(&control)).await;
     let elapsed_ms = start.elapsed().as_millis() as u64;
-    bridge.abort();
+    bridge.stop().await;
 
     match result {
         Ok(resp) => {
@@ -899,21 +882,10 @@ async fn run_baseline(
 /// would hold — indefinitely, which would cascade-stall every other pooled
 /// caller (reclaim/ack/snapshot). On a timeout or error we just skip the tick;
 /// the next one retries. Progress is best-effort by design.
-async fn bridge_control(
-    store: RedisJobStore,
-    job_id: String,
-    entry_id: String,
-    consumer: String,
-    control: ComputeControl,
-) {
+async fn bridge_control(store: RedisJobStore, job_id: String, control: ComputeControl) {
     use std::sync::atomic::Ordering;
     use std::time::Duration;
     const OP_TIMEOUT: Duration = Duration::from_secs(1);
-    // Heartbeat our claim on the stream entry every ~10s — comfortably under
-    // RECLAIM_MIN_IDLE_MS (30s) so the OTHER (idle) worker's reclaim sweep can
-    // never mistake this still-running solve for an abandoned entry and
-    // double-process it. 40 ticks * 250ms = 10s; tick 0 fires immediately.
-    const CLAIM_EVERY_TICKS: u32 = 40;
     // Dev-log heartbeat cadence (~10s @ 250ms ticks). The UI/Redis bar updates
     // every tick; this is the coarse "still alive, here's where it's at" line for
     // devs tailing logs so a multi-minute solve never looks hung.
@@ -958,17 +930,216 @@ async fn bridge_control(
             );
         }
 
-        if tick.is_multiple_of(CLAIM_EVERY_TICKS) {
-            match tokio::time::timeout(OP_TIMEOUT, touch_claim(&store, &entry_id, &consumer)).await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!(error = %e, "bridge: claim heartbeat failed"),
-                Err(_) => tracing::warn!("bridge: claim heartbeat timed out"),
-            }
-        }
         tick = tick.wrapping_add(1);
 
         tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+struct TaskGuard(Option<tokio::task::JoinHandle<()>>);
+
+impl TaskGuard {
+    fn spawn(task: impl std::future::Future<Output = ()> + Send + 'static) -> Self {
+        Self(Some(tokio::spawn(task)))
+    }
+    async fn stop(mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+            if let Err(error) = task.await
+                && !error.is_cancelled()
+            {
+                tracing::error!(%error, "worker background task failed");
+            }
+        }
+    }
+}
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
+    }
+}
+
+fn claim_heartbeat(
+    store: &RedisJobStore,
+    consumer: &str,
+    entry_id: &str,
+    entry: &queue::StreamEntry,
+) -> TaskGuard {
+    let store = store.clone();
+    let consumer = consumer.to_owned();
+    let entry_id = entry_id.to_owned();
+    let job_id = entry.job_id.clone();
+    let shared_key =
+        (entry.focus.is_some() || entry.kind == JobKind::Sweep).then(|| entry.payload_key.clone());
+    TaskGuard::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let result = tokio::time::timeout(Duration::from_secs(1), async {
+                touch_claim(&store, &entry_id, &consumer).await?;
+                store.refresh_running_ttl(&job_id).await?;
+                if let Some(key) = &shared_key {
+                    store
+                        .refresh_payload_ttl(key, queue::SWEEP_PAYLOAD_TTL_SECS)
+                        .await?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(%error, job_id, "claim heartbeat failed"),
+                Err(error) => tracing::warn!(%error, job_id, "claim heartbeat timed out"),
+            }
+        }
+    })
+}
+
+/// Whether an alias write must be withheld. An unreadable cancel flag counts
+/// as cancelled: the result itself is still stored, only its alias waits for
+/// a later sweep.
+async fn should_skip_publication(store: &RedisJobStore, job_id: &str) -> bool {
+    match store.is_cancelled(job_id).await {
+        Ok(is_cancelled) => is_cancelled,
+        Err(error) => {
+            tracing::warn!(%error, job_id, "cancellation check failed; withholding publication");
+            true
+        }
+    }
+}
+
+async fn publish_result(
+    state: &crate::AppState,
+    job_id: &str,
+    tag: &str,
+    focus: &str,
+    hash: u64,
+    source: crate::cache::PublicationSource<'_>,
+) {
+    if let Some(s3) = &state.s3_cache
+        && let Err(error) = s3.publish_link_estimate(tag, focus, hash, source).await
+    {
+        tracing::error!(%error, job_id, tag, focus, "alias publication failed");
+    }
+}
+
+/// Whether a cached response can complete `entry` without a solve. A link
+/// estimate must parse and name this entry's operator; when it does and the
+/// sweep is authorized, its alias is published here, because this is the only
+/// moment the result is known to exist. Other kinds are republished as stored.
+async fn reconcile_cached_result(
+    state: &Arc<crate::AppState>,
+    store: &RedisJobStore,
+    entry: &queue::StreamEntry,
+    alias_tag: Option<&str>,
+    resp: &serde_json::Value,
+) -> anyhow::Result<bool> {
+    if entry.kind != JobKind::LinkEstimate {
+        return Ok(true);
+    }
+    let Some(estimate) = cached_link_estimate(entry, resp) else {
+        tracing::warn!(job_id = %entry.job_id, "invalid cached link estimate; recomputing");
+        return Ok(false);
+    };
+    if let (Some(tag), Some(focus), Ok(hash)) = (
+        alias_tag,
+        entry.focus.as_deref(),
+        u64::from_str_radix(&entry.input_hash, 16),
+    ) && !store.is_cancelled(&entry.job_id).await?
+    {
+        publish_result(
+            state,
+            &entry.job_id,
+            tag,
+            focus,
+            hash,
+            cache::PublicationSource::Unpersisted(&estimate),
+        )
+        .await;
+    }
+    Ok(true)
+}
+
+/// The cached JSON as a link estimate for this entry's operator, or `None`
+/// when it does not parse or names another operator.
+fn cached_link_estimate(
+    entry: &queue::StreamEntry,
+    resp: &serde_json::Value,
+) -> Option<LinkEstimateResponse> {
+    let estimate = serde_json::from_value::<LinkEstimateResponse>(resp.clone()).ok()?;
+    let is_own_operator = entry
+        .focus
+        .as_ref()
+        .is_none_or(|focus| estimate.operator_focus == *focus);
+    is_own_operator.then_some(estimate)
+}
+
+/// A finished link estimate found outside the solver, and where it lives.
+enum CachedEstimate {
+    /// Durable in S3; at most the alias is missing.
+    Persisted(LinkEstimateResponse),
+    /// Only in the one-hour Redis result cache; must be persisted before an
+    /// alias may point at it.
+    RedisOnly(LinkEstimateResponse),
+}
+
+/// Looks for a finished estimate for `op` in S3, then in the Redis result
+/// cache. A result naming another operator counts as absent, so the sweep
+/// enqueues a solve whose result overwrites it.
+async fn find_cached_estimate(
+    store: &RedisJobStore,
+    s3: &cache::S3Cache,
+    hash: u64,
+    hash_hex: &str,
+    op: &str,
+) -> Option<CachedEstimate> {
+    if let Some(result) = s3.load_link_estimate(hash).await {
+        if result.operator_focus == op {
+            return Some(CachedEstimate::Persisted(result));
+        }
+        tracing::error!(operator = %op, found = %result.operator_focus,
+            "persisted link estimate names another operator; recomputing");
+        return None;
+    }
+    match store.result_cache_get(hash_hex).await {
+        Ok(Some(value)) => match serde_json::from_value::<LinkEstimateResponse>(value) {
+            Ok(result) if result.operator_focus == op => Some(CachedEstimate::RedisOnly(result)),
+            _ => {
+                tracing::warn!(operator = %op, "invalid cached link estimate; recomputing");
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, operator = %op, "Redis result lookup failed");
+            None
+        }
+    }
+}
+
+/// Makes a found estimate durable and, for an authorized sweep, publishes its
+/// alias. A persisted result without a tag needs nothing.
+async fn reconcile_cached_estimate(
+    s3: &cache::S3Cache,
+    alias_tag: Option<&str>,
+    op: &str,
+    hash: u64,
+    found: &CachedEstimate,
+) -> anyhow::Result<()> {
+    match (found, alias_tag) {
+        (CachedEstimate::Persisted(result), Some(tag)) => {
+            s3.publish_link_estimate(tag, op, hash, cache::PublicationSource::Persisted(result))
+                .await
+        }
+        (CachedEstimate::RedisOnly(result), Some(tag)) => {
+            s3.publish_link_estimate(tag, op, hash, cache::PublicationSource::Unpersisted(result))
+                .await
+        }
+        (CachedEstimate::RedisOnly(result), None) => s3.persist_link_estimate(hash, result).await,
+        (CachedEstimate::Persisted(_), None) => Ok(()),
     }
 }
 

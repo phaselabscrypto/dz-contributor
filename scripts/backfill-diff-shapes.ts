@@ -16,14 +16,14 @@
  * answers 409 and is counted as done.
  */
 
-import { getSnapshotUrl, MIN_DZ_EPOCH } from "@/lib/constants/config";
-import type { RawSnapshot } from "@/lib/types/snapshot";
+import { MIN_DZ_EPOCH } from "@/lib/constants/config";
+import { fetchEpochSnapshot } from "@/lib/utils/epoch-snapshot";
 import { extractDiffShape } from "@/lib/utils/diff-shape";
 import { getEpochAvailability } from "@/lib/utils/epoch-discovery";
 import { fetchMissingDiffShapes, putDiffShape } from "@/lib/utils/shapley-remote";
 
 /** How far back one `GET /diff/missing` call looks. */
-const MISSING_PAGE = 200;
+const MISSING_PAGE = 31;
 
 function numericArg(name: string): number | null {
   const index = process.argv.indexOf(`--${name}`);
@@ -69,12 +69,8 @@ async function main(): Promise<void> {
   for (const [index, epoch] of targets.entries()) {
     const started = Date.now();
     try {
-      const response = await fetch(getSnapshotUrl(epoch));
-      if (!response.ok) {
-        throw new Error(`snapshot HTTP ${response.status}`);
-      }
-      const raw: RawSnapshot = await response.json();
-      const outcome = await putDiffShape(extractDiffShape(raw));
+      const raw = await fetchEpochSnapshot(epoch);
+      const outcome = await putDiffShape(epoch, extractDiffShape(raw));
       if (outcome === "created") created += 1;
       else existed += 1;
       const elapsed = ((Date.now() - started) / 1000).toFixed(1);

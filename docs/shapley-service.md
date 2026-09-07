@@ -63,11 +63,10 @@ All compute endpoints require auth (see above). `/health` is always open.
 | `POST` | `/jobs/link-estimate` | Required | Enqueue a per-link value-add; in-flight dedup via `SET NX`; S3 short-circuit at submit time; returns `202 {job_id}` | — |
 | `GET` | `/jobs/{id}` | Required | Poll job state, progress, and result | — |
 | `DELETE` | `/jobs/{id}` | Required | Request cooperative cancellation; `202 {state: cancelling}` or `404` | — |
-| `POST` | `/precompute/link-estimates` | Required | Enqueue a sweep job that fans out one link-estimate child per operator (epoch-cron warm-up); returns `202 {job_id}` | — |
+| `POST` | `/precompute/link-estimates` | Compute + ingest tokens | Enqueue a sweep job that fans out one link-estimate child per operator (epoch-cron warm-up); returns `202 {job_id}` | — |
 | `GET` | `/precompute/link-estimates/status` | Required | Check whether the S3 "fully swept" marker exists for `?tag=`; the cron route uses this to skip the snapshot build on a warm epoch | — |
 | `GET` | `/diff?from&to` | Required | Network topology diff between two epochs: summary, per-contributor rollup, `added`, `removed`, `changed` links with first-observed attribution; served from the diff index | `from` and `to` each in `[48, 100000]`, `from != to`, `abs(to - from) <= 200`; the order is not enforced, so `from > to` returns a backward diff |
 | `GET` | `/diff/contributor/{code}?from&to` | Required | Per-contributor diff between two epochs: footprint before and after, added, removed, and changed links (no display `name`; the Next.js proxy adds it) | same window rules |
-| `POST` | `/diff/precompute?epoch=N` or `?depth=D` | Required | Ingest one epoch, or the latest `D` epochs (default 8, max 30); returns `{ latest, results: [{ epoch, status, ms }] }` | 502 only when every epoch errored |
 
 Router source: `src/main.rs` (`run_api`), route handlers in `src/routes.rs`, and the `/diff*` handlers in `src/diff_routes.rs`.
 
@@ -175,7 +174,7 @@ sequenceDiagram
 
 Keys in the diagram are shown without their `shapley:whatif:` / `shapley:linkest:` prefixes for readability — the full patterns are in the [Redis keyspace](#redis-keyspace) table.
 
-**Schema versioning and mixed-version rollouts**: every stream entry carries a `schema` field (`whatif/v1`, `linkest/v1`, `sweep/v1`, `baseline/v1`, defined in `src/queue.rs`). A worker that reads an entry with an unrecognized schema dead-letters it immediately instead of mis-decoding a newer payload. This makes rolling deploys safe: old workers silently pass unknown-kind entries to the dead-letter stream while new workers drain the backlog, and the schema version is the only gate — there is no per-kind fallback behavior.
+**Schema versioning and mixed-version rollouts**: every stream entry carries a `schema` field (`whatif/v1`, `linkest/v1`, `sweep/v1`, `baseline/v1`, defined in `src/queue.rs`). A worker that reads an entry with an unrecognized schema dead-letters it immediately instead of mis-decoding a newer payload. Alias publication also checks the stored authorization field. Roll workers before APIs so the new producer and trusted readers share the same publication contract.
 
 ---
 
@@ -217,7 +216,7 @@ Source of truth: the **constants** in `src/queue.rs` and `src/jobs.rs` (`JOB_TTL
 
 A separate tag per kind means an older worker that does not recognize `linkest/v1` dead-letters the entry (with an accurate "unsupported job schema" error) rather than burning `MAX_DELIVERIES` blind retries on a mis-decoded payload.
 
-**Consumer group mechanics**: the group `whatif-workers` is created idempotently at worker startup (`XGROUP CREATE … $ MKSTREAM`; `BUSYGROUP` is expected and ignored). Each worker instance uses a unique consumer name `worker-{uuid}`. The bridge task re-`XCLAIM`s its own in-flight entry every ~10 s (`JUSTID`, which does not increment the delivery counter) so the `XAUTOCLAIM` sweep (min-idle 30 s) cannot mistake a live solve for an abandoned entry.
+**Consumer group mechanics**: the group `whatif-workers` is created idempotently at worker startup (`XGROUP CREATE … $ MKSTREAM`; `BUSYGROUP` is expected and ignored). Each worker instance uses a unique consumer name `worker-{uuid}`. A scoped task re-`XCLAIM`s its own in-flight entry every ten seconds through reads, solves, and awaited publication (`JUSTID`, which does not increment the delivery counter) so the `XAUTOCLAIM` sweep (min-idle 30 s) cannot mistake a live solve for an abandoned entry.
 
 ---
 
@@ -234,32 +233,34 @@ When `S3_CACHE_ENDPOINT` is set, the AWS SDK client is configured with that URL 
 | `shapley/v3/cache-{hash:016x}.bin` | `shapley/v3/cache-0000abcd1234ef56.bin` | bincode-serialized `EpochCache` (per-city Shapley values + aggregated baseline) |
 | `shapley/v3/link-estimate-{hash:016x}.bin` | `shapley/v3/link-estimate-0000abcd1234ef56.bin` | bincode-serialized `LinkEstimateResponse` |
 | `shapley/v3/simulate-{hash:016x}.json` | `shapley/v3/simulate-0000abcd1234ef56.json` | JSON-serialized `SimulateResponse` (what-if result, persisted forever by whole-request payload hash; PSYS-557) |
-| `shapley/v3/sweep-marker-{hash:016x}.json` | `shapley/v3/sweep-marker-0000abcd1234ef56.json` | JSON `{"tag": "..."}` marker indicating a fully swept epoch; tag is hashed before use as the key suffix |
+| `shapley/v3/publication/v1/sweep-marker-{hash:016x}.json` | `shapley/v3/publication/v1/sweep-marker-0000abcd1234ef56.json` | JSON `{"tag": "..."}` marker indicating a fully swept epoch; tag is hashed before use as the key suffix |
 | `diff/v1/shape-{epoch:06}.json` | `diff/v1/shape-000211.json` | JSON-serialized `DiffShape` (lean links and contributors for one epoch); its own version prefix, see [Snapshot diff index](#snapshot-diff-index) |
 
 The `v3` prefix must be bumped on any change to the serialized shape or the engine that produced the values, so results from an older engine are never served for the same input hash.
 
-Writes are always detached best-effort (`tokio::spawn` or fire-and-forget calls in `src/routes.rs` and `src/worker.rs`). Without S3, the service is stateless across restarts (cold start on every pod recycle); the precompute cron mitigates this by warming the cache before the first client request of an epoch.
+Alias publication awaits result storage, then the alias write. Completion markers require successful alias writes. Ordinary synchronous cache writes remain best-effort. Without S3, the service is stateless across restarts (cold start on every pod recycle); the precompute cron mitigates this by warming the cache before the first client request of an epoch.
 
 ---
 
+Aliases use `shapley/v3/publication/v1/link-estimate-alias-{hash}.json`. A worker publishes only for an ingest-authorized sweep with a derived operator set. Old aliases and markers are not read. S3 and Redis result reuse both retry publication; a failed alias withholds the completion marker.
+
 ## Snapshot diff index
 
-Source: `src/snapshot.rs` (public-bucket client and scanner), `src/diff.rs` (shape extraction and diff computation), `src/diff_store.rs` (three-tier store), `src/diff_poller.rs` (worker loop and backfill), `src/diff_routes.rs` (handlers). Design rationale: [ADR 0002](adr/0002-snapshot-diff-index.md).
+Source: `lib/utils/diff-shape.ts` extracts shapes in the frontend. `src/diff_store.rs` persists them, `src/diff.rs` computes diffs, and `src/diff_routes.rs` serves requests. See [ADR 0003](adr/0003-cron-side-snapshot-extraction.md).
 
-The `/diff*` endpoints answer from a per-epoch index of the DoubleZero topology instead of downloading full snapshots per request. One snapshot is 68 to 110 MB. The four sections the diff needs (`locations`, `devices`, `links`, `contributors`) end within the first 3.7 MB.
+The cron validates the snapshot epoch and writes `diff/v1/shape-{epoch:06}.json` through `PUT /diff/shape/:epoch`. Both compute and ingest tokens are required. The service reaches Redis and the object gateway; public snapshot downloads happen in the frontend.
 
-**No public-bucket client.** The service does not read the snapshot bucket. Records arrive over `PUT /diff/shape/:epoch` from the Vercel cron, gated by `SHAPLEY_INGEST_TOKEN` on top of the compute token, and `GET /diff/missing?latest=N&depth=D` tells the cron which epochs it still owes. The pods need no public egress.
+`DiffStore::get` checks memory, then durable storage. Missing or corrupt records return 404. Storage errors return 502. Reads do not fetch snapshots. Without durable persistence, write and missing-discovery routes return 503.
 
-**Scanner.** `SectionScanner` tracks JSON depth on raw bytes and captures each wanted section as it streams. It stops when the fourth section closes or when `dz_serviceability` closes, then drops the `ByteStream`, which closes the connection. `MAX_SCAN_BYTES` (32 MiB) is a hard ceiling: if the layout changes so the sections move after the telemetry arrays, the scan fails with `BudgetExceeded` instead of reading 110 MB. A scan never returns a partial result. Parsing and extraction run under `spawn_blocking`.
+Creates use `If-None-Match: *`. A readable existing record returns 409 without a write. Proven-corrupt bytes can be repaired with the ETag from their GET response and `If-Match`. Failed GETs, missing ETags, and unresolved conditional conflicts return 502. The deployed gateway must pass the conditional-write acceptance test before rollout.
 
-**Persisted shape.** The extractor reduces the sections to a `DiffShape` of about 28 KB (166 links, 15 contributors on epoch 211) and stores it as `diff/v1/shape-{epoch:06}.json` in the result-cache bucket. `DIFF_SHAPE_VERSION_PREFIX` is independent of the `shapley/v3` prefix, so an LP engine bump does not orphan the index. Bump `diff/v1` when `DiffShape` fields change, when the extractor's emitted values change, or when the set of scanned sections changes. Without `S3_CACHE_BUCKET` the store keeps shapes in memory only (`NoPersistence`).
+`GET /diff/missing?latest=N&depth=31` probes durable records directly, including records whose keys exist but whose bodies are corrupt. It uses at most eight concurrent reads, two seconds per read, and ten seconds for the whole query. Failed reads fail the query instead of hiding uncertain gaps. Backfill pages use the same 31-epoch window.
 
-**Read path.** `DiffStore::get` checks memory, then S3, then ingests from the public bucket. Concurrent misses for one epoch share a single ingest, and `MAX_CONCURRENT_INGESTS` (6) caps how many ingests run at once across the whole process, which is what bounds ingest memory and the blocking-pool queue. A failed ingest is never cached, so an epoch the bucket does not carry costs one lookup per request. `GET /diff` loads `from`, `to`, and the intermediate epochs with concurrency 10 and a 6 s deadline each; an intermediate that misses is logged and skipped, attribution for the affected entries falls back to `to`, and the response carries `x-diff-degraded: 1` so the proxy serves it `no-store` instead of caching it for a day.
+The cron handles the current epoch before history. It reuses one snapshot for the sweep and shape, limits work to 270 seconds, and allows at most three shape attempts. Historical repairs have a 90-second budget and a 40-second attempt limit, with rotating candidates. `pnpm run backfill:diff` fills deeper history.
 
-**Ingest and backfill.** Nothing in this service ingests. The Vercel cron asks `GET /diff/missing?latest=N&depth=31` which epochs have no record, downloads those snapshots, extracts each record with `lib/utils/diff-shape.ts`, and `PUT`s it. Writes are create-only: a second write of a readable record answers `409`, which is the normal outcome of an idempotent cron. A present-but-unreadable object is replaced rather than refused, so a corrupt write cannot wedge an epoch. Deeper history is filled once with `pnpm run backfill:diff`.
+Diff comparisons retain their existing intermediate-read behavior: concurrency ten and six seconds per intermediate. An unavailable intermediate sets `x-diff-degraded: 1`, and the frontend serves that result without caching it.
 
-**Error mapping** (by enum variant, in `src/diff_routes.rs`): 400 for window validation; 404 when `from` or `to` has no snapshot (`"epoch {n}: snapshot HTTP 404"`); 422 for a scan failure (`"snapshot scan failed"`); 502 for an HTTP, transport, or timeout failure (`"snapshot fetch failed"`). The 404 body names the epoch, since the caller supplied it. Every 4xx and 5xx body beyond that is a fixed string, with the cause in the log.
+Error responses: 400 for invalid windows; 404 for absent or corrupt endpoint records; 409 for a verified readable duplicate; 422 for invalid submitted shapes; 502 for storage errors; 503 when persistence or ingest authorization is unavailable. Underlying storage details remain in logs.
 
 ---
 

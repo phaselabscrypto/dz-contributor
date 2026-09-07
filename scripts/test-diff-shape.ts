@@ -19,8 +19,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { getSnapshotUrl } from "@/lib/constants/config";
-import type { RawSnapshot } from "@/lib/types/snapshot";
+import { fetchEpochSnapshot } from "@/lib/utils/epoch-snapshot";
 import type { DiffShapeRecord } from "@/lib/types/diff";
 import { extractDiffShape } from "@/lib/utils/diff-shape";
 
@@ -40,18 +39,7 @@ function fixturePath(epoch: number): string {
 }
 
 async function shapeFor(epoch: number): Promise<DiffShapeRecord> {
-  const response = await fetch(getSnapshotUrl(epoch));
-  if (!response.ok) {
-    throw new Error(`epoch ${epoch}: snapshot HTTP ${response.status}`);
-  }
-  const raw: RawSnapshot = await response.json();
-  const shape = extractDiffShape(raw);
-  if (shape.epoch !== epoch) {
-    throw new Error(
-      `epoch ${epoch}: snapshot carries dz_epoch ${shape.epoch}`,
-    );
-  }
-  return shape;
+  return extractDiffShape(await fetchEpochSnapshot(epoch));
 }
 
 async function main(): Promise<void> {
