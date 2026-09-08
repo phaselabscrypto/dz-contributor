@@ -317,7 +317,7 @@ function DiffView({ data }: { data: NetworkDiffResponse }) {
             contributor: l.contributorCode,
             text: `${l.sideACode} ↔ ${l.sideZCode}`,
             meta: `${l.bandwidthGbps}G · ${l.linkType}`,
-            epoch: l.firstObservedEpoch ?? data.to,
+            epoch: l.firstObservedEpoch,
           }))}
         />
       )}
@@ -334,7 +334,7 @@ function DiffView({ data }: { data: NetworkDiffResponse }) {
             contributor: l.contributorCode,
             text: `${l.sideACode} ↔ ${l.sideZCode}`,
             meta: `${l.bandwidthGbps}G · ${l.linkType}`,
-            epoch: l.firstObservedEpoch ?? data.to,
+            epoch: l.firstObservedEpoch,
           }))}
         />
       )}
@@ -351,7 +351,7 @@ function DiffView({ data }: { data: NetworkDiffResponse }) {
             contributor: c.contributorCode,
             text: c.field,
             meta: `${String(c.before)} → ${String(c.after)}`,
-            epoch: c.firstObservedEpoch ?? data.to,
+            epoch: c.firstObservedEpoch,
           }))}
         />
       )}

@@ -37,6 +37,10 @@ pub struct Storage {
     pub put_failure: Option<(String, u16)>,
     pub put_delay: Option<(String, Duration)>,
     pub get_delay: Duration,
+    /// One-shot: the first cache GET sleeps this long and then answers 404
+    /// whatever the object map holds, modelling a read that started before a
+    /// concurrent write landed.
+    pub stale_miss_once: Option<Duration>,
     pub put_barrier: Option<Arc<tokio::sync::Barrier>>,
     version: usize,
 }
@@ -126,22 +130,33 @@ fn reply(status: u16, body: impl Into<Body>) -> Response {
 async fn handle(State(state): State<MockState>, request: Request<Body>) -> Response {
     let method = request.method().clone();
     let key = request.uri().path().to_owned();
-    let (get_failure, put_failure, put_delay, get_delay, barrier) = {
+    let is_read = method == Method::GET || method == Method::HEAD;
+    let (get_failure, put_failure, put_delay, get_delay, stale_miss, barrier) = {
         let mut storage = state.storage.lock().unwrap();
         storage.requests.push((method.clone(), key.clone()));
+        let stale_miss = if is_read && key.contains("/cache-") {
+            storage.stale_miss_once.take()
+        } else {
+            None
+        };
         (
             storage.get_failure,
             storage.put_failure.clone(),
             storage.put_delay.clone(),
             storage.get_delay,
+            stale_miss,
             storage.put_barrier.clone(),
         )
     };
-    if method == Method::GET || method == Method::HEAD {
+    if is_read {
         let active = state.active_reads.fetch_add(1, Ordering::SeqCst) + 1;
         state.peak_reads.fetch_max(active, Ordering::SeqCst);
         tokio::time::sleep(get_delay).await;
         state.active_reads.fetch_sub(1, Ordering::SeqCst);
+        if let Some(delay) = stale_miss {
+            tokio::time::sleep(delay).await;
+            return reply(404, "<Error><Code>NoSuchKey</Code></Error>");
+        }
         if let Some(status) = get_failure {
             return reply(status, "<Error><Code>InternalError</Code></Error>");
         }

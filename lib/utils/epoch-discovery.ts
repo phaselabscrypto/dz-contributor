@@ -35,6 +35,14 @@ let cache: { data: EpochAvailability; ts: number; withMeta: boolean } | null =
 const CACHE_TTL = 5 * 60 * 1000;
 
 /**
+ * Route-level deadline for a cold `getEpochAvailability` call. Sits under the
+ * 30 s `maxDuration` of the routes that call it (`/api/shapley/baseline`,
+ * `/api/shapley/tracking`, `/api/epochs`), leaving headroom for the response
+ * to actually get written.
+ */
+export const READ_ROUTE_DISCOVERY_TIMEOUT_MS = 20_000;
+
+/**
  * Find the highest epoch number that exists in the snapshot bucket.
  * Exponential probe to find an upper bound, then binary search between
  * the last-known-good epoch and the probe miss. Avoids a hard-coded

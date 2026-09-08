@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { reportError } from "@/lib/observability";
+import { NO_STORE_HEADERS } from "@/lib/utils/baseline-probe";
 import {
   EpochSnapshotError,
   fetchEpochSnapshot,
@@ -7,11 +8,11 @@ import {
 } from "@/lib/utils/epoch-snapshot";
 import { LruCache } from "@/lib/utils/lru-cache";
 
-// Snapshots are ~5MB JSON blobs. Capped at 8 entries so worst-case memory
-// stays around 40MB — well inside Vercel's 512MB Lambda budget.
+// Snapshots are about 110MB of JSON. Two entries keep worst-case memory near
+// 220MB, inside Vercel's 512MB Lambda budget with room for fetch buffers.
 const snapshotCache = new LruCache<number, unknown>({
   ttlMs: 5 * 60 * 1000,
-  maxSize: 8,
+  maxSize: 2,
 });
 
 // Snapshots for completed epochs are immutable on S3, so we can
@@ -59,14 +60,14 @@ export async function GET(request: NextRequest) {
       }
       return NextResponse.json(
         { error: failure.message },
-        { status: failure.status }
+        { status: failure.status, headers: NO_STORE_HEADERS }
       );
     }
     reportError(err, { source: "api/snapshot", extras: { epoch } });
     // Generic to the client — ${err} can carry upstream fetch detail.
     return NextResponse.json(
       { error: "Failed to fetch snapshot" },
-      { status: 500 }
+      { status: 500, headers: NO_STORE_HEADERS }
     );
   }
 }

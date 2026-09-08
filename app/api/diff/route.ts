@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { shapleyServiceBase } from "@/lib/constants/config";
+import { NO_STORE_HEADERS } from "@/lib/utils/baseline-probe";
 import {
   DIFF_CACHE_CONTROL,
   validateDiffWindow,
@@ -10,8 +11,6 @@ import {
 } from "@/lib/utils/shapley-remote";
 import { enforceRateLimit, RATE_LIMIT_STANDARD } from "@/lib/utils/rate-limit";
 import { categorizeError, reportError } from "@/lib/observability";
-
-const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
 
 /**
  * GET /api/diff?from=<epoch>&to=<epoch>

@@ -12,7 +12,9 @@ use axum::{
     response::IntoResponse,
 };
 
-use crate::cache::{self, BaselineResult, EpochCache, OperatorCache, response_from_baseline};
+use crate::cache::{
+    self, AliasReadError, BaselineResult, EpochCache, OperatorCache, response_from_baseline,
+};
 use crate::inflight::{self, Flight};
 use crate::model::{
     BaselinePublishPayload, HealthResponse, LinkEstimateOut, LinkEstimateRequest,
@@ -664,7 +666,9 @@ pub(crate) enum BaselineOutcome {
 
 /// Run at most one cold baseline solve per input hash in this process;
 /// concurrent callers await the first. The solve runs detached so a dropped
-/// request future still lands the result in memory and S3.
+/// request future still lands the result in memory and S3. The leader
+/// double-checks the cache after acquiring the flight, so a baseline that
+/// landed while it was losing the race is served instead of solved again.
 pub(crate) async fn baseline_single_flight(
     state: &Arc<crate::AppState>,
     body: &ShapleyInputIn,
@@ -683,6 +687,12 @@ pub(crate) async fn baseline_single_flight(
             let task_state = Arc::clone(state);
             let body = body.clone();
             let task = tokio::spawn(async move {
+                if let Some(resp) = try_cached_baseline(&task_state, input_hash).await {
+                    tracing::info!(input_hash = %format!("{input_hash:016x}"),
+                        "baseline landed while acquiring the flight; serving the cached result");
+                    guard.finish(Ok(resp.clone()));
+                    return Ok(resp);
+                }
                 let result = compute_and_store_baseline(&task_state, &body, input_hash, None).await;
                 guard.finish(result.clone());
                 result
@@ -835,7 +845,7 @@ pub async fn precompute_baseline(
         Ok(None) => {}
         Err(error) => {
             tracing::error!(?error, tag = %request.tag, "baseline alias read failed");
-            return error_response(StatusCode::BAD_GATEWAY, "baseline store unavailable");
+            return error_response(StatusCode::BAD_GATEWAY, "alias store unavailable");
         }
     }
 
@@ -898,11 +908,11 @@ pub async fn baseline_probe(
     match tokio::time::timeout(BASELINE_PROBE_TIMEOUT, s3.load_baseline_alias(&query.tag)).await {
         Err(_) => {
             tracing::warn!(tag = %query.tag, "baseline probe timed out");
-            error_response(StatusCode::BAD_GATEWAY, "baseline store unavailable")
+            error_response(StatusCode::BAD_GATEWAY, "alias store unavailable")
         }
         Ok(Err(error)) => {
             tracing::error!(?error, tag = %query.tag, "baseline probe failed");
-            error_response(StatusCode::BAD_GATEWAY, "baseline store unavailable")
+            error_response(StatusCode::BAD_GATEWAY, "alias store unavailable")
         }
         Ok(Ok(None)) => not_cached_response(&query.tag),
         Ok(Ok(Some(alias))) => Json(alias).into_response(),
@@ -1747,7 +1757,8 @@ pub struct LinkEstimateByTagRequest {
 /// result for this pair", which the Next.js route treats as a signal to take
 /// the input path. Both a missing alias AND an alias whose result has gone
 /// answer 404, because a dangling alias must not strand a caller who sent no
-/// input to solve from.
+/// input to solve from. A failed alias read is an outage, not a miss, and
+/// answers 502 rather than sending the caller down the rebuild path.
 pub async fn link_estimate_start_by_tag(
     State(state): State<Arc<crate::AppState>>,
     Json(body): Json<LinkEstimateByTagRequest>,
@@ -1781,11 +1792,30 @@ pub async fn link_estimate_start_by_tag(
     let Some(s3) = &state.s3_cache else {
         return not_found();
     };
-    let Some(payload_hash) = s3
+    let payload_hash = match s3
         .load_link_estimate_alias(&body.tag, &body.operator_focus)
         .await
-    else {
-        return not_found();
+    {
+        Ok(Some(hash)) => hash,
+        Ok(None) => return not_found(),
+        Err(error @ AliasReadError::Malformed { .. }) => {
+            tracing::warn!(
+                ?error,
+                tag = %body.tag,
+                operator_focus = %body.operator_focus,
+                "link-estimate alias is malformed; falling back to a rebuild"
+            );
+            return not_found();
+        }
+        Err(error @ AliasReadError::Storage { .. }) => {
+            tracing::error!(
+                ?error,
+                tag = %body.tag,
+                operator_focus = %body.operator_focus,
+                "link-estimate alias read failed"
+            );
+            return error_response(StatusCode::BAD_GATEWAY, "alias store unavailable");
+        }
     };
     let Some(cached) = s3.load_link_estimate(payload_hash).await else {
         // The alias outlived its result: an engine-prefix rotation, or an

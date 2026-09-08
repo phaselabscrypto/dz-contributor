@@ -20,6 +20,7 @@ import { fmtBps } from "@/lib/utils/format";
 import { useLocalStorageState } from "@/lib/hooks/use-local-storage";
 import {
   makeSortStateValidator,
+  nextSortState,
   type SortState,
 } from "@/lib/utils/sort-state";
 import {
@@ -73,11 +74,7 @@ export default function ContributorsPage() {
     sortKey === "live" && !baselineReady ? "alltime" : sortKey;
 
   const toggleSort = (key: SortKey) => {
-    setSortState((prev) =>
-      prev.key === key
-        ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
-        : { key, dir: key === "name" ? "asc" : "desc" },
-    );
+    setSortState((prev) => nextSortState(prev, key, effectiveSortKey, ["name"]));
   };
 
   const enriched = useMemo(() => {

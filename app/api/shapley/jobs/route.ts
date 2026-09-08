@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { MIN_DZ_EPOCH, SHAPLEY_SERVICE_URL } from "@/lib/constants/config";
+import { reportError } from "@/lib/observability";
 import { parseSnapshot } from "@/lib/utils/snapshot-parser";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
 import {
@@ -27,6 +28,11 @@ import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
  * returns `{ jobId }` immediately (202). The browser then polls
  * `GET /api/shapley/jobs/{id}` for progress + result and can `DELETE` to cancel.
  */
+
+// Snapshot fetch + parse + canonical build measured ~7–15s locally; Vercel's
+// default function duration would kill submits mid-parse.
+export const maxDuration = 60;
+
 export async function POST(request: NextRequest) {
   const limited = enforceRateLimit(request, {
     bucket: "shapley-jobs",
@@ -83,7 +89,7 @@ export async function POST(request: NextRequest) {
   const overrides = normalized.overrides;
 
   try {
-    const raw = await fetchEpochSnapshot(epoch);
+    const raw = await fetchEpochSnapshot(epoch, { timeoutMs: 30_000 });
     const parsed = parseSnapshot(raw);
 
     // The canonical builder is the only input source. A snapshot it cannot
@@ -138,7 +144,10 @@ export async function POST(request: NextRequest) {
     if (err instanceof EpochSnapshotError) {
       const failure = snapshotFailure(err);
       if (failure.status !== 404) {
-        console.error("POST /api/shapley/jobs snapshot failed:", err);
+        reportError(err, {
+          source: "api/shapley/jobs",
+          extras: { epoch, contributorCode, phase: "snapshot" },
+        });
       }
       return NextResponse.json({ error: failure.message }, { status: failure.status });
     }
@@ -146,7 +155,10 @@ export async function POST(request: NextRequest) {
     // ECONNREFUSED/ENOTFOUND + host:port) — but never echo it to the client:
     // this route calls the internal Shapley service and the error can name its
     // (private) host.
-    console.error("POST /api/shapley/jobs failed:", err);
+    reportError(err, {
+      source: "api/shapley/jobs",
+      extras: { epoch, contributorCode, phase: "start" },
+    });
     return NextResponse.json(
       { error: "Failed to start simulation" },
       { status: 500 }

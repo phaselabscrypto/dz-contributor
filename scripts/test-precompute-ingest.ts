@@ -57,6 +57,25 @@ async function main(): Promise<void> {
     );
     return;
   }
+  if (process.argv.includes("--missing-service")) {
+    delete process.env.SHAPLEY_SERVICE_URL;
+    delete process.env.PYTHON_SHAPLEY_URL;
+    const { runPrecomputeIngest } = await import(
+      "@/lib/utils/precompute-ingest"
+    );
+    let fetchCalls = 0;
+    globalThis.fetch = async () => {
+      fetchCalls += 1;
+      throw new Error("must reject before fetch");
+    };
+    const result = await runPrecomputeIngest("211", {});
+    assert.equal(result.status, 503);
+    assert.deepEqual(result.body, {
+      error: "shapley service not configured",
+    });
+    assert.equal(fetchCalls, 0);
+    return;
+  }
   process.env.SHAPLEY_INGEST_TOKEN = "test-ingest";
   const { getSnapshotUrl } = await import("@/lib/constants/config");
   const { baselineTag } = await import("@/lib/utils/sweep-tag");
@@ -180,7 +199,7 @@ async function main(): Promise<void> {
     let result = await run();
     assert.equal(result.status, 200);
     assert.equal(result.body.sweep_job_id, "sweep-test");
-    assert.equal(result.body.shapes?.[211], "created");
+    assert.equal(result.body.shapes?.records[211], "created");
     assert.equal(
       calls.filter((call) => call === `GET ${getSnapshotUrl(211)}`).length,
       1,
@@ -214,7 +233,7 @@ async function main(): Promise<void> {
     inputBuildable = false;
     result = await run();
     assert.equal(result.status, 422);
-    assert.equal(result.body.shapes?.[211], "created");
+    assert.equal(result.body.shapes?.records[211], "created");
     inputBuildable = true;
 
     reset();
@@ -230,7 +249,7 @@ async function main(): Promise<void> {
     result = await run();
     assert.equal(result.status, 502);
     assert.equal(result.body.sweep, "accepted");
-    assert.equal(result.body.shapes?.[211], "failed");
+    assert.equal(result.body.shapes?.records[211], "failed");
     hasCurrentPutFailure = false;
 
     reset();
@@ -375,6 +394,14 @@ async function main(): Promise<void> {
       "tsx",
       "scripts/test-precompute-ingest.ts",
       "--missing-ingest",
+    ]);
+    // SHAPLEY_SERVICE_URL is read at module load too, so the missing-service
+    // case also needs a fresh process.
+    execFileSync(process.execPath, [
+      "--import",
+      "tsx",
+      "scripts/test-precompute-ingest.ts",
+      "--missing-service",
     ]);
     console.log("precompute ingestion: passed");
   } finally {

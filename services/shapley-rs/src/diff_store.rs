@@ -19,27 +19,24 @@ const MISSING_READ_CONCURRENCY: usize = 8;
 const MISSING_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const MISSING_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Only the drift test reads this; [`SHAPE_KEY_PREFIX`] is the live value.
+#[cfg(test)]
 const SHAPE_KEY_STEM: &str = "shape-";
 const SHAPE_KEY_SUFFIX: &str = ".json";
 const SHAPE_CONTENT_TYPE: &str = "application/json";
 
+/// Common prefix of every persisted shape key.
+pub(crate) const SHAPE_KEY_PREFIX: &str = "diff/v1/shape-";
+
 /// Object key of one epoch's persisted shape: `diff/v1/shape-000211.json`.
 pub(crate) fn shape_key(epoch: Epoch) -> String {
-    format!(
-        "{DIFF_SHAPE_VERSION_PREFIX}/{SHAPE_KEY_STEM}{:06}{SHAPE_KEY_SUFFIX}",
-        epoch.0
-    )
-}
-
-/// Common prefix of every persisted shape key.
-pub(crate) fn shape_key_prefix() -> String {
-    format!("{DIFF_SHAPE_VERSION_PREFIX}/{SHAPE_KEY_STEM}")
+    format!("{SHAPE_KEY_PREFIX}{:06}{SHAPE_KEY_SUFFIX}", epoch.0)
 }
 
 /// Inverse of [`shape_key`]; `None` for any key outside the shape layout.
 pub(crate) fn epoch_from_key(key: &str) -> Option<Epoch> {
     let digits = key
-        .strip_prefix(shape_key_prefix().as_str())?
+        .strip_prefix(SHAPE_KEY_PREFIX)?
         .strip_suffix(SHAPE_KEY_SUFFIX)?;
     digits.parse::<u32>().ok().map(Epoch)
 }
@@ -181,7 +178,6 @@ impl S3ShapePersistence {
     }
 
     async fn list_epochs(&self) -> Result<BTreeSet<Epoch>, anyhow::Error> {
-        let prefix = shape_key_prefix();
         let mut epochs = BTreeSet::new();
         let mut continuation_token: Option<String> = None;
         loop {
@@ -189,7 +185,7 @@ impl S3ShapePersistence {
                 .client
                 .list_objects_v2()
                 .bucket(&self.bucket)
-                .prefix(&prefix)
+                .prefix(SHAPE_KEY_PREFIX)
                 .set_continuation_token(continuation_token.take())
                 .send()
                 .await
@@ -462,6 +458,7 @@ pub(crate) mod test_support {
     #[derive(Default)]
     pub(crate) struct MemoryPersistence {
         records: Mutex<Records>,
+        stalled: Mutex<BTreeSet<Epoch>>,
         load_calls: AtomicUsize,
         store_calls: AtomicUsize,
         is_store_failing: AtomicBool,
@@ -497,11 +494,27 @@ pub(crate) mod test_support {
         pub(crate) fn fail_loads(&self) {
             self.is_load_failing.store(true, Ordering::SeqCst);
         }
+        /// Makes loads of `epoch` never resolve, modelling a store that
+        /// accepted the read and went quiet.
+        pub(crate) fn stall(&self, epoch: Epoch) {
+            self.stalled
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(epoch);
+        }
     }
     impl ShapePersistence for MemoryPersistence {
         fn load(&self, epoch: Epoch) -> BoxFuture<'_, Result<ShapeRead, anyhow::Error>> {
             Box::pin(async move {
                 self.load_calls.fetch_add(1, Ordering::SeqCst);
+                let is_stalled = self
+                    .stalled
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains(&epoch);
+                if is_stalled {
+                    std::future::pending::<()>().await;
+                }
                 anyhow::ensure!(
                     !self.is_load_failing.load(Ordering::SeqCst),
                     "injected GET failure"
@@ -594,8 +607,16 @@ mod tests {
     #[test]
     fn shape_key_is_zero_padded_under_the_version_prefix() {
         assert_eq!(shape_key(Epoch(211)), "diff/v1/shape-000211.json");
-        assert!(shape_key(Epoch(48)).starts_with(&shape_key_prefix()));
-        assert!(shape_key_prefix().starts_with(DIFF_SHAPE_VERSION_PREFIX));
+        assert!(shape_key(Epoch(48)).starts_with(SHAPE_KEY_PREFIX));
+        assert!(SHAPE_KEY_PREFIX.starts_with(DIFF_SHAPE_VERSION_PREFIX));
+    }
+
+    #[test]
+    fn shape_key_prefix_tracks_the_version_and_stem() {
+        assert_eq!(
+            SHAPE_KEY_PREFIX,
+            format!("{DIFF_SHAPE_VERSION_PREFIX}/{SHAPE_KEY_STEM}")
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ export type DiffWindowValidation =
   | { ok: false; error: string };
 
 /** Integers only, matching Rust's `str::parse::<i64>` after a trim. */
-function parseEpochParam(raw: string | null): number {
+export function parseIntegerParam(raw: string | null): number {
   const trimmed = raw?.trim() ?? "";
   return /^[+-]?\d+$/.test(trimmed) ? Number(trimmed) : NaN;
 }
@@ -29,8 +29,8 @@ export function validateDiffWindow(
   fromRaw: string | null,
   toRaw: string | null,
 ): DiffWindowValidation {
-  const from = parseEpochParam(fromRaw);
-  const to = parseEpochParam(toRaw);
+  const from = parseIntegerParam(fromRaw);
+  const to = parseIntegerParam(toRaw);
   if (!Number.isFinite(from) || !Number.isFinite(to) || from === to) {
     return {
       ok: false,

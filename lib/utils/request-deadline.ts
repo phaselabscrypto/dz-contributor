@@ -17,3 +17,11 @@ export function boundedSignal(
   const timeout = AbortSignal.timeout(timeoutMs);
   return options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 }
+
+/** True for the two names `AbortSignal.timeout`/abort produce across Node lines. */
+export function isAbortLike(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === "TimeoutError" || error.name === "AbortError")
+  );
+}

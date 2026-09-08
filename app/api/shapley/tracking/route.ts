@@ -8,8 +8,12 @@ import {
   probeEpochBaselines,
   SERVICE_UNAVAILABLE_BODY,
 } from "@/lib/utils/baseline-probe";
-import { getEpochAvailability } from "@/lib/utils/epoch-discovery";
+import {
+  getEpochAvailability,
+  READ_ROUTE_DISCOVERY_TIMEOUT_MS,
+} from "@/lib/utils/epoch-discovery";
 import { enforceRateLimit, RATE_LIMIT_STANDARD } from "@/lib/utils/rate-limit";
+import { boundedSignal } from "@/lib/utils/request-deadline";
 import { BaselineServiceError } from "@/lib/utils/shapley-remote";
 import { pivotTracking } from "@/lib/utils/tracking-series";
 
@@ -56,7 +60,9 @@ export async function GET(request: Request) {
 
   let available: number[];
   try {
-    const data = await getEpochAvailability();
+    const data = await getEpochAvailability(false, {
+      signal: boundedSignal({}, READ_ROUTE_DISCOVERY_TIMEOUT_MS),
+    });
     available = (data.available ?? []).slice().sort((a, b) => b - a);
   } catch (err) {
     reportError(err, {

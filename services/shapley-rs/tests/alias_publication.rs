@@ -16,7 +16,7 @@ use dz_shapley_service::{
         SweepPayload,
     },
     queue::{self, JobKind},
-    routes::{self, BaselinePublishRequest, LinkEstimateSweepRequest},
+    routes::{self, BaselinePublishRequest, LinkEstimateByTagRequest, LinkEstimateSweepRequest},
     worker,
 };
 use serde_json::{Value, json};
@@ -298,12 +298,10 @@ async fn legacy_metadata_is_not_read(h: &Harness) {
     );
     h.s3.put(&legacy_key(&marker("untrusted")), b"{}".to_vec(), None);
     let cache = h.state.s3_cache.as_ref().unwrap();
-    assert!(
-        cache
-            .load_link_estimate_alias("untrusted", "Alpha")
-            .await
-            .is_none()
-    );
+    assert!(matches!(
+        cache.load_link_estimate_alias("untrusted", "Alpha").await,
+        Ok(None)
+    ));
     assert!(!cache.load_sweep_marker("untrusted").await);
 }
 
@@ -525,6 +523,59 @@ async fn publication_reconciles_cached_results_and_keeps_claims_alive() {
     baseline_alias_is_withheld_when_the_result_store_fails(&h).await;
     unauthorized_baseline_payload_publishes_nothing(&h).await;
     baseline_publish_route_round_trips(&h).await;
+    an_alias_store_outage_answers_502_on_the_by_tag_path(&h).await;
+    a_malformed_alias_answers_404_on_the_by_tag_path(&h).await;
+}
+
+/// Submits `POST /jobs/link-estimate/by-tag` and returns its status and body.
+async fn post_by_tag(h: &Harness, tag: &str, focus: &str) -> (u16, Value) {
+    let response = routes::link_estimate_start_by_tag(
+        State(h.state.clone()),
+        Json(LinkEstimateByTagRequest {
+            tag: tag.into(),
+            operator_focus: focus.into(),
+        }),
+    )
+    .await
+    .into_response();
+    let status = response.status().as_u16();
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    (status, body)
+}
+
+/// Makes every GET fail with the status, or clears the fault when `None`.
+fn fail_gets(h: &Harness, status: Option<u16>) {
+    h.s3.state.storage.lock().unwrap().get_failure = status;
+}
+
+/// A storage failure on the alias read is an outage, not a miss: it must not
+/// send the caller down the snapshot-rebuild path.
+async fn an_alias_store_outage_answers_502_on_the_by_tag_path(h: &Harness) {
+    fail_gets(h, Some(500));
+    let (status, body) = post_by_tag(h, "outage", "Alpha").await;
+    fail_gets(h, None);
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["error"], "alias store unavailable");
+}
+
+/// A malformed alias is data the sweep rewrites, so the rebuild path is right.
+async fn a_malformed_alias_answers_404_on_the_by_tag_path(h: &Harness) {
+    h.s3.put(&alias("malformed", "Alpha"), b"not json".to_vec(), None);
+    let (status, body) = post_by_tag(h, "malformed", "Alpha").await;
+    assert_eq!(status, 404, "{body}");
+
+    h.s3.put(
+        &alias("nonhex", "Alpha"),
+        json!({ "payloadHash": "zz" }).to_string().into_bytes(),
+        None,
+    );
+    let (status, body) = post_by_tag(h, "nonhex", "Alpha").await;
+    assert_eq!(status, 404, "{body}");
 }
 
 fn baseline_payload(tag: &str, is_publish_authorized: bool) -> BaselinePublishPayload {

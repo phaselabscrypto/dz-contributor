@@ -254,6 +254,7 @@ fn sum_bandwidth(links: &[LinkRef], code: &str) -> f64 {
 
 fn has_after_value(link: &LinkRef, field: ChangedField, after: &FieldValue) -> bool {
     match (field, after) {
+        // Exact compare is intended: both sides come from the same serde_json round trip.
         (ChangedField::BandwidthGbps, FieldValue::Number(value)) => link.bandwidth_gbps == *value,
         (ChangedField::LinkType, FieldValue::Text(value)) => link.link_type == *value,
         (ChangedField::Endpoint, FieldValue::Text(value)) => endpoint_text(link) == *value,
