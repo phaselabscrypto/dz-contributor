@@ -116,7 +116,7 @@ export async function POST(request: NextRequest) {
     // Get or build baseline input + snapshot
     let cached = baselineCache.get(epoch);
     if (!cached || Date.now() - cached.timestamp > CACHE_TTL) {
-      const raw = await fetchEpochSnapshot(epoch);
+      const raw = await fetchEpochSnapshot(epoch, { timeoutMs: 30_000 });
       // The canonical builder is the only input source. A snapshot it cannot
       // use is a 422, never a heuristic substitute.
       const built = buildCanonicalShapleyInput(raw);

@@ -1,5 +1,6 @@
 import {
   MIN_DZ_EPOCH,
+  shapleyServiceBase,
   SNAPSHOT_FETCH_TIMEOUT_MS,
 } from "@/lib/constants/config";
 import { reportError } from "@/lib/observability";
@@ -8,7 +9,7 @@ import type { RawSnapshot } from "@/lib/types/snapshot";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
 import { scheduleDiffRepairs } from "@/lib/utils/diff-repair-schedule";
 import { extractDiffShape } from "@/lib/utils/diff-shape";
-import { MAX_DIFF_EPOCH } from "@/lib/utils/diff-window";
+import { MAX_DIFF_EPOCH, parseIntegerParam } from "@/lib/utils/diff-window";
 import { getEpochAvailability } from "@/lib/utils/epoch-discovery";
 import {
   EpochSnapshotError,
@@ -16,6 +17,7 @@ import {
   snapshotFailureStatus,
 } from "@/lib/utils/epoch-snapshot";
 import {
+  isAbortLike,
   boundedSignal,
   type RequestDeadline,
 } from "@/lib/utils/request-deadline";
@@ -53,7 +55,8 @@ const SOURCE = "api/link-value/precompute";
 type ShapeOutcome = "created" | "exists" | "failed";
 type SweepOutcome = "already-swept" | "accepted" | "failed";
 type BaselineOutcome = BaselinePrecompute | { error: string };
-type ShapesBody = Record<number, ShapeOutcome> & {
+type ShapesBody = {
+  records: Record<number, ShapeOutcome>;
   deferred: number;
   deferred_epochs: number[];
   failed_epochs: number[];
@@ -153,10 +156,7 @@ function describeFailure(error: unknown): Failure {
   if (error instanceof EpochSnapshotError) {
     return { message: error.message, status: snapshotFailureStatus(error) };
   }
-  if (
-    error instanceof Error &&
-    (error.name === "TimeoutError" || error.name === "AbortError")
-  ) {
+  if (isAbortLike(error)) {
     return { message: "precompute work timed out or aborted", status: 504 };
   }
   return { message: "precompute work failed", status: 502 };
@@ -164,7 +164,7 @@ function describeFailure(error: unknown): Failure {
 
 /** `?epoch=N` must be an integer inside the diff window. */
 function parseEpochParam(param: string): number | null {
-  const epoch = /^[+-]?\d+$/.test(param.trim()) ? Number(param) : NaN;
+  const epoch = parseIntegerParam(param);
   const isInWindow =
     Number.isInteger(epoch) && epoch >= MIN_DZ_EPOCH && epoch <= MAX_DIFF_EPOCH;
   return isInWindow ? epoch : null;
@@ -530,7 +530,7 @@ function buildBody(
     operators: current.operators,
     baseline: current.baseline,
     shapes: {
-      ...results,
+      records: results,
       deferred: history.deferred.length,
       deferred_epochs: history.deferred,
       failed_epochs: failedEpochs,
@@ -550,6 +550,9 @@ export async function runPrecomputeIngest(
   epochParam: string | null,
   options: PrecomputeOptions = {},
 ): Promise<PrecomputeResult> {
+  if (!shapleyServiceBase()) {
+    return { status: 503, body: { error: "shapley service not configured" } };
+  }
   const now = options.nowMs ?? Date.now;
   const startedAtMs = options.startedAtMs ?? now();
   const budget = new WorkBudget(

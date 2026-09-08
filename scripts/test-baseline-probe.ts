@@ -10,6 +10,7 @@
  *   node --import tsx scripts/test-baseline-probe.ts
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 
 import type { EpochBaseline } from "@/lib/types/baseline";
 
@@ -25,7 +26,57 @@ const HIT_BODY = {
   input_hash: "0123456789abcdef",
 };
 
+// Runs in its own process because discovery caches its result for 5 minutes.
+// The HEAD settles only when its signal aborts, so this checks the plumbing.
+async function runDiscoveryHangScenario(): Promise<void> {
+  process.env.SHAPLEY_SERVICE_URL = "https://service.test";
+  process.env.SHAPLEY_API_TOKEN = "test-compute";
+  const { S3_SNAPSHOT_URL_TEMPLATE } = await import("@/lib/constants/config");
+  const { GET: latestBaseline } = await import(
+    "@/app/api/shapley/baseline/route"
+  );
+  const [snapshotPrefix, snapshotSuffix] =
+    S3_SNAPSHOT_URL_TEMPLATE.split("{N}");
+
+  let sawAbortSignal = false;
+  globalThis.fetch = (async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ) => {
+    const url = String(input);
+    if (!url.startsWith(snapshotPrefix) || !url.endsWith(snapshotSuffix)) {
+      throw new Error(`unexpected non-discovery request ${url}`);
+    }
+    sawAbortSignal = init?.signal instanceof AbortSignal;
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener(
+        "abort",
+        () => reject(new DOMException("Aborted", "AbortError")),
+        { once: true },
+      );
+    });
+  }) as typeof fetch;
+
+  // The per-HEAD timeout inside epoch-discovery.ts uses a real (unref'd)
+  // timer; keep the process alive long enough for it to fire.
+  const keepAlive = setTimeout(() => {}, 8_000);
+  try {
+    const res = await latestBaseline(
+      new Request("http://localhost/api/shapley/baseline"),
+    );
+    assert.equal(res.status, 502);
+    assert.ok(sawAbortSignal, "the discovery HEAD carries an AbortSignal");
+  } finally {
+    clearTimeout(keepAlive);
+  }
+}
+
 async function main(): Promise<void> {
+  if (process.argv.includes("--discovery-hang")) {
+    await runDiscoveryHangScenario();
+    return;
+  }
+
   process.env.SHAPLEY_SERVICE_URL = "https://service.test";
   process.env.SHAPLEY_API_TOKEN = "test-compute";
 
@@ -73,7 +124,10 @@ async function main(): Promise<void> {
   let mode: ProbeMode = "hit";
   const tag211 = baselineTag(211);
 
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const primaryFetch = (async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ) => {
     const url = String(input);
     const method = init?.method ?? "GET";
     const epoch = snapshotEpoch(url);
@@ -100,6 +154,7 @@ async function main(): Promise<void> {
     }
     return new Response("boom service.test", { status: 500 });
   }) as typeof fetch;
+  globalThis.fetch = primaryFetch;
 
   try {
     console.log("latest baseline:");
@@ -239,6 +294,18 @@ async function main(): Promise<void> {
       clearTimeout(keepAlive);
     }
     console.log("  ok   probe timeout → typed BaselineServiceError");
+
+    // A fresh process: the 5-minute discovery cache would otherwise mask the
+    // deadline plumbing behind the epoch the earlier scenarios already warmed.
+    execFileSync(process.execPath, [
+      "--import",
+      "tsx",
+      "scripts/test-baseline-probe.ts",
+      "--discovery-hang",
+    ]);
+    console.log(
+      "  ok   discovery HEAD never resolving → 502 (deadline plumbing)",
+    );
 
     console.log("baseline probe: passed");
   } finally {

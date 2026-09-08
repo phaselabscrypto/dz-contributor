@@ -4,6 +4,7 @@ import {
   shapleyServiceBase,
 } from "@/lib/constants/config";
 import type { ContributorDiffResponse } from "@/lib/types/diff";
+import { NO_STORE_HEADERS } from "@/lib/utils/baseline-probe";
 import {
   DIFF_CACHE_CONTROL,
   validateDiffWindow,
@@ -14,8 +15,6 @@ import {
 } from "@/lib/utils/shapley-remote";
 import { enforceRateLimit, RATE_LIMIT_STANDARD } from "@/lib/utils/rate-limit";
 import { categorizeError, reportError } from "@/lib/observability";
-
-const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
 
 /** Contributor codes are short on-chain identifiers, e.g. `tsw`, `jump_`. */
 const CONTRIBUTOR_CODE = /^[a-z0-9_-]{1,32}$/i;

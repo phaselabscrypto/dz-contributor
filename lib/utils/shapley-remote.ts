@@ -9,6 +9,7 @@ import type { ShapleyInput, ShapleyOutput } from "@/lib/types/shapley";
 import { reportError } from "@/lib/observability";
 import {
   boundedSignal,
+  isAbortLike,
   type RequestDeadline,
 } from "@/lib/utils/request-deadline";
 
@@ -133,12 +134,9 @@ export async function computeShapleyRemote(
     });
   } catch (err) {
     // AbortSignal.timeout yields TimeoutError on current Node, AbortError on
-    // older lines (same two-name check as app/api/health/route.ts). Network
-    // failures (undici TypeError) pass through untyped → classified as hard.
-    if (
-      err instanceof Error &&
-      (err.name === "TimeoutError" || err.name === "AbortError")
-    ) {
+    // older lines. Network failures (undici TypeError) pass through untyped
+    // → classified as hard.
+    if (isAbortLike(err)) {
       throw new RemoteSolveError(
         `Rust Shapley service timed out after ${timeoutMs}ms`,
         undefined,
@@ -625,7 +623,10 @@ export async function startLinkEstimateJob(
     signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
+    const detail = (await response.text().catch(() => "")).slice(
+      0,
+      MAX_ERROR_DETAIL_CHARS,
+    );
     throw new JobStartError(
       `start link-estimate job HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
       response.status,
@@ -712,10 +713,7 @@ async function fetchDiffPath(
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
-    if (
-      err instanceof Error &&
-      (err.name === "TimeoutError" || err.name === "AbortError")
-    ) {
+    if (isAbortLike(err)) {
       throw new DiffServiceError(
         `${label} timed out after ${timeoutMs}ms`,
         undefined,
@@ -735,8 +733,7 @@ async function fetchDiffPath(
       throw new DiffServiceError(
         `${label} body read failed: ${err instanceof Error ? err.name : "unknown"}`,
         response.status,
-        err instanceof Error &&
-          (err.name === "TimeoutError" || err.name === "AbortError"),
+        isAbortLike(err),
       );
     }
     body = "";
@@ -881,7 +878,10 @@ export async function startLinkEstimateJobByTag(
   });
   if (response.status === 404) return null;
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
+    const detail = (await response.text().catch(() => "")).slice(
+      0,
+      MAX_ERROR_DETAIL_CHARS,
+    );
     throw new JobStartError(
       `start link-estimate by tag HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
       response.status,
@@ -955,10 +955,7 @@ export async function fetchBaselineByTagRemote(
     });
     body = await response.text();
   } catch (err) {
-    if (
-      err instanceof Error &&
-      (err.name === "TimeoutError" || err.name === "AbortError")
-    ) {
+    if (isAbortLike(err)) {
       throw new BaselineServiceError(
         "baseline probe timed out",
         undefined,

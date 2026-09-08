@@ -8,8 +8,12 @@ import {
   probeEpochBaseline,
   SERVICE_UNAVAILABLE_BODY,
 } from "@/lib/utils/baseline-probe";
-import { getEpochAvailability } from "@/lib/utils/epoch-discovery";
+import {
+  getEpochAvailability,
+  READ_ROUTE_DISCOVERY_TIMEOUT_MS,
+} from "@/lib/utils/epoch-discovery";
 import { enforceRateLimit, RATE_LIMIT_STANDARD } from "@/lib/utils/rate-limit";
+import { boundedSignal } from "@/lib/utils/request-deadline";
 import { BaselineServiceError } from "@/lib/utils/shapley-remote";
 
 /**
@@ -42,7 +46,11 @@ export async function GET(request: Request) {
 
   let epoch: number;
   try {
-    epoch = (await getEpochAvailability()).latest;
+    epoch = (
+      await getEpochAvailability(false, {
+        signal: boundedSignal({}, READ_ROUTE_DISCOVERY_TIMEOUT_MS),
+      })
+    ).latest;
   } catch (err) {
     reportError(err, {
       source: "api/shapley/baseline",
