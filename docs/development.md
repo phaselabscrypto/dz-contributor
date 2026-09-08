@@ -29,7 +29,7 @@ pnpm install
 pnpm dev
 ```
 
-The app opens at `http://localhost:3000`. When the Shapley microservice is not running, the frontend falls back to the development-only TypeScript solver. Results produced on this path carry the method label `local-ts-heuristic-DEV-ONLY`, making it immediately visible in the UI that the production solver was not used. See [shapley-pipeline.md](./shapley-pipeline.md) for a description of the full pipeline.
+The app opens at `http://localhost:3000`. Without the Shapley microservice the Shapley routes return `503` and their widgets are not shown; there is no in-process fallback solver. See [shapley-pipeline.md](./shapley-pipeline.md) for a description of the full pipeline.
 
 ## Full stack (two terminals)
 
@@ -150,7 +150,10 @@ Scripts live in `scripts/`. Run those with `.ts` extensions through their `packa
 
 | Script | pnpm alias | Purpose |
 |--------|-----------|---------|
-| `scripts/validate-shapley.ts` | `pnpm validate` | Hits `/api/shapley?epoch=N` for a range of epochs and writes a `validation-report.md` comparing solver shares against on-chain payouts |
+| `scripts/validate-shapley.ts` | `pnpm validate` | Reads `/api/shapley?epoch=N` for a range of epochs and writes a `validation-report.md` comparing solver shares against on-chain payouts; an epoch the cron has not published answers 404 and is skipped |
+| `scripts/test-baseline-tag.ts` | `pnpm test:baseline-tag` | Pure check of `baselineTag(epoch)`: shape, determinism, epoch-distinctness, query-string round trip |
+| `scripts/test-baseline-probe.ts` | `pnpm test:baseline-probe` | Drives `/api/shapley/baseline` and `/api/shapley?epoch=N` against a stubbed service: hit, miss, upstream failure, legacy 404, probe timeout |
+| `scripts/test-tracking-route.ts` | `pnpm test:tracking-route` | Drives `/api/shapley/tracking` and the pure `pivotTracking` against a stubbed service: partial cache, too few hits, probe failure, count clamping |
 | `scripts/test-borsh-registry.ts` | `pnpm test:borsh` | Round-trip borsh encode/decode against the schemas in `lib/onchain/idl/schemas.ts`; regression pin for the borsh registry |
 | `scripts/test-canonical-parity.ts` | `pnpm test:canonical` | Diffs the TS canonical input builder against DZ's Python reference builder over the same snapshot; requires a local snapshot file |
 | `scripts/decode-live-rewards.ts` | `pnpm test:onchain` | Fetches a live contributor-rewards record from the DZ ledger and decodes it through the TS reader; requires `SOLANA_RPC_URL` |

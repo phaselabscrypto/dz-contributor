@@ -94,33 +94,75 @@ pub struct ShapleyResponse {
     pub values: std::collections::BTreeMap<String, ShapleyOperatorOut>,
 }
 
+/// The published baseline for one tag. Stored as the alias object and returned
+/// verbatim by `GET /shapley/baseline`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaselineAlias {
+    pub tag: String,
+    /// `cache::hash_input` of the input as `{:016x}`; names the `cache-` object.
+    pub input_hash: String,
+    #[serde(flatten)]
+    pub result: ShapleyResponse,
+}
+
+/// Payload of a `JobKind::BaselinePublish` job.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct BaselinePublishPayload {
+    pub input: ShapleyInputIn,
+    pub tag: String,
+    /// Set by the ingest-authenticated producer. A payload stored without it
+    /// decodes as unauthorized and publishes nothing.
+    #[serde(default)]
+    pub is_publish_authorized: bool,
+}
+
+impl BaselinePublishPayload {
+    /// The tag this job may publish under: `Some` only when the producer was
+    /// authorized and the tag has no NUL byte, which the alias key uses as its
+    /// separator.
+    pub(crate) fn publish_tag(&self) -> Option<&str> {
+        (self.is_publish_authorized && !self.tag.contains('\0')).then_some(self.tag.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct LinkEstimateRequest {
     pub input: ShapleyInputIn,
     pub operator_focus: String,
 }
 
-/// Payload of a `JobKind::Sweep` job — stored ONCE per sweep under the sweep
-/// job's payload key (24h TTL, `queue::SWEEP_PAYLOAD_TTL_SECS`) and shared by
-/// every child link-estimate entry via `payload_key` + `focus`, so a
-/// 20-operator sweep holds one copy of the epoch input in Redis, not twenty.
+/// Stored once per sweep and shared by its queued children.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SweepPayload {
     pub input: ShapleyInputIn,
     pub operators: Vec<String>,
-    /// Whether `operators` was derived service-side from the input's devices
-    /// (⇒ guaranteed-complete set). Only derived sweeps may write the "fully
-    /// swept" marker: an explicit — possibly partial — list carrying the
-    /// canonical tag must never mark the epoch complete, or the cron would
-    /// skip the unswept remainder forever. `#[serde(default)]` so a payload
-    /// stored by a pre-field producer decodes as NOT derived (degrades to "no
-    /// marker", never to a false marker).
+    /// True when the service derived `operators` from the input's devices.
+    /// Only a derived set is complete, so an explicit list never publishes
+    /// aliases or marks the epoch swept. A payload stored before the field
+    /// existed decodes as not derived.
     #[serde(default)]
     pub derived_operators: bool,
-    /// Opaque caller tag (e.g. `epoch-{N}:canonical-v1:{params fingerprint}`)
-    /// keying the S3 "fully swept" marker. `None` ⇒ no marker is written.
+    /// Set by the ingest-authenticated producer. A payload stored before the
+    /// field existed decodes as unauthorized and cannot publish.
+    #[serde(default)]
+    pub is_publish_authorized: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+}
+
+impl SweepPayload {
+    /// The tag this sweep may publish aliases and its marker under. `None`
+    /// when publication is not allowed: the sweep did not come through the
+    /// ingest-authenticated route, its operator list is not derived, or a
+    /// value carries the NUL byte the alias key uses as its separator.
+    pub(crate) fn publish_tag(&self) -> Option<&str> {
+        self.tag.as_deref().filter(|tag| {
+            self.is_publish_authorized
+                && self.derived_operators
+                && !tag.contains('\0')
+                && self.operators.iter().all(|op| !op.contains('\0'))
+        })
+    }
 }
 
 // One per focus-owned link, canonical `device1 < device2` orientation, mapped 1:1
@@ -197,7 +239,50 @@ pub struct SimulateStats {
 
 #[cfg(test)]
 mod tests {
-    use super::SweepPayload;
+    use super::{BaselineAlias, BaselinePublishPayload, SweepPayload};
+
+    #[test]
+    fn baseline_publish_payload_without_authorization_decodes_as_unauthorized() {
+        let stored = r#"{
+            "input": { "devices": [], "private_links": [], "public_links": [], "demands": [] },
+            "tag": "baseline:epoch-1:canonical-v1:00"
+        }"#;
+        let payload: BaselinePublishPayload = serde_json::from_str(stored).unwrap();
+        assert!(!payload.is_publish_authorized);
+        assert_eq!(payload.publish_tag(), None);
+
+        let authorized = BaselinePublishPayload {
+            is_publish_authorized: true,
+            ..payload.clone()
+        };
+        assert_eq!(
+            authorized.publish_tag(),
+            Some("baseline:epoch-1:canonical-v1:00")
+        );
+        let nul = BaselinePublishPayload {
+            tag: "bad\0tag".into(),
+            ..authorized
+        };
+        assert_eq!(nul.publish_tag(), None);
+    }
+
+    #[test]
+    fn baseline_alias_flattens_result_fields() {
+        let alias = BaselineAlias {
+            tag: "t".into(),
+            input_hash: "00000000000000aa".into(),
+            result: super::ShapleyResponse {
+                method: "m".into(),
+                operator_count: 0,
+                values: Default::default(),
+            },
+        };
+        let value = serde_json::to_value(&alias).unwrap();
+        for key in ["tag", "input_hash", "method", "operator_count", "values"] {
+            assert!(value.get(key).is_some(), "missing top-level {key}");
+        }
+        assert!(value.get("result").is_none(), "result must be flattened");
+    }
 
     /// A sweep payload stored by a producer that predates `derived_operators`
     /// must decode as NOT derived: the field gates the "fully swept" marker,

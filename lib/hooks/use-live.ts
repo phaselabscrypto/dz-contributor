@@ -61,64 +61,54 @@ export function useHealth() {
   });
 }
 
-/**
- * Live-network Shapley anchor — computes Shapley values against the
- * the LATEST completed epoch's result (DZ-current methodology),
- * served from the shared per-epoch cache and kept warm by the precompute
- * cron — NOT an on-demand live-topology solve. Updates roughly once per
- * epoch (~2-3 days). 5-minute client refresh.
- */
-export interface BaselineShapley {
-  method: string;
-  computedAt: string;
-  source: "latest-epoch";
-  epoch: number;
-  operatorCount: number;
-  values: Record<string, { value: number; share: number }>;
-  inputSummary: {
-    deviceCount: number;
-    privateLinkCount: number;
-    publicLinkCount: number;
-    demandCount: number;
-  };
-}
+import { isNotCached } from "@/lib/types/baseline";
+import type {
+  BaselineResponse,
+  TrackingResponse,
+} from "@/lib/types/baseline";
+export type {
+  EpochBaseline,
+  BaselineResponse,
+  ShapleyTracking,
+  TrackingResponse,
+} from "@/lib/types/baseline";
+export {
+  cachedBaseline,
+  cachedTracking,
+  isNotCached,
+} from "@/lib/types/baseline";
 
 /**
- * 202 body from /api/shapley/baseline: the latest epoch exists but its
- * result isn't cached yet (a cold solve was cut mid-flight; the precompute
- * cron heals it). A valid data state, not an error.
+ * Fetcher for the cache-only baseline routes: a 404 carrying
+ * `{status:"not-cached"}` is data (the epoch has no published baseline yet), so
+ * SWR keeps it out of `error` and away from the retry storm. Any other non-2xx
+ * throws.
  */
-export interface BaselineWarming {
-  status: "warming";
-  message: string;
-  epoch: number;
-}
-
-export type BaselineShapleyResponse = BaselineShapley | BaselineWarming;
-
-export function isBaselineWarming(
-  d: BaselineShapleyResponse,
-): d is BaselineWarming {
-  return (d as BaselineWarming).status === "warming";
-}
-
-// Dedicated fetcher: 202 is a warming payload, not a success-shaped
-// BaselineShapley (202 passes `res.ok`, so the shared fetcher would hand
-// the warming body to consumers typed as ready data). The shared `fetcher`
-// stays 2xx-naive for the other hooks.
-const baselineFetcher = async (
-  url: string,
-): Promise<BaselineShapleyResponse> => {
+async function cacheProbeFetcher<T>(url: string): Promise<T> {
   const res = await fetch(url);
-  if (res.status === 202) return res.json();
+  if (res.status === 404) {
+    const body: unknown = await res.json().catch(() => null);
+    if (isNotCached(body)) return body as T;
+    throw new Error(`API ${res.status}`);
+  }
   if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json();
-};
+  return (await res.json()) as T;
+}
 
+// SWR keeps the last data when a revalidation fails, so a failed refresh
+// alone must not read as an error.
+export function hasLoadError(error: unknown, data: unknown): boolean {
+  return Boolean(error) && data === undefined;
+}
+
+/**
+ * The latest completed epoch's published Shapley baseline. Updates roughly once
+ * per epoch (~2-3 days), so a 5-minute client refresh is plenty.
+ */
 export function useBaselineShapley() {
-  return useSWR<BaselineShapleyResponse>(
+  return useSWR<BaselineResponse>(
     "/api/shapley/baseline",
-    baselineFetcher,
+    cacheProbeFetcher,
     {
       ...swrCfg,
       refreshInterval: 5 * 60_000,
@@ -153,30 +143,10 @@ export function usePoolProjection(horizon = 30) {
   );
 }
 
-export interface ShapleyTrackingPoint {
-  epoch: number;
-  share: number;
-  value: number;
-}
-export interface ShapleyTrackingOperator {
-  operator: string;
-  series: ShapleyTrackingPoint[];
-  latestShare: number;
-  delta: number;
-  stdev: number;
-}
-export interface ShapleyTracking {
-  epochs: number[];
-  method: string;
-  operators: ShapleyTrackingOperator[];
-  fetchedAt: string;
-  note: string;
-}
-
 export function useShapleyTracking(count = 8) {
-  return useSWR<ShapleyTracking>(
+  return useSWR<TrackingResponse>(
     `/api/shapley/tracking?count=${count}`,
-    fetcher,
+    cacheProbeFetcher,
     {
       ...swrCfg,
       refreshInterval: 30 * 60_000,

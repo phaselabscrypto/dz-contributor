@@ -3,10 +3,10 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import {
+  cachedBaseline,
   useLiveTopology,
   useEconomicHub,
   useBaselineShapley,
-  isBaselineWarming,
 } from "@/lib/hooks/use-live";
 import { PageHeader } from "@/components/ui/page-header";
 import {
@@ -20,6 +20,7 @@ import { fmtBps } from "@/lib/utils/format";
 import { useLocalStorageState } from "@/lib/hooks/use-local-storage";
 import {
   makeSortStateValidator,
+  nextSortState,
   type SortState,
 } from "@/lib/utils/sort-state";
 import {
@@ -58,9 +59,7 @@ export default function ContributorsPage() {
   const { data: topology, isLoading, error, mutate } = useLiveTopology();
   const { data: hub } = useEconomicHub();
   const { data: baseline } = useBaselineShapley();
-  // Warming (202) = not computed yet — treat exactly like "no data yet".
-  const baselineReady =
-    baseline && !isBaselineWarming(baseline) ? baseline : null;
+  const baselineReady = cachedBaseline(baseline);
   const [query, setQuery] = useState("");
   const [sortState, setSortState] = useLocalStorageState(
     "dz.contributors.sort",
@@ -69,13 +68,13 @@ export default function ContributorsPage() {
   );
   const sortKey = sortState.key;
   const sortDir = sortState.dir;
+  // The stored key survives a page that has no live column, so fall back
+  // rather than sorting by a column nobody can see.
+  const effectiveSortKey =
+    sortKey === "live" && !baselineReady ? "alltime" : sortKey;
 
   const toggleSort = (key: SortKey) => {
-    setSortState((prev) =>
-      prev.key === key
-        ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
-        : { key, dir: key === "name" ? "asc" : "desc" },
-    );
+    setSortState((prev) => nextSortState(prev, key, effectiveSortKey, ["name"]));
   };
 
   const enriched = useMemo(() => {
@@ -88,9 +87,9 @@ export default function ContributorsPage() {
     }
     return topology.contributors.map((c) => {
       const rewardPct = ehMap.get(c.code) ?? 0;
-      const livePct = baselineReady?.values?.[c.code]?.share
-        ? baselineReady.values[c.code].share * 100
-        : 0;
+      const livePct = baselineReady
+        ? (baselineReady.values[c.code]?.share ?? 0) * 100
+        : null;
       return { ...c, rewardPct, livePct };
     });
   }, [topology, hub, baselineReady]);
@@ -111,7 +110,7 @@ export default function ContributorsPage() {
     return [...list].sort((a, b) => {
       let av: number | string;
       let bv: number | string;
-      switch (sortKey) {
+      switch (effectiveSortKey) {
         case "name":
           av = getContributorDisplayName(a.code).toLowerCase();
           bv = getContributorDisplayName(b.code).toLowerCase();
@@ -127,14 +126,14 @@ export default function ContributorsPage() {
         case "bandwidth":
           av = a.totalBandwidthBps; bv = b.totalBandwidthBps; break;
         case "live":
-          av = a.livePct; bv = b.livePct; break;
+          av = a.livePct ?? 0; bv = b.livePct ?? 0; break;
         case "alltime":
         default:
           av = a.rewardPct; bv = b.rewardPct; break;
       }
       return ((av as number) - (bv as number)) * dirMul;
     });
-  }, [enriched, query, sortKey, sortDir]);
+  }, [enriched, query, effectiveSortKey, sortDir]);
 
   return (
     <>
@@ -192,7 +191,7 @@ export default function ContributorsPage() {
                     "Metros",
                     "Validators",
                     "Bandwidth (bps)",
-                    "Live Shapley share %",
+                    ...(baselineReady ? ["Live Shapley share %"] : []),
                     "All-time payout share %",
                   ];
                   const rows = filtered.map((c) => [
@@ -203,7 +202,7 @@ export default function ContributorsPage() {
                     c.metros.length,
                     c.validatorCount,
                     c.totalBandwidthBps,
-                    c.livePct.toFixed(6),
+                    ...(c.livePct !== null ? [c.livePct.toFixed(6)] : []),
                     c.rewardPct.toFixed(6),
                   ]);
                   downloadCsv(
@@ -223,14 +222,16 @@ export default function ContributorsPage() {
               <table className="min-w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-surface-2/40 text-xs uppercase tracking-[0.14em] text-muted-foreground font-mono">
-                    <Th align="left" sortKey="name" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}>Contributor</Th>
-                    <Th align="right" className="hidden sm:table-cell" sortKey="devices" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}>Devices</Th>
-                    <Th align="right" sortKey="links" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}>Links</Th>
-                    <Th align="right" className="hidden md:table-cell" sortKey="metros" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}>Metros</Th>
-                    <Th align="right" className="hidden lg:table-cell" sortKey="validators" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}>Validators</Th>
-                    <Th align="right" className="hidden md:table-cell" sortKey="bandwidth" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}>Bandwidth</Th>
-                    <Th align="right" className="hidden lg:table-cell" sortKey="live" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}>Live share</Th>
-                    <Th align="right" sortKey="alltime" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort}>All-time</Th>
+                    <Th align="left" sortKey="name" currentKey={effectiveSortKey} currentDir={sortDir} onSort={toggleSort}>Contributor</Th>
+                    <Th align="right" className="hidden sm:table-cell" sortKey="devices" currentKey={effectiveSortKey} currentDir={sortDir} onSort={toggleSort}>Devices</Th>
+                    <Th align="right" sortKey="links" currentKey={effectiveSortKey} currentDir={sortDir} onSort={toggleSort}>Links</Th>
+                    <Th align="right" className="hidden md:table-cell" sortKey="metros" currentKey={effectiveSortKey} currentDir={sortDir} onSort={toggleSort}>Metros</Th>
+                    <Th align="right" className="hidden lg:table-cell" sortKey="validators" currentKey={effectiveSortKey} currentDir={sortDir} onSort={toggleSort}>Validators</Th>
+                    <Th align="right" className="hidden md:table-cell" sortKey="bandwidth" currentKey={effectiveSortKey} currentDir={sortDir} onSort={toggleSort}>Bandwidth</Th>
+                    {baselineReady !== null && (
+                      <Th align="right" className="hidden lg:table-cell" sortKey="live" currentKey={effectiveSortKey} currentDir={sortDir} onSort={toggleSort}>Live share</Th>
+                    )}
+                    <Th align="right" sortKey="alltime" currentKey={effectiveSortKey} currentDir={sortDir} onSort={toggleSort}>All-time</Th>
                     <Th align="left" className="hidden sm:table-cell">&nbsp;</Th>
                   </tr>
                 </thead>
@@ -274,11 +275,13 @@ export default function ContributorsPage() {
                       <td className="hidden md:table-cell px-3 py-2.5 text-right tabular-nums font-mono">
                         {fmtBps(c.totalBandwidthBps)}
                       </td>
-                      <td className="hidden lg:table-cell px-3 py-2.5 text-right tabular-nums font-mono text-emerald-300/80">
-                        {c.livePct > 0
-                          ? `${c.livePct.toFixed(2)}%`
-                          : "—"}
-                      </td>
+                      {baselineReady !== null && (
+                        <td className="hidden lg:table-cell px-3 py-2.5 text-right tabular-nums font-mono text-emerald-300/80">
+                          {c.livePct !== null && c.livePct > 0
+                            ? `${c.livePct.toFixed(2)}%`
+                            : "—"}
+                        </td>
+                      )}
                       <td className="px-3 py-2.5 text-right tabular-nums font-mono">
                         {c.rewardPct > 0
                           ? `${c.rewardPct.toFixed(2)}%`

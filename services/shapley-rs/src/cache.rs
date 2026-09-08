@@ -5,9 +5,14 @@
 //! the cities they didn't change instead of re-solving every per-city LP.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
 
+use aws_config::timeout::TimeoutConfig;
 use serde::{Deserialize, Serialize};
+
+use crate::model::{BaselineAlias, ShapleyOperatorOut, ShapleyResponse};
 
 /// Cached per-city Shapley values + aggregated baseline for a network topology.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +54,55 @@ impl EpochCache {
     }
 }
 
+/// Build a wire `ShapleyResponse` from a cached baseline result.
+pub(crate) fn response_from_baseline(baseline: &BaselineResult) -> ShapleyResponse {
+    let values: BTreeMap<String, ShapleyOperatorOut> = baseline
+        .values
+        .iter()
+        .map(|(op, oc)| {
+            (
+                op.clone(),
+                ShapleyOperatorOut {
+                    value: oc.value,
+                    share: oc.share,
+                },
+            )
+        })
+        .collect();
+    ShapleyResponse {
+        method: baseline.method.clone(),
+        operator_count: baseline.operator_count,
+        values,
+    }
+}
+
+/// Why an alias read produced no answer. `detail` is for logs only and
+/// never reaches a client.
+#[derive(Debug)]
+pub enum AliasReadError {
+    /// The object store failed the read.
+    Storage {
+        /// Underlying error text, for logs.
+        detail: String,
+    },
+    /// The object exists but is not an alias for the requested tag.
+    Malformed {
+        /// What was wrong, for logs.
+        detail: String,
+    },
+}
+
+impl fmt::Display for AliasReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Storage { .. } => f.write_str("alias store unavailable"),
+            Self::Malformed { .. } => f.write_str("alias is malformed"),
+        }
+    }
+}
+
+impl std::error::Error for AliasReadError {}
+
 /// Compute a deterministic hash of the Shapley input for cache keying.
 ///
 /// Uses JSON serialisation to produce a stable representation, then hashes
@@ -79,8 +133,9 @@ pub fn hash_input(input: &crate::model::ShapleyInputIn) -> u64 {
 /// key on inputs only, NOT the engine version or the serialized shape, so any
 /// change to either MUST bump this prefix — results from an older engine are
 /// then never served for identical inputs. Single-sourced here so all key
-/// builders (`cache_key`, `link_estimate_key`, `simulate_key`,
-/// `sweep_marker_key`, and the `S3CacheRef` mirror) move together on a bump.
+/// builders (`cache_key`, `link_estimate_key`, `link_estimate_alias_key`,
+/// `simulate_key`, `sweep_marker_key`, and the `S3CacheRef` mirror) move
+/// together on a bump.
 ///
 /// Note the hashers are std `DefaultHasher` (not stable across Rust
 /// toolchains): a toolchain change rotates the keyspace, causing a
@@ -88,11 +143,55 @@ pub fn hash_input(input: &crate::model::ShapleyInputIn) -> u64 {
 /// forever-persisted `simulate-`/`link-estimate-` objects (no TTL to age out a
 /// rotated key), but it is a recompute cost, not a correctness risk.
 const CACHE_VERSION_PREFIX: &str = "shapley/v3";
+const PUBLICATION_VERSION_PREFIX: &str = "publication/v1";
+
+/// TCP connect timeout for every S3 client this service builds.
+pub(crate) const S3_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-socket-read timeout. Bounds a body stream that stalls mid-transfer,
+/// which no other timeout covers: a response body is read after the operation
+/// itself has completed.
+pub(crate) const S3_READ_TIMEOUT: Duration = Duration::from_secs(20);
+/// Timeout for one attempt of a request, retried by the SDK.
+pub(crate) const S3_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timeout for a whole request including its retries.
+pub(crate) const S3_OPERATION_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Timeouts for every S3 client in this service. The SDK default bounds the
+/// connect phase alone, so a request over an established but blackholed
+/// connection would otherwise never return, which stalls the diff poller's
+/// loop for good, since one pass must finish before the next tick fires.
+pub(crate) fn s3_timeout_config() -> TimeoutConfig {
+    TimeoutConfig::builder()
+        .connect_timeout(S3_CONNECT_TIMEOUT)
+        .read_timeout(S3_READ_TIMEOUT)
+        .operation_attempt_timeout(S3_ATTEMPT_TIMEOUT)
+        .operation_timeout(S3_OPERATION_TIMEOUT)
+        .build()
+}
 
 /// S3-backed cache for persisting per-city Shapley values across pod restarts.
+#[derive(Clone)]
 pub struct S3Cache {
     client: aws_sdk_s3::Client,
     bucket: String,
+}
+
+/// Where the result behind an alias currently lives. An `Unpersisted` result
+/// is written to S3 before its alias, so an alias never points at nothing.
+pub(crate) enum PublicationSource<'a> {
+    /// Already read back from S3.
+    Persisted(&'a crate::model::LinkEstimateResponse),
+    /// Freshly solved, or recovered from the Redis result cache.
+    Unpersisted(&'a crate::model::LinkEstimateResponse),
+}
+
+impl From<S3CacheRef> for S3Cache {
+    fn from(cache: S3CacheRef) -> Self {
+        Self {
+            client: cache.client,
+            bucket: cache.bucket,
+        }
+    }
 }
 
 impl S3Cache {
@@ -116,6 +215,7 @@ impl S3Cache {
 
         let shared = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_sdk_s3::config::Region::new(region))
+            .timeout_config(s3_timeout_config())
             .load()
             .await;
 
@@ -137,7 +237,7 @@ impl S3Cache {
     /// the prefix so results computed by an older engine are never served as
     /// valid for identical inputs.
     fn cache_key(input_hash: u64) -> String {
-        format!("{CACHE_VERSION_PREFIX}/cache-{input_hash:016x}.bin")
+        S3CacheRef::cache_key(input_hash)
     }
 
     /// Load a cached epoch from S3, if it exists and deserialises cleanly.
@@ -179,12 +279,118 @@ impl S3Cache {
 
     /// Persist a cache epoch to S3. Errors are logged but never fatal.
     pub async fn store(&self, cache: &EpochCache) {
+        self.handle().store(cache).await;
+    }
+
+    /// Awaited persistence of a baseline, for callers that must know the result
+    /// is durable before pointing an alias at it.
+    pub(crate) async fn persist_baseline(&self, cache: &EpochCache) -> anyhow::Result<()> {
+        self.handle().try_store(cache).await
+    }
+
+    // The fixed prefix keeps this key space apart from link-estimate aliases
+    // built from the same tag; callers reject NUL in the tag.
+    fn baseline_alias_key(tag: &str) -> String {
+        let hash = crate::queue::hash_payload(&format!("baseline\u{0}{tag}"));
+        format!(
+            "{CACHE_VERSION_PREFIX}/{PUBLICATION_VERSION_PREFIX}/baseline-alias-{hash:016x}.json"
+        )
+    }
+
+    /// Publish the baseline in `cache` under `tag`, after the result itself is
+    /// durable. The cache object is always re-put: a memory hit does not prove
+    /// the detached store ever landed.
+    pub(crate) async fn publish_baseline(
+        &self,
+        tag: &str,
+        cache: &EpochCache,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
+        anyhow::ensure!(!tag.contains('\0'), "invalid alias key");
+        let baseline = cache
+            .baseline_values
+            .as_ref()
+            .context("epoch cache has no baseline")?;
+        self.persist_baseline(cache).await?;
+        let alias = BaselineAlias {
+            tag: tag.to_owned(),
+            input_hash: format!("{:016x}", cache.input_hash),
+            result: response_from_baseline(baseline),
+        };
+        self.store_baseline_alias(&alias).await
+    }
+
+    async fn store_baseline_alias(&self, alias: &BaselineAlias) -> anyhow::Result<()> {
+        use anyhow::Context;
+        let body = serde_json::to_vec(alias).context("serialize baseline alias")?;
+        let key = Self::baseline_alias_key(&alias.tag);
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .content_type("application/json")
+            .body(body.into())
+            .send()
+            .await
+            .context("persist baseline alias")?;
+        tracing::info!(%key, tag = %alias.tag, "stored baseline alias");
+        Ok(())
+    }
+
+    /// The published baseline for `tag`. `Ok(None)` is an ordinary miss. A
+    /// storage failure is an error, because the probe route must tell "not
+    /// cached" from "store down".
+    pub async fn load_baseline_alias(
+        &self,
+        tag: &str,
+    ) -> Result<Option<BaselineAlias>, AliasReadError> {
+        let key = Self::baseline_alias_key(tag);
+        let response = match self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) if e.as_service_error().is_some_and(|se| se.is_no_such_key()) => {
+                tracing::debug!(%key, "no baseline alias in S3");
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(AliasReadError::Storage {
+                    detail: format!("{e:?}"),
+                });
+            }
+        };
+        let bytes = response
+            .body
+            .collect()
+            .await
+            .map_err(|e| AliasReadError::Storage {
+                detail: format!("{e:?}"),
+            })?
+            .into_bytes();
+        let alias: BaselineAlias =
+            serde_json::from_slice(&bytes).map_err(|e| AliasReadError::Malformed {
+                detail: format!("{key}: {e}"),
+            })?;
+        if alias.tag != tag {
+            return Err(AliasReadError::Malformed {
+                detail: format!("{key}: stored tag {:?} differs from request", alias.tag),
+            });
+        }
+        Ok(Some(alias))
+    }
+
+    /// Clone of the client and bucket as a `Send + 'static` handle, so other
+    /// S3-backed stores can share the configured connection.
+    pub fn handle(&self) -> S3CacheRef {
         S3CacheRef {
             client: self.client.clone(),
             bucket: self.bucket.clone(),
         }
-        .store(cache)
-        .await;
     }
 
     /// Borrow the bucket name for spawned tasks.
@@ -245,42 +451,176 @@ impl S3Cache {
         }
     }
 
-    /// Persist a link-estimate result to S3 in the background. Best-effort:
-    /// failures are logged loudly but never fail the compute that produced the
-    /// result (the Redis result cache still covers the next hour either way).
+    /// Best-effort background persistence of a finished link estimate. A
+    /// failure is logged and never fails the compute that produced it.
     pub fn store_link_estimate(
         &self,
         payload_hash: u64,
         resp: &crate::model::LinkEstimateResponse,
     ) {
-        let key = Self::link_estimate_key(payload_hash);
         let bytes = match bincode::serialize(resp) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to serialise link-estimate");
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::error!(%error, "failed to serialize link estimate");
                 return;
             }
         };
-        let client = self.client.clone();
-        let bucket = self.bucket.clone();
+        let cache = self.clone();
         tokio::spawn(async move {
-            let size = bytes.len();
-            match client
-                .put_object()
-                .bucket(&bucket)
-                .key(&key)
-                .body(bytes.into())
-                .send()
-                .await
-            {
-                Ok(_) => {
-                    tracing::info!(%key, size_bytes = size, "stored link-estimate to S3")
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, %key, "failed to store link-estimate to S3")
-                }
+            if let Err(error) = cache.put_link_estimate_bytes(payload_hash, bytes).await {
+                tracing::error!(%error, "failed to persist link estimate");
             }
         });
+    }
+
+    /// Awaited persistence of a finished link estimate, for callers that must
+    /// know the result is durable before pointing an alias at it.
+    pub(crate) async fn persist_link_estimate(
+        &self,
+        payload_hash: u64,
+        resp: &crate::model::LinkEstimateResponse,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
+        let bytes = bincode::serialize(resp).context("serialize link estimate")?;
+        self.put_link_estimate_bytes(payload_hash, bytes).await
+    }
+
+    async fn put_link_estimate_bytes(
+        &self,
+        payload_hash: u64,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(Self::link_estimate_key(payload_hash))
+            .body(bytes.into())
+            .send()
+            .await
+            .context("persist link estimate result")?;
+        Ok(())
+    }
+
+    /// Publishes only after the referenced result is durable.
+    pub(crate) async fn publish_link_estimate(
+        &self,
+        tag: &str,
+        focus: &str,
+        payload_hash: u64,
+        source: PublicationSource<'_>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !tag.contains('\0') && !focus.contains('\0'),
+            "invalid alias key"
+        );
+        let (result, is_persisted) = match source {
+            PublicationSource::Persisted(result) => (result, true),
+            PublicationSource::Unpersisted(result) => (result, false),
+        };
+        anyhow::ensure!(
+            result.operator_focus == focus,
+            "cached result has a different operator focus"
+        );
+        if !is_persisted {
+            self.persist_link_estimate(payload_hash, result).await?;
+        }
+        self.store_link_estimate_alias(tag, focus, payload_hash)
+            .await
+    }
+
+    // NUL separates tag and focus; callers reject NUL in either value.
+    fn link_estimate_alias_key(tag: &str, focus: &str) -> String {
+        let hash = crate::queue::hash_payload(&format!("{tag}\u{0}{focus}"));
+        format!(
+            "{CACHE_VERSION_PREFIX}/{PUBLICATION_VERSION_PREFIX}/link-estimate-alias-{hash:016x}.json"
+        )
+    }
+
+    async fn store_link_estimate_alias(
+        &self,
+        tag: &str,
+        focus: &str,
+        payload_hash: u64,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
+        let body = serde_json::json!({ "payloadHash": format!("{payload_hash:016x}") }).to_string();
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(Self::link_estimate_alias_key(tag, focus))
+            .content_type("application/json")
+            .body(body.into_bytes().into())
+            .send()
+            .await
+            .context("persist link estimate alias")?;
+        Ok(())
+    }
+
+    /// The payload hash recorded for `(tag, focus)`, if any. `Ok(None)` is an
+    /// ordinary miss and sends the caller down the rebuild-from-snapshot path.
+    /// A malformed object is an error the sweep rewrites; a storage failure is
+    /// an outage and must not look like a miss.
+    pub async fn load_link_estimate_alias(
+        &self,
+        tag: &str,
+        focus: &str,
+    ) -> Result<Option<u64>, AliasReadError> {
+        let key = Self::link_estimate_alias_key(tag, focus);
+        let response = match self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) if e.as_service_error().is_some_and(|se| se.is_no_such_key()) => {
+                tracing::debug!(%key, "no link-estimate alias in S3");
+                return Ok(None);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, %key, "link-estimate alias read failed");
+                return Err(AliasReadError::Storage {
+                    detail: format!("{e:?}"),
+                });
+            }
+        };
+        let bytes = response
+            .body
+            .collect()
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, %key, "link-estimate alias body read failed");
+                AliasReadError::Storage {
+                    detail: format!("{e:?}"),
+                }
+            })?
+            .into_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            tracing::warn!(error = %e, %key, "link-estimate alias is not JSON");
+            AliasReadError::Malformed {
+                detail: format!("{key}: {e}"),
+            }
+        })?;
+        let hex = parsed
+            .get("payloadHash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                tracing::warn!(%key, "link-estimate alias has no payloadHash");
+                AliasReadError::Malformed {
+                    detail: format!("{key}: no payloadHash string"),
+                }
+            })?;
+        u64::from_str_radix(hex, 16)
+            .map_err(|e| {
+                tracing::warn!(error = %e, %key, hex, "link-estimate alias hash is not hex");
+                AliasReadError::Malformed {
+                    detail: format!("{key}: hash {hex:?} is not hex"),
+                }
+            })
+            .map(Some)
     }
 
     /// Derive the S3 object key for a cached simulate (what-if) result.
@@ -390,7 +730,7 @@ impl S3Cache {
     /// stored INSIDE the marker object for debuggability.
     fn sweep_marker_key(tag: &str) -> String {
         let hash = crate::queue::hash_payload(tag);
-        format!("{CACHE_VERSION_PREFIX}/sweep-marker-{hash:016x}.json")
+        format!("{CACHE_VERSION_PREFIX}/{PUBLICATION_VERSION_PREFIX}/sweep-marker-{hash:016x}.json")
     }
 
     /// Whether the "fully swept" marker exists for this tag (epoch inputs are
@@ -453,41 +793,54 @@ pub struct S3CacheRef {
 }
 
 impl S3CacheRef {
-    // Keep in lockstep with `S3Cache::cache_key` (shares [`CACHE_VERSION_PREFIX`];
-    // per-city layout + linear-uptime engine).
+    /// The one builder for the baseline result key (per-city layout +
+    /// linear-uptime engine under [`CACHE_VERSION_PREFIX`]).
     fn cache_key(input_hash: u64) -> String {
         format!("{CACHE_VERSION_PREFIX}/cache-{input_hash:016x}.bin")
     }
 
-    pub async fn store(&self, cache: &EpochCache) {
+    /// Persist an epoch cache and report the failure to the caller.
+    pub(crate) async fn try_store(&self, cache: &EpochCache) -> anyhow::Result<()> {
+        use anyhow::Context;
         let key = Self::cache_key(cache.input_hash);
-        let bytes = match bincode::serialize(cache) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to serialise cache");
-                return;
-            }
-        };
-
+        let bytes = bincode::serialize(cache).context("serialise cache")?;
         let size = bytes.len();
-        match self
-            .client
+        self.client
             .put_object()
             .bucket(&self.bucket)
             .key(&key)
             .body(bytes.into())
             .send()
             .await
-        {
-            Ok(_) => tracing::info!(%key, size_bytes = size, "stored cache to S3"),
-            Err(e) => tracing::error!(error = %e, "failed to store cache to S3"),
+            .context("store cache to S3")?;
+        tracing::info!(%key, size_bytes = size, "stored cache to S3");
+        Ok(())
+    }
+
+    /// Best-effort persistence; logs and never fails the compute that produced it.
+    pub async fn store(&self, cache: &EpochCache) {
+        if let Err(error) = self.try_store(cache).await {
+            tracing::error!(%error, "failed to store cache to S3");
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::S3Cache;
+    use super::*;
+
+    #[test]
+    fn publication_metadata_uses_a_new_namespace_without_rotating_results() {
+        assert_eq!(
+            S3Cache::link_estimate_key(42),
+            "shapley/v3/link-estimate-000000000000002a.bin"
+        );
+        assert!(
+            S3Cache::link_estimate_alias_key("tag", "focus")
+                .starts_with("shapley/v3/publication/v1/")
+        );
+        assert!(S3Cache::sweep_marker_key("tag").starts_with("shapley/v3/publication/v1/"));
+    }
 
     #[test]
     fn simulate_key_is_zero_padded_hex_under_v3_json() {
@@ -495,5 +848,111 @@ mod tests {
             S3Cache::simulate_key(0xdead_beef),
             "shapley/v3/simulate-00000000deadbeef.json"
         );
+    }
+
+    #[test]
+    fn s3_timeout_config_bounds_reads_and_whole_operations() {
+        let config = s3_timeout_config();
+        assert_eq!(config.connect_timeout(), Some(S3_CONNECT_TIMEOUT));
+        assert_eq!(config.read_timeout(), Some(S3_READ_TIMEOUT));
+        assert_eq!(config.operation_attempt_timeout(), Some(S3_ATTEMPT_TIMEOUT));
+        assert_eq!(config.operation_timeout(), Some(S3_OPERATION_TIMEOUT));
+        assert!(S3_ATTEMPT_TIMEOUT <= S3_OPERATION_TIMEOUT);
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    #[test]
+    fn alias_key_is_stable_and_separates_its_two_parts() {
+        let key = S3Cache::link_estimate_alias_key("epoch-211:canonical-v1:9f2c", "tsw");
+        assert_eq!(
+            key,
+            S3Cache::link_estimate_alias_key("epoch-211:canonical-v1:9f2c", "tsw"),
+            "same pair, same key"
+        );
+        assert!(key.starts_with(CACHE_VERSION_PREFIX));
+        assert!(key.contains("link-estimate-alias-"));
+    }
+
+    #[test]
+    fn alias_key_changes_when_either_part_changes() {
+        let base = S3Cache::link_estimate_alias_key("epoch-211:v1:aa", "tsw");
+        assert_ne!(
+            base,
+            S3Cache::link_estimate_alias_key("epoch-211:v1:aa", "xyz")
+        );
+        assert_ne!(
+            base,
+            S3Cache::link_estimate_alias_key("epoch-212:v1:aa", "tsw")
+        );
+        // The fingerprint is the guard against a parameter flip resolving to a
+        // pre-flip result, so it must reach the key.
+        assert_ne!(
+            base,
+            S3Cache::link_estimate_alias_key("epoch-211:v1:bb", "tsw")
+        );
+    }
+
+    #[test]
+    fn a_nul_separator_stops_the_two_parts_from_running_together() {
+        // With a ":" separator these two would hash the same string.
+        assert_ne!(
+            S3Cache::link_estimate_alias_key("epoch-1:v", "a"),
+            S3Cache::link_estimate_alias_key("epoch-1", "v:a")
+        );
+    }
+
+    #[test]
+    fn alias_keys_cannot_collide_with_the_result_keys_they_point_at() {
+        let alias = S3Cache::link_estimate_alias_key("epoch-211:v1", "tsw");
+        for hash in [0u64, 1, u64::MAX, 0x9f2c_1234_5678_90ab] {
+            assert_ne!(alias, S3Cache::link_estimate_key(hash));
+            assert_ne!(alias, S3Cache::simulate_key(hash));
+            assert_ne!(alias, S3Cache::cache_key(hash));
+        }
+    }
+}
+
+#[cfg(test)]
+mod baseline_alias_tests {
+    use super::*;
+
+    #[test]
+    fn baseline_alias_key_is_under_the_publication_prefix() {
+        let key = S3Cache::baseline_alias_key("baseline:epoch-211:canonical-v1:9f2c");
+        assert!(key.starts_with("shapley/v3/publication/v1/baseline-alias-"));
+        assert!(key.ends_with(".json"));
+    }
+
+    #[test]
+    fn baseline_alias_key_differs_from_the_link_estimate_alias_of_the_same_tag() {
+        let tag = "epoch-211:canonical-v1:9f2c";
+        assert_ne!(
+            S3Cache::baseline_alias_key(tag),
+            S3Cache::link_estimate_alias_key(tag, "")
+        );
+        assert_ne!(
+            S3Cache::baseline_alias_key(tag),
+            S3Cache::sweep_marker_key(tag)
+        );
+        assert_ne!(
+            S3Cache::baseline_alias_key("epoch-210:v1:a"),
+            S3Cache::baseline_alias_key("epoch-211:v1:a")
+        );
+    }
+
+    #[test]
+    fn alias_read_error_detail_stays_out_of_display() {
+        let error = AliasReadError::Storage {
+            detail: "http://gateway.internal:7480 refused".into(),
+        };
+        assert_eq!(error.to_string(), "alias store unavailable");
+        let error = AliasReadError::Malformed {
+            detail: "key: stored tag differs".into(),
+        };
+        assert_eq!(error.to_string(), "alias is malformed");
     }
 }

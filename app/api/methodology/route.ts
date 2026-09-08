@@ -147,7 +147,9 @@ export async function GET() {
         expression:
           "max sum_d demand_satisfied(d) - contiguity_penalty subject to per-link bandwidth, uptime, multicast",
         notes:
-          "Implemented in network-shapley-rs. The TS fallback uses bandwidth-aware greedy demand packing.",
+          "Implemented in network-shapley-rs. A request never triggers a solve: " +
+          "when the cron has not published the epoch, the route answers " +
+          "404 {\"status\":\"not-cached\"} and the widget is not shown.",
       },
       shapley_value: {
         description: "Marginal contribution of an operator across all coalitions.",

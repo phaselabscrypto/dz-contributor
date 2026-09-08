@@ -12,33 +12,23 @@ The frontend auto-deploys on every push to `main` via Vercel's GitHub integratio
 
 ### Cron jobs
 
-Three cron schedules are defined in `vercel.json`:
+Two cron schedules are defined in `vercel.json`:
 
 | Path | Schedule | Purpose |
 |------|----------|---------|
 | `/api/health` | `*/15 * * * *` (every 15 min) | Keep the function instance warm; also used by the `/status` page |
-| `/api/link-value/precompute` | `0 */6 * * *` (every 6 hours) | Cache-warming sweep for the latest epoch |
-| `/api/shapley/precompute` | `30 */6 * * *` (every 6 hours, offset 30 min) | Warm the latest epoch's baseline so `/api/shapley/baseline` serves cache hits |
+| `/api/link-value/precompute` | `0 */6 * * *` (every 6 hours) | Sweep, baseline alias and diff shape for the latest epoch, from one snapshot download |
 
 ### Precompute cron (`/api/link-value/precompute`)
 
 Implemented in `app/api/link-value/precompute/route.ts`. Key behaviors:
 
 - **Auth:** Vercel sends `Authorization: Bearer ${CRON_SECRET}` on cron invocations when `CRON_SECRET` is set. The handler checks this with a constant-time comparison (`timingSafeEqual` from `node:crypto`; the equal-length pre-check it requires reveals only token length, never content). If `CRON_SECRET` is unset the route returns `503`; a header mismatch returns `401`. Manual backfill is possible by passing `?epoch=N` with a valid bearer token.
-- **Idempotency:** Before fetching the snapshot, the handler checks the S3 "fully swept" marker via the Shapley service. If the marker is present, it returns `{ status: "already-swept" }` in under 2 s without touching the snapshot. Idempotent end-to-end: the sweep skips S3-cached contributors and attaches to in-flight duplicates.
-- **What it enqueues:** If the marker is absent, the handler fetches the ~70 MB epoch snapshot, builds the canonical Shapley input (same key derivation as the UI flow so cache keys align), enqueues one sweep job on the Rust service (`202 {job_id}`), and also enqueues a baseline precompute for the what-if simulator. Enqueued children run on the worker pool, not inside this function.
-- **`maxDuration = 300`:** The snapshot fetch + parse measured 7–27 s locally. Vercel's default function duration would kill the cron mid-parse; 300 s gives headroom for the worst-case download while keeping the actual enqueue sub-second. See the comment in `app/api/link-value/precompute/route.ts`.
-- **Error handling:** A `404` is returned when the epoch's snapshot does not exist upstream; other snapshot/upstream failures return `502`; a generic `500` covers everything else (raw error messages are not surfaced to avoid leaking the internal service host).
-
-### Precompute cron (`/api/shapley/precompute`)
-
-Implemented in `app/api/shapley/precompute/route.ts`. Warms the latest epoch's **baseline** (per-city Shapley) so `/api/shapley/baseline` and `/api/shapley?epoch=N` serve cache hits instead of triggering a cold synchronous solve inside a user request.
-
-- **Auth:** same `CRON_SECRET` bearer check as the link-value cron (shared helper `lib/utils/cron-auth.ts`, constant-time compare). Unset secret → `503`; mismatch → `401`. Rate-limited per IP before the auth check. Manual backfill: `?epoch=N` with a valid bearer token.
-- **What it enqueues:** builds the same canonical input the compute routes build, then `POST {service}/precompute` — the Rust service answers `200 {status: "already-cached"}` (input-hash hit) or `202 {status: "accepted", job_id}` and the solve runs on the worker pool. Idempotent per input hash. When the primary input came from the foundation CSVs, the cron ALSO warms the snapshot-built variant (`snapshotVariant` in the response): the two hash to different service cache keys, and the simulate/jobs routes (plus the foundation-fetch-failure fallback) build the snapshot variant.
-- **Status codes:** `422` when the epoch's snapshot only supports the heuristic builder (no `city_weights` — cannot warm); `404` when the snapshot doesn't exist; a `JobStartError` from the service passes its upstream status through (e.g. the service's `503` = async jobs disabled); other failures → `502`. Outcomes are logged (`[shapley/precompute] epoch=… status=…`) so a stuck cron is visible in Vercel logs.
-- **`maxDuration = 300`:** same rationale as the link-value cron (snapshot fetch + parse dominate; the enqueue is sub-second).
-- **Relation to the baseline route's 202:** while the latest epoch is not yet warmed, `/api/shapley/baseline` responds `202 {status: "warming", …}`. The service finishes a router-cut synchronous solve in a detached task (the result still lands in memory + S3 — `services/shapley-rs/src/routes.rs`, `shapley` handler), so warming self-heals on a later request; this cron remains the proactive warmer so user requests are cache hits in the first place. Sustained warming responses therefore mean both the cron AND self-heal are broken (or the service can't store at all) — check the Vercel cron logs and the service logs together.
+- **Idempotency:** Before fetching the snapshot, the handler reads three things from the Shapley service: the S3 "fully swept" marker, the epoch's baseline alias (`GET /shapley/baseline?tag=`) and the missing-shape list. If all three are satisfied, it returns `sweep: "already-swept"` without fetching snapshots. Idempotent end-to-end: the sweep skips S3-cached contributors and attaches to in-flight duplicates, and the service aliases a cached baseline without a solve.
+- **What it enqueues:** The handler fetches the ~110 MB epoch snapshot once and builds the canonical Shapley input from it. When the marker is absent it enqueues one sweep job on the Rust service (`202 {job_id}`), then `POST {service}/precompute/baseline` with `{input, tag}` (both tokens), where `tag = baselineTag(epoch)` from `lib/utils/sweep-tag.ts`; the worker solves or loads the baseline, persists it, then writes the epoch alias that `/api/shapley/baseline`, `/api/shapley?epoch=N` and `/api/shapley/tracking` read. Those routes never compute. When the epoch is already swept but has no alias, the fire publishes only the alias from the same download. Enqueued children run on the worker pool, not inside this function.
+- **Relation to the baseline route's 404:** until a fire has published the epoch, `/api/shapley/baseline` answers `404 {status: "not-cached", epoch, tag}` and the widget is not shown. Nothing self-heals on a user request, because no reader computes. Sustained `baseline-not-cached` events for the latest epoch mean this cron or the worker is broken; check the cron logs and the service logs together.
+- **`maxDuration = 300`:** The snapshot fetch + parse measured 7–27 s locally. Vercel's default function duration would kill the cron mid-parse; 300 s gives headroom for the worst-case download while keeping the actual enqueue sub-second. Work stops at 270 s (`CRON_WORK_TIMEOUT_MS` in `lib/utils/precompute-ingest.ts`) so the response is written before the limit.
+- **Error handling:** `400` for an invalid `?epoch`; `404` when the epoch's snapshot does not exist upstream; `422` when the snapshot fails validation or names another epoch, or the Shapley input cannot be built; `504` when the work budget is exhausted; other upstream failures return `502`. Historical repair failures never change the status. Each failed phase is listed under `errors`, and no response body carries a raw upstream message or the internal service host.
 
 ---
 
@@ -59,6 +49,44 @@ docker run --env-file .env dz-shapley-service worker
 ```
 
 Run one or more `api` replicas behind a load balancer and one or more `worker` replicas consuming from the shared Redis stream. The job queue design and horizontal scaling rationale are documented in [adr/0001-async-compute-queue.md](adr/0001-async-compute-queue.md).
+
+The `worker` role no longer ingests snapshots. Diff records are written by the Vercel cron (`/api/link-value/precompute`), which already downloads each epoch's snapshot for the Shapley sweep, and arrive over `PUT /diff/shape/:epoch`. The service therefore needs NO egress to the public snapshot bucket; it reaches only Redis and the object gateway. See [shapley-service.md](shapley-service.md#snapshot-diff-index) and [adr/0003-cron-side-snapshot-extraction.md](adr/0003-cron-side-snapshot-extraction.md).
+
+### Backfilling the diff index
+
+The cron repairs the last 31 epochs on every fire, which is the window the changelog selector offers. Deeper history is a one-off from a workstation:
+
+```bash
+pnpm run backfill:diff -- --dry-run     # report what is missing
+pnpm run backfill:diff                  # fill it, newest first
+```
+
+It needs `SHAPLEY_SERVICE_URL`, `SHAPLEY_API_TOKEN` and `SHAPLEY_INGEST_TOKEN`. Each epoch is a ~110 MB download, so the full history is a few hours. Safe to interrupt and re-run: writes are create-only, so an epoch already stored answers `409` and is counted as done. Run it after the first deploy and after any `DIFF_SHAPE_VERSION_PREFIX` bump.
+
+### Backfilling baseline aliases
+
+An epoch's alias exists only once the cron has fired for it, so after the first
+deploy the historical epochs have none. Publish them from a workstation:
+
+```bash
+for e in $(seq 196 211); do
+  curl -sS -H "Authorization: Bearer $CRON_SECRET" \
+    "$BASE_URL/api/link-value/precompute?epoch=$e"
+done
+```
+
+Each fire downloads that epoch's snapshot once to build the input. An epoch
+whose result is already in the service's input-hash cache is aliased without a
+solve. Watch the `baseline-not-cached` events fall to zero for the latest epoch.
+
+### Clearing a bad diff shape
+
+A persisted shape is trusted for the life of the process: `DiffStore` keeps
+every shape it has read in memory with no TTL, so deleting
+`diff/v1/shape-{epoch:06}.json` from the result-cache bucket does not clear it
+from a running `api` pod. To retire a shape, delete the object and restart the
+pods that hold it, or bump `DIFF_SHAPE_VERSION_PREFIX` and refill when every
+shape is suspect.
 
 ### REDIS_URL
 
@@ -84,6 +112,8 @@ Set `S3_CACHE_BUCKET` to enable. When `S3_CACHE_ENDPOINT` is also set, the clien
 
 After deploying the service, set the frontend's `SHAPLEY_SERVICE_URL` to the service base URL and `SHAPLEY_API_TOKEN` to the matching token.
 
+The frontend's `/api/diff` and `/api/diff/contributor/[code]` routes are thin proxies to the service's `/diff*` endpoints and have no local fallback. They return `503 { "error": "diff service not configured" }` when `SHAPLEY_SERVICE_URL` is unset. Deploy and verify the service before merging a frontend change that depends on it.
+
 ---
 
 ## 3. Environment variables — frontend (Next.js)
@@ -92,10 +122,10 @@ Consumed by the Next.js server-side code. Set via `vercel env add <NAME> product
 
 | Variable | Default | Effect | Behavior when unset |
 |---|---|---|---|
-| `SHAPLEY_SERVICE_URL` | — | Base URL of the Rust Shapley microservice. Validated at module load (`lib/constants/config.ts`); must be `http://` or `https://`. Trailing slashes and known endpoint suffixes are stripped. | Falls back to the in-process TypeScript coalition-enumeration solver (directionally correct, not bit-comparable to Foundation output). Responses are labeled `local-ts-heuristic-DEV-ONLY`. |
+| `SHAPLEY_SERVICE_URL` | — | Base URL of the Rust Shapley microservice. Validated at module load (`lib/constants/config.ts`); must be `http://` or `https://`. Trailing slashes and known endpoint suffixes are stripped. | Every Shapley route and every `/api/diff*` route returns `503`. There is no in-process fallback solver. |
 | `PYTHON_SHAPLEY_URL` | — | Legacy alias for `SHAPLEY_SERVICE_URL` (previous Python deployment). Checked in `lib/constants/config.ts` only when `SHAPLEY_SERVICE_URL` is unset. | Same as `SHAPLEY_SERVICE_URL` unset. |
 | `SHAPLEY_API_TOKEN` | — | Bearer token sent by the frontend to the Rust service (`lib/utils/shapley-remote.ts`). Never exposed to the browser. | Requests to the Rust service are sent without an `Authorization` header. If the service is configured fail-closed (no `SHAPLEY_ALLOW_UNAUTHENTICATED=1`), all compute calls return `401`. |
-| `DZ_CANONICAL_INPUTS_URL` | — | URL template (with `{N}` epoch placeholder) for Foundation-published canonical Shapley input CSVs. Described in `.env.example`. | Falls back to S3 snapshot-derived inputs. |
+| `SHAPLEY_INGEST_TOKEN` | — | Second token the cron sends as `X-Ingest-Token` when writing a diff record, publishing a baseline, or submitting a sweep. Must match the service's value. Never exposed to the browser. | Shape writes, baseline publishes and sweep submissions fail locally with `503` and are reported per fire. |
 | `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana mainnet RPC endpoint used by on-chain routes (`lib/onchain/program-ids.ts`). The public default is rate-limited; a dedicated provider (e.g. Helius) is recommended for production. | Uses the public Solana mainnet RPC. |
 | `DZ_LEDGER_RPC_URL` | — | RPC endpoint for the DoubleZero ledger (a Solana sidechain). Required for any `/api/onchain/*` route. No default in code — a previous default embedded a paid API key in source. | On-chain routes that need the DZ ledger will fail; `ONCHAIN_ENABLED` gates whether they are attempted. |
 | `DZ_REGISTRY_PROGRAM_ID` | `""` | DZ master registry program (Metro/Device/Link/Contributor accounts). Pending DZ Foundation IDL. Setting this implicitly enables `ONCHAIN_ENABLED` (`lib/onchain/program-ids.ts`). | On-chain routes return 503. |
@@ -105,7 +135,7 @@ Consumed by the Next.js server-side code. Set via `vercel env add <NAME> product
 | `DZ_CONTRIBUTOR_REWARDS_PREFIX` | `dz_contributor_rewards` | Seed prefix for deriving each epoch's reward record address. Confirmed by DZ Foundation 2026-05-14. Default hardcoded in the record module. | Uses the hardcoded default. |
 | `ONCHAIN_ENABLED` | unset (effectively disabled) | Master switch for `/api/onchain/*` routes. Derived in `lib/onchain/program-ids.ts` as `Boolean(DZ_REGISTRY_PROGRAM_ID) \|\| process.env.ONCHAIN_ENABLED === "1"` — only the literal string `"1"` enables it; setting `DZ_REGISTRY_PROGRAM_ID` enables it implicitly. | On-chain routes return 503 with a stable error shape. |
 | `DZ_ACCOUNT_HAS_DISCRIMINATOR` | `"1"` | Whether on-chain accounts carry an 8-byte Anchor discriminator prefix before the borsh payload. Set to `"0"` for raw borsh structs. | Assumes discriminator present (strip 8 bytes before decode). |
-| `CRON_SECRET` | — | Secret Vercel injects into cron invocations as `Authorization: Bearer ${CRON_SECRET}`. Required for BOTH precompute crons (`/api/link-value/precompute`, `/api/shapley/precompute`); checked with the shared constant-time helper in `lib/utils/cron-auth.ts`. | Both precompute routes return `503 { "error": "CRON_SECRET not configured" }` on every invocation, disabling cache warming — the baseline route then answers `202 warming` until a manual backfill. |
+| `CRON_SECRET` | — | Secret Vercel injects into cron invocations as `Authorization: Bearer ${CRON_SECRET}`. Required for the precompute cron (`/api/link-value/precompute`); checked with the shared constant-time helper in `lib/utils/cron-auth.ts`. | The precompute route returns `503 { "error": "CRON_SECRET not configured" }` on every invocation, so no epoch is ever swept or published, and the baseline route answers `404 not-cached` until a manual backfill. |
 | `NEXT_PUBLIC_SITE_URL` | `https://dz-contributor.vercel.app` | Used by `app/layout.tsx` for `metadataBase` and OG image canonical URLs. | Falls back to the Vercel project default URL. |
 | `NEXT_PUBLIC_SENTRY_DSN` | — | Sentry DSN for error tracking. The SDK calls in `lib/observability.ts` are no-ops until activated. | Errors log to console in dev; swallowed in production. |
 
@@ -113,7 +143,7 @@ Consumed by the Next.js server-side code. Set via `vercel env add <NAME> product
 
 ## 4. Environment variables — shapley service
 
-Consumed by `services/shapley-rs/src/main.rs`, `src/cache.rs`, and `src/jobs.rs`.
+Consumed by `services/shapley-rs/src/main.rs`, `src/cache.rs`, `src/jobs.rs`, and `src/diff_store.rs`.
 
 | Variable | Default | Effect | Behavior when unset |
 |---|---|---|---|
@@ -123,11 +153,12 @@ Consumed by `services/shapley-rs/src/main.rs`, `src/cache.rs`, and `src/jobs.rs`
 | `SHAPLEY_ALLOW_UNAUTHENTICATED` | — | Set to `"1"` to serve compute endpoints without a token. Intended for local development only; a warning is logged at startup. | Compute endpoints require `SHAPLEY_API_TOKEN` (or are not mounted if neither is set). |
 | `CORS_ORIGIN` | — | Restrict cross-origin requests to a single allowed origin (e.g. `https://your-app.example.com`). `main.rs` `build_cors()`. | No cross-origin requests are allowed (same-origin only). The frontend reaches the service server-side so CORS does not affect it. |
 | `REDIS_URL` | — | Connection URL for the Redis job store (`jobs::store_from_env()`). Pool size 16, 5 s wait timeout. | `/jobs/*` endpoints return `503`. Worker role exits immediately on startup. |
-| `S3_CACHE_BUCKET` | — | Bucket name for the S3-compatible result cache (`cache::S3Cache::new()`). | Cache layer is a no-op; results are not persisted across restarts. |
+| `S3_CACHE_BUCKET` | — | Bucket name for the S3-compatible result cache (`cache::S3Cache::new()`). Also holds the `diff/v1/` snapshot diff index. | Cache layer is a no-op; results are not persisted across restarts. Diff writes and repair discovery return 503; no public-bucket rebuild runs. |
 | `S3_CACHE_ENDPOINT` | — | Custom endpoint URL for an S3-compatible object store. When set, the client uses path-style addressing (`force_path_style = true`). | AWS S3 is used with virtual-host addressing (standard back-compat mode). |
 | `AWS_REGION` | `us-east-1` | AWS region for the S3 client (`cache.rs`). | Defaults to `us-east-1`. |
 | `AWS_ACCESS_KEY_ID` | — | S3 credentials via the standard AWS SDK credential chain. | SDK falls back to IAM role / instance metadata / env chain. Required when not running on AWS infrastructure with attached roles. |
 | `AWS_SECRET_ACCESS_KEY` | — | Paired with `AWS_ACCESS_KEY_ID`. | See above. |
+| `SHAPLEY_INGEST_TOKEN` | — | Second bearer token, required ON TOP of `SHAPLEY_API_TOKEN` on `PUT /diff/shape/:epoch`, `POST /precompute/link-estimates` and `POST /precompute/baseline`, sent as `X-Ingest-Token`. Constant-time comparison in `main.rs` `require_ingest_auth`. | Ingest and trusted-sweep routes answer `503`. Reads keep working. Unlike the compute token, unset does NOT mean open. |
 
 ---
 
@@ -144,6 +175,7 @@ Triggers on push to `main` and on pull requests, with `paths-ignore: ["services/
 | Node 20 | `actions/setup-node` SHA-pinned, `cache: pnpm` |
 | Install | `pnpm install --frozen-lockfile` |
 | Lint | `pnpm run lint` |
+| Precompute regressions | `pnpm exec tsc --noEmit --incremental false`, then `pnpm run test:diff-window`, `test:diff-repair-schedule`, `test:precompute-ingest`, `test:diff-shape-offline`, `test:baseline-probe`, `test:tracking-route`, `test:baseline-tag`, `test:sort-state` |
 | Build | `pnpm run build` with `NODE_ENV=production` — prevents prerender from calling upstream sources during CI |
 
 ### `shapley-rs.yml` — Rust service CI
@@ -175,8 +207,8 @@ Per-instance, in-memory rate limiting is implemented in `lib/utils/rate-limit.ts
 
 | Preset | Limit | Window | Status |
 |---|---|---|---|
-| `RATE_LIMIT_HEAVY` | 10 req | 60 s | **Wired** to the eight compute/diff routes (`shapley`, `shapley/simulate`, `shapley/baseline`, `shapley/tracking`, `shapley/jobs`, `link-value/jobs`, `diff`, `diff/contributor/[code]`) |
-| `RATE_LIMIT_STANDARD` | 60 req | 60 s | Defined for routes that do non-trivial work but aren't CPU-bound; **not currently wired to any route** |
+| `RATE_LIMIT_HEAVY` | 10 req | 60 s | **Wired** to the three compute routes (`shapley/simulate`, `shapley/jobs`, `link-value/jobs`) |
+| `RATE_LIMIT_STANDARD` | 60 req | 60 s | **Wired** to `shapley`, `shapley/baseline`, `shapley/tracking`, `diff`, `diff/contributor/[code]` and `validators/stake`. The baseline and diff routes are cache-read proxies: no CPU-bound work here |
 | `RATE_LIMIT_LOOSE` | 120 req | 60 s | Defined for read-mostly cached endpoints; **not currently wired to any route** |
 
 Limits are keyed by caller IP (`x-real-ip` preferred on Vercel; `x-forwarded-for` as fallback). Requests without resolvable IP headers proceed untracked by design — rate-limiting is advisory. Because state is per-instance, the effective fleet-wide limit is `N × limit` where N is the number of Vercel replicas. For fleet-wide enforcement, replace the implementation with a shared Redis-backed limiter (the consumer API `checkRateLimit(req, opts)` does not change).
@@ -231,7 +263,7 @@ REDIS_URL=redis://:<password>@redis.example.com:6379 scripts/queue-clear.sh --su
 
 ### Cache warming
 
-The `/api/link-value/precompute` cron (every 6 hours) is the primary cache-warming mechanism. After each new epoch appears, the sweep enqueues per-contributor link-estimate jobs; once all are S3-cached, steady-state cron fires complete in under 2 s via the "fully swept" marker fast-path. To trigger a manual backfill for a specific epoch:
+The `/api/link-value/precompute` cron (every 6 hours) is the primary cache-warming mechanism. After each new epoch appears, the sweep enqueues per-contributor link-estimate jobs; once all are S3-cached, a cron fire can skip snapshots when its marker is present and its shape window has no gaps. To trigger a manual backfill for a specific epoch:
 
 ```bash
 curl -H "Authorization: Bearer <CRON_SECRET>" \
@@ -240,9 +272,25 @@ curl -H "Authorization: Bearer <CRON_SECRET>" \
 
 Poll `GET {shapley-service}/jobs/{sweep_job_id}` for the sweep summary.
 
-The `/api/shapley/precompute` cron (30 minutes offset) warms the baseline the same way; its manual backfill is:
+### Alias publication rollout
+
+Before deployment, verify conditional writes on the actual gateway. Provision a disposable bucket named `pr24-canary-<UUID>` and set `TEST_S3_ENDPOINT` and `TEST_S3_BUCKET`. Use test credentials through the environment. From `services/shapley-rs`, run:
 
 ```bash
-curl -H "Authorization: Bearer <CRON_SECRET>" \
-  "https://your-deploy.vercel.app/api/shapley/precompute?epoch=<N>"
+cargo test --locked --test diff_persistence gateway_conditional_contract -- --ignored --nocapture
 ```
+
+The test rejects the production bucket and pre-existing canary keys. It checks concurrent create and repair conditions and surviving bytes. It deletes its canary object on success. Record the gateway version and result, then remove the disposable bucket. Unsupported or ignored conditions block deployment of the write path. Do not substitute unconditional retries.
+
+1. Verify deployed API and worker images and prepare the frontend ingest token.
+2. Pause sweep cron calls, then roll every worker to the fixed image.
+3. Roll API replicas, then deploy the frontend that sends both tokens. Resume the cron.
+4. Warm the latest epoch through `/api/link-value/precompute`. Check its sweep summary and child job results, then repeat until it reports `already-swept`.
+5. Warm the agreed historical window, initially the latest 31 epochs, newest first with `?epoch=N`. Process one epoch at a time and repeat its sweep after children finish. Record failed or unfinished epochs for resumption.
+6. Inspect deeper shape gaps with `pnpm run backfill:diff -- --dry-run`, then run the intended bounded backfill.
+
+The trusted metadata namespace is `shapley/v3/publication/v1/`. Solver results keep their existing keys. Historical aliases are not migrated from untrusted metadata and need explicit warm-up; existing snapshot fallback handles unwarmed epochs.
+
+The cron reserves current-epoch work before historical repairs. Work stops at 270 seconds inside its 300-second runtime. Historical repairs have 90 seconds, 40 seconds per attempt, and at most three total shape attempts per fire. One history slot selects the newest gap and remaining slots rotate every six hours. The response records failed and deferred epochs separately. Measure snapshot parse time and memory in staging before rollout.
+
+If rollback is needed, keep alias publication disabled until an API and worker pair with the fixed authorization contract is available. Preserve stored results and metadata; do not restore a reader that trusts legacy aliases.

@@ -1,46 +1,58 @@
 "use client";
 
-import { useBaselineShapley, isBaselineWarming } from "@/lib/hooks/use-live";
+import {
+  cachedBaseline,
+  hasLoadError,
+  useBaselineShapley,
+} from "@/lib/hooks/use-live";
 import {
   getContributorColor,
   getContributorDisplayName,
 } from "@/lib/constants/config";
+import { SectionSkeleton } from "@/components/ui/states";
 import { downloadCsv, rowsToCsv } from "@/lib/utils/csv";
 import { Download, AlertCircle } from "lucide-react";
+import type { ReactNode } from "react";
 
-function relativeAge(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s ago`;
-  if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)}m ago`;
-  return `${Math.round(ms / (60 * 60_000))}h ago`;
-}
+const TITLE = "Latest-epoch Shapley anchor";
 
 /**
  * Latest-epoch Shapley anchor. Different from the all-time `reward_percentage`
  * surfaced from economic-hub — this is "what would the contributor pool split
- * look like if rewards were paid against the current network?"
+ * look like if rewards were paid against the latest completed epoch?"
  *
- * When the Rust solver is wired, `method = "lp-multi-commodity-flow-rs"` is
- * shown; otherwise the TS fallback label is shown to be honest about precision.
+ * The route is cache-only, so the card is shown only when the cron has
+ * published that epoch's baseline. A miss renders nothing.
  */
 export function LiveBaselineShapley() {
   const { data, isLoading, error } = useBaselineShapley();
-  const warming = data && isBaselineWarming(data) ? data : null;
-  const ready = data && !isBaselineWarming(data) ? data : null;
+  const ready = cachedBaseline(data);
 
-  const ranked = ready
-    ? Object.entries(ready.values)
-        .map(([operator, v]) => ({
-          operator,
-          value: v.value,
-          share: v.share,
-        }))
-        .filter((r) => r.share > 0)
-        .sort((a, b) => b.share - a.share)
-    : [];
+  if (isLoading) return <SectionSkeleton title={TITLE} />;
+
+  if (hasLoadError(error, data)) {
+    return (
+      <div className="border border-border bg-surface">
+        <Header />
+        <div className="px-4 py-3 text-xs text-amber-400 font-mono flex items-start gap-2">
+          <AlertCircle className="size-3.5 shrink-0 mt-0.5" />
+          <span>
+            Couldn&apos;t load the latest-epoch baseline. All-time reward share
+            above is unaffected.
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!ready) return null;
+
+  const ranked = Object.entries(ready.values)
+    .map(([operator, v]) => ({ operator, value: v.value, share: v.share }))
+    .filter((r) => r.share > 0)
+    .sort((a, b) => b.share - a.share);
 
   const handleExport = () => {
-    if (!ready) return;
     const csv = rowsToCsv(
       ["Operator", "Display Name", "Value", "Share %"],
       ranked.map((r) => [
@@ -58,54 +70,21 @@ export function LiveBaselineShapley() {
 
   return (
     <div className="border border-border bg-surface">
-      <div className="border-b border-border px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
-        <span className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-mono">
-          Latest-epoch Shapley anchor
-        </span>
-        <div className="flex items-center gap-3 text-xs text-muted-foreground font-mono">
-          {ready && (
-            <>
-              <span title={ready.method}>{methodLabel(ready.method)}</span>
-              <span aria-hidden="true">·</span>
-              <span title={ready.computedAt}>
-                {relativeAge(ready.computedAt)}
-              </span>
-              <button
-                onClick={handleExport}
-                className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
-                aria-label="Export CSV"
-              >
-                <Download className="size-3" />
-                CSV
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+      <Header>
+        <span title={ready.method}>{methodLabel(ready.method)}</span>
+        <span aria-hidden="true">·</span>
+        <span title={ready.tag}>epoch {ready.epoch}</span>
+        <button
+          onClick={handleExport}
+          className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
+          aria-label="Export CSV"
+        >
+          <Download className="size-3" />
+          CSV
+        </button>
+      </Header>
 
-      {isLoading && (
-        <div className="px-4 py-6 text-xs text-muted-foreground font-mono">
-          Computing latest-epoch baseline…
-        </div>
-      )}
-
-      {warming && !isLoading && (
-        <div className="px-4 py-6 text-xs text-muted-foreground font-mono">
-          Baseline warming for epoch {warming.epoch} — refreshes automatically.
-        </div>
-      )}
-
-      {error && !isLoading && (
-        <div className="px-4 py-3 text-xs text-amber-400 font-mono flex items-start gap-2">
-          <AlertCircle className="size-3.5 shrink-0 mt-0.5" />
-          <span>
-            Couldn&apos;t compute baseline ({(error as Error).message}).
-            All-time reward share above is unaffected.
-          </span>
-        </div>
-      )}
-
-      {!isLoading && !error && !warming && ranked.length === 0 && (
+      {ranked.length === 0 && (
         <div className="px-4 py-6 text-xs text-muted-foreground font-mono">
           No operators with non-zero share for the latest epoch.
         </div>
@@ -158,8 +137,19 @@ export function LiveBaselineShapley() {
   );
 }
 
+function Header({ children }: { children?: ReactNode }) {
+  return (
+    <div className="border-b border-border px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+      <span className="text-xs uppercase tracking-[0.14em] text-muted-foreground font-mono">
+        {TITLE}
+      </span>
+      <div className="flex items-center gap-3 text-xs text-muted-foreground font-mono">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function methodLabel(method: string): string {
-  if (method.startsWith("lp-")) return "Canonical LP";
-  if (method.includes("fallback")) return "TS heuristic (fallback)";
-  return method;
+  return method.startsWith("lp-") ? "Canonical LP" : method;
 }

@@ -69,10 +69,10 @@ All API routes return JSON. Cached server-side; SWR-cached client-side.
 | `GET /api/fees` | Historical 2Z fee CSV (epochs 859–938) |
 | `GET /api/prices` | Jupiter spot for 2Z + SOL USD |
 | `GET /api/publishers` | Live publisher data from malbec |
-| `GET /api/shapley?epoch=N` | Per-operator Shapley share for a historical snapshot |
+| `GET /api/shapley?epoch=N` | One epoch's published baseline (cache-only, 404 when not published) |
 | `POST /api/shapley/simulate` | Recompute Shapley after add/remove/demand edits |
-| `GET /api/shapley/baseline` | Live-network Shapley anchor (5-min cache) |
-| `GET /api/shapley/tracking?n=N` | Solver share trajectory across last N snapshots |
+| `GET /api/shapley/baseline` | Latest published epoch baseline (cache-only, 404 when not published) |
+| `GET /api/shapley/tracking?n=N` | Solver share trajectory across the published baselines of the last N epochs |
 | `POST /api/link-value/jobs` + `GET/DELETE /api/link-value/jobs/[id]` | Canonical per-link Shapley — faithful retag port of `network_linkestimate`; async submit → poll → done/cancel (precomputed per epoch, served from S3) |
 | `GET /api/economics/projection` | Forward pool projection from historical growth |
 | `GET /api/diff?from=&to=` | Network-wide topology diff |
@@ -100,10 +100,10 @@ labelled with the `method` used — `lp-multi-commodity-flow-rs` for the
 reward solve, `retag-shapley-rs` for per-link estimates.
 
 There is **no silent fallback**: if the Rust service is unreachable the
-routes return `502` rather than substituting a heuristic. A TypeScript
-coalition-enumeration solver (`lib/utils/shapley-solver.ts`) remains in
-the tree for local dev/reference only — it does not serve production
-responses.
+routes return `502` rather than substituting a heuristic. The reward-facing
+routes are cache-only reads of the epoch baselines the precompute cron
+publishes; an epoch that has not been published answers
+`404 {"status":"not-cached"}` and the widget is hidden.
 
 ### Forecasting (`/simulate`)
 
@@ -128,15 +128,16 @@ and the IDL is checked in.
 
 ## Local dev
 
-### Frontend only (no Rust solver)
+### Frontend only
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-Open <http://localhost:3000>. No env required — falls back to the TS
-coalition-enumeration solver and public upstreams.
+Open <http://localhost:3000>. No env required — public upstreams work, but
+the Shapley, baseline and diff cards render nothing or a 503 state without
+the Rust service.
 
 ### Full stack (with Rust Shapley solver)
 
@@ -157,7 +158,6 @@ SHAPLEY_SERVICE_URL=http://localhost:8080 npm run dev
 
 The frontend detects `SHAPLEY_SERVICE_URL`, routes Shapley requests to
 the Rust service, and labels responses `method: "lp-multi-commodity-flow-rs"`.
-If the Rust service is unreachable, it falls back to the TS solver automatically.
 
 ### Verify the Shapley service
 

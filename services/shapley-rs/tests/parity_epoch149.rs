@@ -31,6 +31,7 @@
 //!   - `input.json` — canonical `ShapleyInputIn`, devices keyed by owner PUBKEY (so output is pubkey-keyed like DZ), incl. `city_weights`.
 //!   - `expected_leaves.json` — decoded on-chain leaves: `{ "<owner_pubkey>": <unit_share u32>, ... }`.
 
+use dz_shapley_service::diff_store::{DiffStore, NoPersistence};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -57,7 +58,10 @@ fn app() -> Router {
         epoch_cache: RwLock::new(None),
         s3_cache: None,
         api_token: None,
+        ingest_token: None,
         jobs: None,
+        diff_store: Arc::new(DiffStore::new(Arc::new(NoPersistence))),
+        baseline_inflight: Arc::default(),
     });
     Router::new()
         .route("/shapley", post(dz_shapley_service::routes::shapley))

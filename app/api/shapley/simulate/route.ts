@@ -1,15 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  getSnapshotUrl,
-  MIN_DZ_EPOCH,
-  SHAPLEY_SERVICE_URL,
-  SNAPSHOT_FETCH_TIMEOUT_MS,
-} from "@/lib/constants/config";
+import { MIN_DZ_EPOCH, SHAPLEY_SERVICE_URL } from "@/lib/constants/config";
 import type { RawSnapshot } from "@/lib/types/snapshot";
 import type { ShapleyInput, ShapleyOutput } from "@/lib/types/shapley";
 import { parseSnapshot } from "@/lib/utils/snapshot-parser";
-import { buildShapleyInput } from "@/lib/utils/shapley-input-builder";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
+import {
+  EpochSnapshotError,
+  fetchEpochSnapshot,
+  snapshotFailure,
+} from "@/lib/utils/epoch-snapshot";
 import { computeShapleyRemote, simulateShapleyRemote } from "@/lib/utils/shapley-remote";
 import { modifyShapleyInput } from "@/lib/utils/shapley-input-modifier";
 import {
@@ -32,8 +31,6 @@ const baselineCache = new Map<
   {
     raw: RawSnapshot;
     input: ShapleyInput;
-    /** Whether `input` came from the canonical builder (vs heuristic fallback). */
-    canonical: boolean;
     baseline: ShapleyOutput;
     timestamp: number;
   }
@@ -119,35 +116,23 @@ export async function POST(request: NextRequest) {
     // Get or build baseline input + snapshot
     let cached = baselineCache.get(epoch);
     if (!cached || Date.now() - cached.timestamp > CACHE_TTL) {
-      const url = getSnapshotUrl(epoch);
-      const res = await fetch(url, {
-        signal: AbortSignal.timeout(SNAPSHOT_FETCH_TIMEOUT_MS),
-      });
-
-      if (!res.ok) {
+      const raw = await fetchEpochSnapshot(epoch, { timeoutMs: 30_000 });
+      // The canonical builder is the only input source. A snapshot it cannot
+      // use is a 422, never a heuristic substitute.
+      const built = buildCanonicalShapleyInput(raw);
+      if (!built.canonical) {
         return NextResponse.json(
-          { error: `Epoch ${epoch} not found` },
-          { status: 404 }
+          {
+            error: `Epoch ${epoch} snapshot cannot build the canonical input: ${built.reason ?? "unknown"}`,
+          },
+          { status: 422 }
         );
       }
 
-      const raw: RawSnapshot = await res.json();
-      const parsed = parseSnapshot(raw);
-
-      // Prefer canonical builder (bit-comparable to DZ Foundation output).
-      let input: ShapleyInput;
-      const canonical = buildCanonicalShapleyInput(raw);
-      if (canonical.canonical) {
-        input = canonical.input;
-      } else {
-        input = buildShapleyInput(raw, parsed);
-      }
-
-      const remote = await computeShapleyRemote(input);
+      const remote = await computeShapleyRemote(built.input);
       cached = {
         raw,
-        input,
-        canonical: canonical.canonical,
+        input: built.input,
         baseline: remote.output,
         timestamp: Date.now(),
       };
@@ -158,13 +143,13 @@ export async function POST(request: NextRequest) {
     const parsed = parseSnapshot(raw);
 
     // Demand overrides regenerate the demand table from override-patched
-    // city stats (DZ-parity) — only meaningful for canonical snapshots.
+    // city stats (DZ-parity).
     const overridden = buildOverriddenInput({
       snap: raw,
       baselineInput,
       overrides,
       epoch,
-      canonical: cached.canonical,
+      canonical: true,
     });
     if (!overridden.ok) {
       return NextResponse.json({ error: overridden.error }, { status: 400 });
@@ -244,6 +229,13 @@ export async function POST(request: NextRequest) {
       ),
     });
   } catch (err) {
+    if (err instanceof EpochSnapshotError) {
+      const failure = snapshotFailure(err);
+      if (failure.status !== 404) {
+        reportError(err, { source: "api/shapley/simulate", extras: { epoch, phase: "snapshot" } });
+      }
+      return NextResponse.json({ error: failure.message }, { status: failure.status });
+    }
     // Full detail is logged server-side; the client gets a generic message —
     // the error can name the internal Shapley service host.
     reportError(err, { source: "api/shapley/simulate", extras: { epoch, contributorCode } });

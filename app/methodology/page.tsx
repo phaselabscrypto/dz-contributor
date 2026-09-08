@@ -160,14 +160,13 @@ share(op)   = shapley(op) / Σ_op shapley(op)`}
               private links have bandwidth constraints.
             </p>
             <p>
-              Results come from the shared per-epoch cache (kept warm by the
-              precompute cron), with a short 5-minute last-good cache in
-              front. The method label in the response is always an{" "}
-              <code>lp-*</code> label from the Rust solver in production
-              (currently <code>lp-per-city-stake-weighted-exact</code>); if
-              you see <code>local-ts-heuristic-DEV-ONLY</code> the deployment
-              is missing <code>SHAPLEY_SERVICE_URL</code> and the result
-              is not canonical.
+              Results come from the epoch baseline the precompute cron
+              publishes. A request never triggers a solve. When the cron has
+              not published the epoch, the route answers{" "}
+              <code>404 {"{"}&quot;status&quot;:&quot;not-cached&quot;{"}"}</code>{" "}
+              and the widget is not shown. The method label in the response is
+              always an <code>lp-*</code> label from the Rust solver
+              (currently <code>lp-per-city-stake-weighted-exact</code>).
             </p>
           </Section>
 

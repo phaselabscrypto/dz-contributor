@@ -24,3 +24,20 @@ export function makeSortStateValidator<K extends string>(
     return { key, dir };
   };
 }
+
+/**
+ * Next sort state for a header click. Toggles direction when the clicked
+ * column is already the effective one; otherwise starts the clicked column
+ * at `asc` for columns in `ascFirst`, `desc` for every other column.
+ */
+export function nextSortState<K extends string>(
+  prev: SortState<K>,
+  key: K,
+  effectiveKey: K,
+  ascFirst: readonly K[],
+): SortState<K> {
+  if (effectiveKey === key) {
+    return { key, dir: prev.dir === "asc" ? "desc" : "asc" };
+  }
+  return { key, dir: ascFirst.includes(key) ? "asc" : "desc" };
+}

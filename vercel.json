@@ -8,10 +8,6 @@
     {
       "path": "/api/link-value/precompute",
       "schedule": "0 */6 * * *"
-    },
-    {
-      "path": "/api/shapley/precompute",
-      "schedule": "30 */6 * * *"
     }
   ]
 }

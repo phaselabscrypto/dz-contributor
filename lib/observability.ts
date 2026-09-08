@@ -52,6 +52,21 @@ function serializeExtras(extras: Record<string, unknown> | undefined): string {
   }
 }
 
+/** The `cause` chain, one line each, so a wrapped error still names its root. */
+function describeCauses(err: unknown): string {
+  let text = "";
+  let current: unknown = err instanceof Error ? err.cause : undefined;
+  for (let depth = 0; current !== undefined && depth < 5; depth += 1) {
+    const description =
+      current instanceof Error
+        ? `${current.name}: ${current.message}`
+        : String(current);
+    text += `\n  caused by: ${description}`;
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return text;
+}
+
 /**
  * Report an unexpected error. Use sparingly — only for real exceptions
  * that indicate broken behavior, not for expected 4xx/validation errors.
@@ -64,7 +79,7 @@ export function reportError(err: unknown, ctx: ErrorContext) {
   const stack =
     err instanceof Error && err.stack ? `\n${err.stack}` : "";
   console.error(
-    `[obs:error] ${ctx.source}: ${message}${serializeExtras(ctx.extras)}${stack}`,
+    `[obs:error] ${ctx.source}: ${message}${serializeExtras(ctx.extras)}${describeCauses(err)}${stack}`,
   );
   // When a real APM vendor is wired, add the SDK call here:
   //   Sentry.captureException(err, { tags: { source: ctx.source }, extra: ctx.extras });

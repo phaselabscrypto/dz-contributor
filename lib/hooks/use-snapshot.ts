@@ -28,7 +28,7 @@ export function useRawSnapshot(epoch: number | null) {
 export function useSnapshot(epoch: number | null) {
   const { data: raw, error, isLoading, mutate } = useRawSnapshot(epoch);
 
-  // Memoize parse — snapshot parsing is ~100-200ms on a ~5MB JSON.
+  // Memoize parse — snapshot parsing takes a few seconds on a ~110MB JSON.
   const parsed: ParsedSnapshot | undefined = useMemo(
     () => (raw ? parseSnapshot(raw) : undefined),
     [raw],
