@@ -148,3 +148,48 @@ async fn sequential_requests_solve_once() {
     assert_eq!(cache_puts(&s3), 1, "second request was a memory hit");
     assert!(s3.has(&support::baseline_cache_key(cache::hash_input(&input))));
 }
+
+fn cache_gets(s3: &MockS3) -> usize {
+    s3.state
+        .storage
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|(method, key)| method == "GET" && key.contains("/cache-"))
+        .count()
+}
+
+/// A request whose cache lookup started before a concurrent solve landed must
+/// serve that result, not start a second cold solve.
+#[tokio::test]
+async fn a_late_miss_serves_the_landed_result_without_solving() {
+    let s3 = MockS3::start().await;
+    s3.state.storage.lock().unwrap().stale_miss_once = Some(Duration::from_secs(2));
+    let state = state(&s3);
+    let input = support::canonical_two_operator_input();
+
+    let late = tokio::spawn(post_shapley(app(state.clone()), input.clone()));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while cache_gets(&s3) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        cache_gets(&s3),
+        1,
+        "the late reader must have started its GET"
+    );
+
+    let winner = tokio::spawn(post_shapley(app(state.clone()), input.clone()));
+    let (winner_status, winner_body) = winner.await.expect("winner task");
+    let (late_status, late_body) = late.await.expect("late task");
+    assert_eq!(winner_status, 200, "{winner_body}");
+    assert_eq!(late_status, 200, "{late_body}");
+    assert_eq!(late_body, winner_body);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while cache_puts(&s3) < 2 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(cache_puts(&s3), 1, "the late reader solved a second time");
+}

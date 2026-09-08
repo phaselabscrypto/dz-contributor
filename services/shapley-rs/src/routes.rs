@@ -664,7 +664,9 @@ pub(crate) enum BaselineOutcome {
 
 /// Run at most one cold baseline solve per input hash in this process;
 /// concurrent callers await the first. The solve runs detached so a dropped
-/// request future still lands the result in memory and S3.
+/// request future still lands the result in memory and S3. The leader
+/// double-checks the cache after acquiring the flight, so a baseline that
+/// landed while it was losing the race is served instead of solved again.
 pub(crate) async fn baseline_single_flight(
     state: &Arc<crate::AppState>,
     body: &ShapleyInputIn,
@@ -683,6 +685,12 @@ pub(crate) async fn baseline_single_flight(
             let task_state = Arc::clone(state);
             let body = body.clone();
             let task = tokio::spawn(async move {
+                if let Some(resp) = try_cached_baseline(&task_state, input_hash).await {
+                    tracing::info!(input_hash = %format!("{input_hash:016x}"),
+                        "baseline landed while acquiring the flight; serving the cached result");
+                    guard.finish(Ok(resp.clone()));
+                    return Ok(resp);
+                }
                 let result = compute_and_store_baseline(&task_state, &body, input_hash, None).await;
                 guard.finish(result.clone());
                 result
