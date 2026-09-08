@@ -46,6 +46,10 @@ jobs:
           pnpm run test:diff-repair-schedule
           pnpm run test:precompute-ingest
           pnpm run test:diff-shape-offline
+          pnpm run test:baseline-probe
+          pnpm run test:tracking-route
+          pnpm run test:baseline-tag
+          pnpm run test:sort-state
 
       - name: Build
         run: pnpm run build
