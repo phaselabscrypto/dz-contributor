@@ -1,6 +1,10 @@
 "use client";
 
-import { cachedBaseline, useBaselineShapley } from "@/lib/hooks/use-live";
+import {
+  cachedBaseline,
+  hasLoadError,
+  useBaselineShapley,
+} from "@/lib/hooks/use-live";
 import {
   getContributorColor,
   getContributorDisplayName,
@@ -26,7 +30,7 @@ export function LiveBaselineShapley() {
 
   if (isLoading) return <SectionSkeleton title={TITLE} />;
 
-  if (error) {
+  if (hasLoadError(error, data)) {
     return (
       <div className="border border-border bg-surface">
         <Header />

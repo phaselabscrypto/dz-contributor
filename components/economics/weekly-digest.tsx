@@ -3,6 +3,7 @@
 import useSWR from "swr";
 import Link from "next/link";
 import { useEpochs } from "@/lib/hooks/use-epochs";
+import { hasLoadError } from "@/lib/hooks/use-live";
 import { Skeleton } from "@/components/ui/states";
 import { getContributorDisplayName } from "@/lib/constants/config";
 import type { NetworkDiffResponse } from "@/lib/types/diff";
@@ -50,8 +51,7 @@ export function WeeklyDigest() {
     dedupingInterval: 5 * 60_000,
   });
 
-  // Keep a loaded digest on screen when a background revalidation fails.
-  const hasError = Boolean((error || epochsError) && !data);
+  const hasError = hasLoadError(error || epochsError, data);
 
   const retry = () => {
     void mutateEpochs();

@@ -95,6 +95,12 @@ async function cacheProbeFetcher<T>(url: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+// SWR keeps the last data when a revalidation fails, so a failed refresh
+// alone must not read as an error.
+export function hasLoadError(error: unknown, data: unknown): boolean {
+  return Boolean(error) && data === undefined;
+}
+
 /**
  * The latest completed epoch's published Shapley baseline. Updates roughly once
  * per epoch (~2-3 days), so a 5-minute client refresh is plenty.
