@@ -13,8 +13,17 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 
 import type { EpochBaseline } from "@/lib/types/baseline";
+import type { BaselineServiceError } from "@/lib/utils/shapley-remote";
 
 type ProbeMode = "hit" | "miss" | "upstream-500" | "legacy-404";
+
+// Under Node 20 tsx gives the route modules their own copy of shapley-remote,
+// so an `instanceof` against this script's import fails.
+function isBaselineServiceError(
+  error: unknown,
+): error is BaselineServiceError {
+  return error instanceof Error && error.name === "BaselineServiceError";
+}
 
 const HIT_BODY = {
   method: "lp-multi-commodity-flow-rs",
@@ -86,7 +95,6 @@ async function main(): Promise<void> {
     LATEST_BASELINE_CACHE_CONTROL,
     probeEpochBaseline,
   } = await import("@/lib/utils/baseline-probe");
-  const { BaselineServiceError } = await import("@/lib/utils/shapley-remote");
   const { baselineTag } = await import("@/lib/utils/sweep-tag");
   const { GET: latestBaseline } = await import(
     "@/app/api/shapley/baseline/route"
@@ -220,7 +228,7 @@ async function main(): Promise<void> {
     await assert.rejects(
       probeEpochBaseline(211),
       (error: unknown) =>
-        error instanceof BaselineServiceError && error.status === 404,
+        isBaselineServiceError(error) && error.status === 404,
     );
     res = await latestBaseline(
       new Request("http://localhost/api/shapley/baseline"),
@@ -288,7 +296,7 @@ async function main(): Promise<void> {
       await assert.rejects(
         probeEpochBaseline(211, { timeoutMs: 10 }),
         (error: unknown) =>
-          error instanceof BaselineServiceError && error.timedOut,
+          isBaselineServiceError(error) && error.timedOut,
       );
     } finally {
       clearTimeout(keepAlive);
