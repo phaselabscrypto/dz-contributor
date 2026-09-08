@@ -177,7 +177,7 @@ async fn probe_reports_a_store_failure_as_502() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert_eq!(body["error"], "baseline store unavailable");
+    assert_eq!(body["error"], "alias store unavailable");
 }
 
 #[tokio::test]
@@ -198,7 +198,7 @@ async fn probe_reports_a_foreign_alias_as_502() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert_eq!(body["error"], "baseline store unavailable");
+    assert_eq!(body["error"], "alias store unavailable");
 }
 
 /// Real wall-clock delay: the crate does not enable tokio's paused clock.
@@ -216,7 +216,7 @@ async fn probe_times_out_a_stalled_store() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert_eq!(body["error"], "baseline store unavailable");
+    assert_eq!(body["error"], "alias store unavailable");
     let elapsed = started.elapsed();
     assert!(
         elapsed >= routes::BASELINE_PROBE_TIMEOUT

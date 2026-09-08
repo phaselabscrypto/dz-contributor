@@ -76,10 +76,10 @@ pub(crate) fn response_from_baseline(baseline: &BaselineResult) -> ShapleyRespon
     }
 }
 
-/// Why a baseline alias read produced no answer. `detail` is for logs only and
+/// Why an alias read produced no answer. `detail` is for logs only and
 /// never reaches a client.
 #[derive(Debug)]
-pub enum BaselineAliasError {
+pub enum AliasReadError {
     /// The object store failed the read.
     Storage {
         /// Underlying error text, for logs.
@@ -92,16 +92,16 @@ pub enum BaselineAliasError {
     },
 }
 
-impl fmt::Display for BaselineAliasError {
+impl fmt::Display for AliasReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Storage { .. } => f.write_str("baseline store unavailable"),
-            Self::Malformed { .. } => f.write_str("baseline alias is malformed"),
+            Self::Storage { .. } => f.write_str("alias store unavailable"),
+            Self::Malformed { .. } => f.write_str("alias is malformed"),
         }
     }
 }
 
-impl std::error::Error for BaselineAliasError {}
+impl std::error::Error for AliasReadError {}
 
 /// Compute a deterministic hash of the Shapley input for cache keying.
 ///
@@ -343,7 +343,7 @@ impl S3Cache {
     pub async fn load_baseline_alias(
         &self,
         tag: &str,
-    ) -> Result<Option<BaselineAlias>, BaselineAliasError> {
+    ) -> Result<Option<BaselineAlias>, AliasReadError> {
         let key = Self::baseline_alias_key(tag);
         let response = match self
             .client
@@ -359,7 +359,7 @@ impl S3Cache {
                 return Ok(None);
             }
             Err(e) => {
-                return Err(BaselineAliasError::Storage {
+                return Err(AliasReadError::Storage {
                     detail: format!("{e:?}"),
                 });
             }
@@ -368,16 +368,16 @@ impl S3Cache {
             .body
             .collect()
             .await
-            .map_err(|e| BaselineAliasError::Storage {
+            .map_err(|e| AliasReadError::Storage {
                 detail: format!("{e:?}"),
             })?
             .into_bytes();
         let alias: BaselineAlias =
-            serde_json::from_slice(&bytes).map_err(|e| BaselineAliasError::Malformed {
+            serde_json::from_slice(&bytes).map_err(|e| AliasReadError::Malformed {
                 detail: format!("{key}: {e}"),
             })?;
         if alias.tag != tag {
-            return Err(BaselineAliasError::Malformed {
+            return Err(AliasReadError::Malformed {
                 detail: format!("{key}: stored tag {:?} differs from request", alias.tag),
             });
         }
@@ -557,12 +557,15 @@ impl S3Cache {
         Ok(())
     }
 
-    /// The payload hash recorded for `(tag, focus)`, if any. A missing or
-    /// malformed object reads as `None`, which sends the caller down the
-    /// rebuild-from-snapshot path rather than failing. A storage failure also
-    /// reads as `None`, but logs at `warn` so an outage on this path does not
-    /// look like an ordinary miss.
-    pub async fn load_link_estimate_alias(&self, tag: &str, focus: &str) -> Option<u64> {
+    /// The payload hash recorded for `(tag, focus)`, if any. `Ok(None)` is an
+    /// ordinary miss and sends the caller down the rebuild-from-snapshot path.
+    /// A malformed object is an error the sweep rewrites; a storage failure is
+    /// an outage and must not look like a miss.
+    pub async fn load_link_estimate_alias(
+        &self,
+        tag: &str,
+        focus: &str,
+    ) -> Result<Option<u64>, AliasReadError> {
         let key = Self::link_estimate_alias_key(tag, focus);
         let response = match self
             .client
@@ -575,27 +578,49 @@ impl S3Cache {
             Ok(response) => response,
             Err(e) if e.as_service_error().is_some_and(|se| se.is_no_such_key()) => {
                 tracing::debug!(%key, "no link-estimate alias in S3");
-                return None;
+                return Ok(None);
             }
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    %key,
-                    "link-estimate alias read failed; treating as a miss"
-                );
-                return None;
+                tracing::warn!(error = %e, %key, "link-estimate alias read failed");
+                return Err(AliasReadError::Storage {
+                    detail: format!("{e:?}"),
+                });
             }
         };
-        let bytes = response.body.collect().await.ok()?.into_bytes();
-        let parsed: serde_json::Value = serde_json::from_slice(&bytes)
-            .inspect_err(|e| tracing::warn!(error = %e, %key, "link-estimate alias is not JSON"))
-            .ok()?;
-        let hex = parsed.get("payloadHash").and_then(|v| v.as_str())?;
+        let bytes = response
+            .body
+            .collect()
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, %key, "link-estimate alias body read failed");
+                AliasReadError::Storage {
+                    detail: format!("{e:?}"),
+                }
+            })?
+            .into_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            tracing::warn!(error = %e, %key, "link-estimate alias is not JSON");
+            AliasReadError::Malformed {
+                detail: format!("{key}: {e}"),
+            }
+        })?;
+        let hex = parsed
+            .get("payloadHash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                tracing::warn!(%key, "link-estimate alias has no payloadHash");
+                AliasReadError::Malformed {
+                    detail: format!("{key}: no payloadHash string"),
+                }
+            })?;
         u64::from_str_radix(hex, 16)
-            .inspect_err(
-                |e| tracing::warn!(error = %e, %key, hex, "link-estimate alias hash is not hex"),
-            )
-            .ok()
+            .map_err(|e| {
+                tracing::warn!(error = %e, %key, hex, "link-estimate alias hash is not hex");
+                AliasReadError::Malformed {
+                    detail: format!("{key}: hash {hex:?} is not hex"),
+                }
+            })
+            .map(Some)
     }
 
     /// Derive the S3 object key for a cached simulate (what-if) result.
@@ -920,14 +945,14 @@ mod baseline_alias_tests {
     }
 
     #[test]
-    fn baseline_alias_error_detail_stays_out_of_display() {
-        let error = BaselineAliasError::Storage {
+    fn alias_read_error_detail_stays_out_of_display() {
+        let error = AliasReadError::Storage {
             detail: "http://gateway.internal:7480 refused".into(),
         };
-        assert_eq!(error.to_string(), "baseline store unavailable");
-        let error = BaselineAliasError::Malformed {
+        assert_eq!(error.to_string(), "alias store unavailable");
+        let error = AliasReadError::Malformed {
             detail: "key: stored tag differs".into(),
         };
-        assert_eq!(error.to_string(), "baseline alias is malformed");
+        assert_eq!(error.to_string(), "alias is malformed");
     }
 }
