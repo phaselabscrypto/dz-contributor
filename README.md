@@ -128,15 +128,16 @@ and the IDL is checked in.
 
 ## Local dev
 
-### Frontend only (no Rust solver)
+### Frontend only
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-Open <http://localhost:3000>. No env required — falls back to the TS
-coalition-enumeration solver and public upstreams.
+Open <http://localhost:3000>. No env required — public upstreams work, but
+the Shapley, baseline and diff cards render nothing or a 503 state without
+the Rust service.
 
 ### Full stack (with Rust Shapley solver)
 
@@ -157,7 +158,6 @@ SHAPLEY_SERVICE_URL=http://localhost:8080 npm run dev
 
 The frontend detects `SHAPLEY_SERVICE_URL`, routes Shapley requests to
 the Rust service, and labels responses `method: "lp-multi-commodity-flow-rs"`.
-If the Rust service is unreachable, it falls back to the TS solver automatically.
 
 ### Verify the Shapley service
 

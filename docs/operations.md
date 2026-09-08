@@ -125,7 +125,7 @@ Consumed by the Next.js server-side code. Set via `vercel env add <NAME> product
 | `SHAPLEY_SERVICE_URL` | — | Base URL of the Rust Shapley microservice. Validated at module load (`lib/constants/config.ts`); must be `http://` or `https://`. Trailing slashes and known endpoint suffixes are stripped. | Every Shapley route and every `/api/diff*` route returns `503`. There is no in-process fallback solver. |
 | `PYTHON_SHAPLEY_URL` | — | Legacy alias for `SHAPLEY_SERVICE_URL` (previous Python deployment). Checked in `lib/constants/config.ts` only when `SHAPLEY_SERVICE_URL` is unset. | Same as `SHAPLEY_SERVICE_URL` unset. |
 | `SHAPLEY_API_TOKEN` | — | Bearer token sent by the frontend to the Rust service (`lib/utils/shapley-remote.ts`). Never exposed to the browser. | Requests to the Rust service are sent without an `Authorization` header. If the service is configured fail-closed (no `SHAPLEY_ALLOW_UNAUTHENTICATED=1`), all compute calls return `401`. |
-| `SHAPLEY_INGEST_TOKEN` | — | Second token the cron sends as `X-Ingest-Token` when writing a diff record or submitting a sweep. Must match the service's value. Never exposed to the browser. | Shape writes and sweep submissions fail locally with `503` and are reported per fire. |
+| `SHAPLEY_INGEST_TOKEN` | — | Second token the cron sends as `X-Ingest-Token` when writing a diff record, publishing a baseline, or submitting a sweep. Must match the service's value. Never exposed to the browser. | Shape writes, baseline publishes and sweep submissions fail locally with `503` and are reported per fire. |
 | `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana mainnet RPC endpoint used by on-chain routes (`lib/onchain/program-ids.ts`). The public default is rate-limited; a dedicated provider (e.g. Helius) is recommended for production. | Uses the public Solana mainnet RPC. |
 | `DZ_LEDGER_RPC_URL` | — | RPC endpoint for the DoubleZero ledger (a Solana sidechain). Required for any `/api/onchain/*` route. No default in code — a previous default embedded a paid API key in source. | On-chain routes that need the DZ ledger will fail; `ONCHAIN_ENABLED` gates whether they are attempted. |
 | `DZ_REGISTRY_PROGRAM_ID` | `""` | DZ master registry program (Metro/Device/Link/Contributor accounts). Pending DZ Foundation IDL. Setting this implicitly enables `ONCHAIN_ENABLED` (`lib/onchain/program-ids.ts`). | On-chain routes return 503. |
@@ -158,7 +158,7 @@ Consumed by `services/shapley-rs/src/main.rs`, `src/cache.rs`, `src/jobs.rs`, an
 | `AWS_REGION` | `us-east-1` | AWS region for the S3 client (`cache.rs`). | Defaults to `us-east-1`. |
 | `AWS_ACCESS_KEY_ID` | — | S3 credentials via the standard AWS SDK credential chain. | SDK falls back to IAM role / instance metadata / env chain. Required when not running on AWS infrastructure with attached roles. |
 | `AWS_SECRET_ACCESS_KEY` | — | Paired with `AWS_ACCESS_KEY_ID`. | See above. |
-| `SHAPLEY_INGEST_TOKEN` | — | Second bearer token, required ON TOP of `SHAPLEY_API_TOKEN` on `PUT /diff/shape/:epoch` and `POST /precompute/link-estimates`, sent as `X-Ingest-Token`. Constant-time comparison in `main.rs` `require_ingest_auth`. | Ingest and trusted-sweep routes answer `503`. Reads keep working. Unlike the compute token, unset does NOT mean open. |
+| `SHAPLEY_INGEST_TOKEN` | — | Second bearer token, required ON TOP of `SHAPLEY_API_TOKEN` on `PUT /diff/shape/:epoch`, `POST /precompute/link-estimates` and `POST /precompute/baseline`, sent as `X-Ingest-Token`. Constant-time comparison in `main.rs` `require_ingest_auth`. | Ingest and trusted-sweep routes answer `503`. Reads keep working. Unlike the compute token, unset does NOT mean open. |
 
 ---
 
@@ -175,6 +175,7 @@ Triggers on push to `main` and on pull requests, with `paths-ignore: ["services/
 | Node 20 | `actions/setup-node` SHA-pinned, `cache: pnpm` |
 | Install | `pnpm install --frozen-lockfile` |
 | Lint | `pnpm run lint` |
+| Precompute regressions | `pnpm exec tsc --noEmit --incremental false`, then `pnpm run test:diff-window`, `test:diff-repair-schedule`, `test:precompute-ingest`, `test:diff-shape-offline`, `test:baseline-probe`, `test:tracking-route`, `test:baseline-tag`, `test:sort-state` |
 | Build | `pnpm run build` with `NODE_ENV=production` — prevents prerender from calling upstream sources during CI |
 
 ### `shapley-rs.yml` — Rust service CI

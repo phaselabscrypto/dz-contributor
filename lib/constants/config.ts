@@ -66,7 +66,7 @@ function validateShapleyServiceUrl(raw: string | undefined | null): string | nul
     throw new Error(
       `SHAPLEY_SERVICE_URL is not a valid URL: ${
         err instanceof Error ? err.message : String(err)
-      }. Set it to the base URL of the Rust solver (e.g. https://dz-shapley.example.run.app), or unset it to fall back to the in-process TS solver.`,
+      }. Set it to the base URL of the Rust solver (e.g. https://dz-shapley.example.run.app).`,
     );
   }
 }
@@ -89,8 +89,7 @@ export const SHAPLEY_SERVICE_URL = validateShapleyServiceUrl(
  * link-estimate caller produce `.../shapley/link-estimate` (a 404) —
  * every caller works regardless of how the operator set the env var.
  *
- * Returns null if `SHAPLEY_SERVICE_URL` is unset — callers fall back
- * to the in-process TS solver.
+ * Returns null if `SHAPLEY_SERVICE_URL` is unset; callers answer 503.
  */
 const KNOWN_SHAPLEY_ENDPOINTS = [
   "/shapley",
