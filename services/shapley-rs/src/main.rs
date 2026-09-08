@@ -22,7 +22,7 @@ use dz_shapley_service::diff_store::{
 use dz_shapley_service::{diff_routes, routes};
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{DefaultBodyLimit, Request, State},
     http::{StatusCode, header::AUTHORIZATION},
     middleware::{self, Next},
@@ -306,9 +306,10 @@ async fn require_ingest_auth(
     next: Next,
 ) -> Response {
     let Some(expected) = state.ingest_token.as_deref() else {
+        tracing::error!("SHAPLEY_INGEST_TOKEN unset; ingest routes answer 503");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            "SHAPLEY_INGEST_TOKEN not configured",
+            Json(serde_json::json!({ "error": "ingest not configured" })),
         )
             .into_response();
     };
@@ -401,6 +402,14 @@ mod tests {
         bearer: Option<&str>,
         ingest: Option<&str>,
     ) -> StatusCode {
+        write_response(state, bearer, ingest).await.0
+    }
+
+    async fn write_response(
+        state: Arc<AppState>,
+        bearer: Option<&str>,
+        ingest: Option<&str>,
+    ) -> (StatusCode, String) {
         let mut request = Request::builder().method("PUT").uri("/diff/shape/204");
         if let Some(token) = bearer {
             request = request.header(AUTHORIZATION, format!("Bearer {token}"));
@@ -408,11 +417,15 @@ mod tests {
         if let Some(token) = ingest {
             request = request.header(INGEST_TOKEN_HEADER, token);
         }
-        gated_app(state)
+        let response = gated_app(state)
             .oneshot(request.body(Body::empty()).expect("request builds"))
             .await
-            .expect("router answers")
-            .status()
+            .expect("router answers");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body collects");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
     #[tokio::test]
@@ -443,10 +456,9 @@ mod tests {
         // require_auth passes through when api_token is None, which is a local
         // dev convenience. A public write endpoint must not inherit that.
         let state = state_with_tokens(None, None);
-        assert_eq!(
-            write_status(Arc::clone(&state), None, None).await,
-            StatusCode::SERVICE_UNAVAILABLE
-        );
+        let (status, body) = write_response(Arc::clone(&state), None, None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, r#"{"error":"ingest not configured"}"#);
         assert_eq!(
             write_status(state, None, Some("anything")).await,
             StatusCode::SERVICE_UNAVAILABLE
