@@ -22,7 +22,6 @@ const HIT_BODY = {
     a: { value: 6, share: 0.6 },
     b: { value: 4, share: 0.4 },
   },
-  variant: "foundation",
   input_hash: "0123456789abcdef",
 };
 

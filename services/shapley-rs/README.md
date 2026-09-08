@@ -12,7 +12,7 @@ GET  /health           -> { status, service, version }
 POST /shapley          -> ShapleyResponse        { method, operator_count, values }
 GET  /shapley/baseline?tag= -> BaselineAlias     (cache-only read of a published baseline; 404 not-cached; never computes)
 POST /precompute       -> 200 already-cached | 202 { job_id, input_hash }   (baseline warm by input hash)
-POST /precompute/baseline -> 200 already-cached | 202 { job_id, input_hash, tag, variant }   (compute + ingest tokens; publishes the epoch alias)
+POST /precompute/baseline -> 200 already-cached | 202 { job_id, input_hash, tag }   (compute + ingest tokens; publishes the epoch alias)
 POST /link-estimate    -> LinkEstimateResponse   (faithful retag-Shapley; sync, S3-served when precomputed)
 POST /jobs/link-estimate -> 202 { job_id }       (async: progress + cancel via /jobs/:id; done-at-submit on S3 hit)
 POST /precompute/link-estimates -> 202 { job_id }   (compute + ingest tokens)
@@ -46,10 +46,10 @@ Result keys remain under `shapley/v3/`; trusted aliases and markers use `shapley
 
 The hash-keyed `shapley/v3/cache-{hash}.bin` object is not addressable without
 the full input, and building that input means downloading the epoch snapshot.
-`POST /precompute/baseline` therefore takes a `tag` (the Next.js `baselineTag`)
-and a `variant`; when the result lands, the worker writes
+`POST /precompute/baseline` therefore takes a `tag` (the Next.js `baselineTag`);
+when the result lands, the worker writes
 `shapley/v3/publication/v1/baseline-alias-{hash(tag)}.json`, which carries the
-full `ShapleyResponse` plus `tag`, `variant` and `input_hash`. The alias is
+full `ShapleyResponse` plus `tag` and `input_hash`. The alias is
 written after the result object, so it never points at nothing. The route
 answers `200 already-cached` only when an alias for the tag names this input's
 hash; a cached result with no alias still enqueues, and the worker aliases it

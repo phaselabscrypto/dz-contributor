@@ -279,7 +279,7 @@ See [operations.md](./operations.md) for the operational detail; the building bl
 
 | Preset | Limit | Used by |
 |---|---|---|
-| `RATE_LIMIT_HEAVY` | 10 req / min | the compute routes (`shapley/simulate`, `shapley/jobs`, `shapley/precompute`, `link-value/jobs`) |
+| `RATE_LIMIT_HEAVY` | 10 req / min | the compute routes (`shapley/simulate`, `shapley/jobs`, `link-value/jobs`) |
 | `RATE_LIMIT_STANDARD` | 60 req / min | the cache-read proxies (`shapley`, `shapley/baseline`, `shapley/tracking`, `diff`, `diff/contributor/[code]`) |
 | `RATE_LIMIT_LOOSE` | 120 req / min | (defined; not currently wired) |
 

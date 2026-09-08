@@ -15,24 +15,16 @@ How reward shares are computed: which inputs feed the solver, how requests are d
 
 ---
 
-## Input-builder priority chain
+## Input construction
 
-Every snapshot-driven route assembles a `ShapleyInput` (devices, private links, public links, demands, plus tuning params) before it can solve. `app/api/shapley/route.ts` triages three builders from highest to lowest fidelity and stamps the chosen source into the response so a consumer can always tell where the numbers came from.
+The precompute cron (`lib/utils/precompute-ingest.ts`) downloads the epoch snapshot once per fire with `fetchEpochSnapshot` (`lib/utils/epoch-snapshot.ts`), which checks the envelope and that the file names the requested epoch, and builds the `ShapleyInput` with `buildCanonicalShapleyInput` from `canonical-input-builder.ts`, a TypeScript port of the Foundation reference builder. That snapshot is the only input source for published baselines and link-value sweeps; there is no Foundation CSV source and no heuristic substitute on this path.
 
-| Priority | Source label (`inputSource`) | Builder | When it is used |
-|---|---|---|---|
-| 1 | `canonical-foundation` | `lib/utils/canonical-inputs.ts` | `DZ_CANONICAL_INPUTS_URL` is set and the four per-epoch CSVs fetch cleanly |
-| 2 | `canonical-snapshot` | `lib/utils/canonical-input-builder.ts` | the snapshot carries the canonical fields (`start_us`/`end_us` and `metro_prices`) |
-| 3 | `snapshot-heuristic` | `lib/utils/shapley-input-builder.ts` | the snapshot lacks a canonical field, so the heuristic builder fills in |
-
-The chain is strictly ordered. When `isCanonicalEnabled` (i.e. `DZ_CANONICAL_INPUTS_URL` is set), `fetchCanonicalInput(epoch)` in `canonical-inputs.ts` pulls `private_links.csv`, `devices.csv`, `public_links.csv`, and `demand.csv` for the epoch; if any of the four is missing the fetch returns `null`, the failure is logged, and the route falls through to the snapshot path. Otherwise the route downloads the snapshot and tries `buildCanonicalShapleyInput(raw)` from `canonical-input-builder.ts` — a TypeScript port of the Foundation reference builder. That function returns `{ canonical: false, reason }` when the snapshot is missing `start_us`/`end_us` or `metro_prices`, in which case the route runs `buildShapleyInput` from `shapley-input-builder.ts` as the heuristic fallback.
-
-The `reason` returned by the canonical builder is surfaced on the response as `inputFallbackReason`. The two reason strings the builder emits are:
+The canonical builder returns `{ canonical: false, reason }` when the snapshot is missing `start_us`/`end_us` or `metro_prices`. The cron then fails the fire with `422` and the reason is recorded under `errors`. The two reason strings the builder emits are:
 
 - `snapshot missing start_us/end_us epoch window`
 - `snapshot missing metro_prices`
 
-`inputFallbackReason` is only populated on the `canonical-snapshot → snapshot-heuristic` fallback; a `canonical-foundation` hit (or a clean `canonical-snapshot` build) leaves it undefined. Both labels are internal to the cron: `/api/shapley/precompute` logs them and returns them, while the read routes carry only what the published alias holds (`epoch`, `tag`, `method`, `operatorCount`, `values`, `fetchedAt`).
+The read routes carry only what the published alias holds (`epoch`, `tag`, `method`, `operatorCount`, `values`, `fetchedAt`). `buildShapleyInput` in `shapley-input-builder.ts` is the older heuristic builder; the cron does not call it.
 
 > Tuning constants (`operator_uptime`, `contiguity_bonus`, `demand_multiplier`) are emitted by every builder, but the two builders intentionally differ on `demand_multiplier`: the canonical builder hardcodes the Foundation-faithful `1.2` (`DEMAND_MULTIPLIER` in `canonical-input-builder.ts`), while the heuristic builder uses `SHAPLEY_PARAMS.demandMultiplier = 1.0` from `lib/constants/config.ts`. The divergence is deliberate — the multiplier normalizes out of the final share proportions — and the canonical values are verified against the Foundation reference on a pinned mainnet epoch.
 
@@ -54,7 +46,7 @@ The canonical builder (`buildCanonicalShapleyInput(snap, override?)`) reads thes
 The governing rule is **no silent fallback**: a canonical route must never quietly swap algorithms or invent a number when the service is unhealthy, because that would hide divergence in production. Concretely:
 
 - `/api/shapley`, `/api/shapley/baseline` and `/api/shapley/tracking` are cache-only. Each probes `GET {service}/shapley/baseline?tag=<baselineTag(epoch)>` and never computes: a published alias is **200**, an epoch the cron has not published is **404 `{status:"not-cached", epoch, tag}`**, and any other outcome (timeout, network failure, a status the contract does not name) is a **502** with a generic body. An unset `SHAPLEY_SERVICE_URL` is **503** on all three. None of them substitute another algorithm, and none of them start a solve.
-- Only `/api/shapley/precompute` (the cron) asks the service to compute. It posts `{input, tag, variant}` to `POST {service}/precompute/baseline` with both tokens; the worker solves, persists the result, then writes the epoch alias the readers probe.
+- Only `/api/link-value/precompute` (the cron) asks the service to compute. It posts `{input, tag}` to `POST {service}/precompute/baseline` with both tokens; the worker solves, persists the result, then writes the epoch alias the readers probe.
 - A miss is reported to observability as a `baseline-not-cached` event rather than an error, because it is the normal state of a fresh epoch. Sustained events for the latest epoch mean the cron or the worker is broken.
 
 ```mermaid

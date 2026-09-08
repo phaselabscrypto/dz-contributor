@@ -3,7 +3,6 @@ import {
   shapleyEndpointUrl,
   shapleyServiceBase,
 } from "@/lib/constants/config";
-import type { BaselineVariant } from "@/lib/types/baseline";
 import { isNotCached } from "@/lib/types/baseline";
 import type { DiffShapeRecord } from "@/lib/types/diff";
 import type { ShapleyInput, ShapleyOutput } from "@/lib/types/shapley";
@@ -570,46 +569,32 @@ export interface BaselinePrecompute {
   job_id?: string;
   input_hash: string;
   tag?: string;
-  variant?: string;
 }
 
 /**
- * Warm the epoch's baseline as a queued job. With a `publish` target the worker
- * also writes the epoch alias when the result lands (`POST /precompute/baseline`,
- * compute + ingest tokens). With `null` it warms by input hash only
- * (`POST /precompute`), which is what the simulate variant and the link-value
- * cron want.
+ * Queue the epoch's baseline and publish it under `tag` (`POST
+ * /precompute/baseline`, compute + ingest tokens). The worker writes the epoch
+ * alias the cache-only readers probe once the result is durable.
  */
 export async function startBaselinePrecompute(
   input: ShapleyInput,
-  publish: { tag: string; variant: BaselineVariant } | null,
+  tag: string,
   options: RequestDeadline = {},
 ): Promise<BaselinePrecompute> {
-  const response = publish
-    ? await precomputeRequest(
-        "/precompute/baseline",
-        {
-          method: "POST",
-          headers: buildIngestHeaders(),
-          body: JSON.stringify({
-            input,
-            tag: publish.tag,
-            variant: publish.variant,
-          }),
-        },
-        options,
-      )
-    : await precomputeRequest(
-        "/precompute",
-        { method: "POST", headers: buildHeaders(), body: JSON.stringify(input) },
-        options,
-      );
+  const response = await precomputeRequest(
+    "/precompute/baseline",
+    {
+      method: "POST",
+      headers: buildIngestHeaders(),
+      body: JSON.stringify({ input, tag }),
+    },
+    options,
+  );
   const {
     status,
     input_hash: inputHash,
     job_id: jobId,
-    tag,
-    variant,
+    tag: publishedTag,
   } = precomputeObject(response);
   if (status !== "already-cached" && status !== "accepted") {
     throw new JobStartError("invalid baseline response", 502);
@@ -624,8 +609,7 @@ export async function startBaselinePrecompute(
     status,
     input_hash: inputHash,
     ...(typeof jobId === "string" ? { job_id: jobId } : {}),
-    ...(typeof tag === "string" ? { tag } : {}),
-    ...(typeof variant === "string" ? { variant } : {}),
+    ...(typeof publishedTag === "string" ? { tag: publishedTag } : {}),
   };
 }
 

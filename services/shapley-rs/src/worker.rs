@@ -935,7 +935,6 @@ async fn run_baseline_publish(
     Outcome::Done(Box::new(serde_json::json!({
         "input_hash": format!("{input_hash:016x}"),
         "tag": payload.tag,
-        "variant": payload.variant,
         "alias_written": alias_written,
         "result": response,
     })))
@@ -963,7 +962,7 @@ async fn publish_baseline_epoch(
         s3.store(epoch).await;
         return false;
     }
-    match s3.publish_baseline(tag, payload.variant, epoch).await {
+    match s3.publish_baseline(tag, epoch).await {
         Ok(()) => true,
         Err(error) => {
             tracing::error!(%error, job = %job_id, tag, "baseline alias publication failed");

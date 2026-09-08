@@ -21,6 +21,7 @@ import {
 import {
   type BaselinePrecompute,
   JobStartError,
+  fetchBaselineByTagRemote,
   fetchMissingDiffShapes,
   getSweepStatus,
   putDiffShape,
@@ -28,7 +29,7 @@ import {
   startLinkEstimateSweep,
 } from "@/lib/utils/shapley-remote";
 import { parseSnapshot } from "@/lib/utils/snapshot-parser";
-import { sweepTag } from "@/lib/utils/sweep-tag";
+import { baselineTag, sweepTag } from "@/lib/utils/sweep-tag";
 
 /** Work stops here so the response is written inside the 300 s function limit. */
 export const CRON_WORK_TIMEOUT_MS = 270_000;
@@ -194,6 +195,7 @@ async function discoverLatestEpoch(budget: WorkBudget): Promise<number> {
 
 interface EpochState {
   isSwept: boolean;
+  hasBaseline: boolean;
   missing: number[];
 }
 
@@ -203,6 +205,18 @@ async function checkSweep(tag: string, budget: WorkBudget): Promise<boolean> {
     budget.callOptions(STATUS_TIMEOUT_MS),
   );
   return status.complete;
+}
+
+/** Whether the epoch's baseline alias, the object the readers probe, exists. */
+async function checkBaseline(
+  epoch: number,
+  budget: WorkBudget,
+): Promise<boolean> {
+  const probe = await fetchBaselineByTagRemote(
+    baselineTag(epoch),
+    budget.callOptions(STATUS_TIMEOUT_MS),
+  );
+  return probe.status === "hit";
 }
 
 async function listMissingShapes(
@@ -217,8 +231,9 @@ async function listMissingShapes(
 }
 
 /**
- * Both reads run concurrently. Either failing falls back to doing the work,
- * which is idempotent, so a failed check costs time and never correctness.
+ * The three reads run concurrently. Any of them failing falls back to doing
+ * the work, which is idempotent, so a failed check costs time and never
+ * correctness.
  */
 async function readEpochState(
   epoch: number,
@@ -226,18 +241,23 @@ async function readEpochState(
   budget: WorkBudget,
   failures: FailureLog,
 ): Promise<EpochState> {
-  const [sweepCheck, missingCheck] = await Promise.allSettled([
+  const [sweepCheck, baselineCheck, missingCheck] = await Promise.allSettled([
     checkSweep(tag, budget),
+    checkBaseline(epoch, budget),
     listMissingShapes(epoch, budget),
   ]);
   if (sweepCheck.status === "rejected") {
     failures.record("marker-check", sweepCheck.reason);
+  }
+  if (baselineCheck.status === "rejected") {
+    failures.record("baseline-check", baselineCheck.reason);
   }
   if (missingCheck.status === "rejected") {
     failures.record("missing-shapes", missingCheck.reason);
   }
   return {
     isSwept: sweepCheck.status === "fulfilled" && sweepCheck.value,
+    hasBaseline: baselineCheck.status === "fulfilled" && baselineCheck.value,
     // Unknown gaps: assume at least the current epoch needs its shape.
     missing: missingCheck.status === "fulfilled" ? missingCheck.value : [epoch],
   };
@@ -247,6 +267,7 @@ interface CurrentEpochWork {
   epoch: number;
   tag: string;
   isSwept: boolean;
+  needsBaseline: boolean;
   needsShape: boolean;
 }
 
@@ -264,8 +285,9 @@ interface CurrentEpochResult extends SweepSubmission {
 }
 
 /**
- * The current snapshot is downloaded once and used for both the sweep and
- * the shape. The sweep goes first because it is the fire's primary output. A
+ * The current snapshot is downloaded once and used for the sweep, the
+ * baseline alias and the shape. The sweep goes first because it is the fire's
+ * primary output; on an epoch that is already swept, the baseline alias is. A
  * shape failure after an accepted sweep still fails the response, because
  * the current shape is required work.
  */
@@ -274,7 +296,7 @@ async function runCurrentEpoch(
   budget: WorkBudget,
   failures: FailureLog,
 ): Promise<CurrentEpochResult> {
-  if (work.isSwept && !work.needsShape) {
+  if (work.isSwept && !work.needsBaseline && !work.needsShape) {
     return { sweep: "already-swept", status: 200 };
   }
   let raw: RawSnapshot;
@@ -291,9 +313,11 @@ async function runCurrentEpoch(
       status: failures.record("current-snapshot", error).status,
     };
   }
-  const submission: SweepSubmission = work.isSwept
-    ? { sweep: "already-swept", status: 200 }
-    : await submitSweep(raw, work, budget, failures);
+  const submission: SweepSubmission = !work.isSwept
+    ? await submitSweep(raw, work, budget, failures)
+    : work.needsBaseline
+      ? await publishBaselineOnly(raw, work, budget, failures)
+      : { sweep: "already-swept", status: 200 };
   if (!work.needsShape) return submission;
   const shape = await submitCurrentShape(raw, work.epoch, budget, failures);
   return {
@@ -303,7 +327,22 @@ async function runCurrentEpoch(
   };
 }
 
-/** Builds the Shapley input, queues the sweep, then warms the baseline. */
+/**
+ * The canonical Shapley input for the epoch. A snapshot that cannot build it
+ * is a 422; nothing here substitutes a heuristic input.
+ */
+function buildInput(raw: RawSnapshot, epoch: number): ShapleyInput {
+  const built = buildCanonicalShapleyInput(raw);
+  if (!built.canonical) {
+    throw new JobStartError(
+      `epoch ${epoch}: Shapley input unavailable (${built.reason ?? "unknown"})`,
+      422,
+    );
+  }
+  return built.input;
+}
+
+/** Builds the Shapley input, queues the sweep, then publishes the baseline. */
 async function submitSweep(
   raw: RawSnapshot,
   work: CurrentEpochWork,
@@ -312,27 +351,23 @@ async function submitSweep(
 ): Promise<SweepSubmission> {
   let operators: number | undefined;
   try {
-    const built = buildCanonicalShapleyInput(raw);
-    if (!built.canonical) {
-      throw new JobStartError(
-        `epoch ${work.epoch}: Shapley input unavailable (${built.reason ?? "unknown"})`,
-        422,
-      );
-    }
+    const input = buildInput(raw, work.epoch);
     operators = parseSnapshot(raw).contributors.filter(
       (contributor) => contributor.linkCount > 0,
     ).length;
     const sweep = await startLinkEstimateSweep(
-      built.input,
+      input,
       work.tag,
       budget.callOptions(),
     );
-    const baseline = await warmBaseline(built.input, budget, failures);
+    // Fail-soft: the sweep is already queued, so a baseline failure is
+    // recorded rather than failing the fire.
+    const baseline = await publishBaseline(input, work.epoch, budget, failures);
     return {
       sweep: "accepted",
       sweepJobId: sweep.job_id,
       operators,
-      baseline,
+      baseline: baseline.outcome,
       status: 200,
     };
   } catch (error) {
@@ -344,16 +379,59 @@ async function submitSweep(
   }
 }
 
-/** Fail-soft: the sweep is already queued, so a baseline failure is recorded, not fatal. */
-async function warmBaseline(
-  input: ShapleyInput,
+/**
+ * The epoch is swept but has no baseline alias, so the alias is this fire's
+ * primary output and its failure is the fire's status.
+ */
+async function publishBaselineOnly(
+  raw: RawSnapshot,
+  work: CurrentEpochWork,
   budget: WorkBudget,
   failures: FailureLog,
-): Promise<BaselineOutcome> {
+): Promise<SweepSubmission> {
+  let input: ShapleyInput;
   try {
-    return await startBaselinePrecompute(input, null, budget.callOptions());
+    input = buildInput(raw, work.epoch);
   } catch (error) {
-    return { error: failures.record("baseline-warm", error).message };
+    return {
+      sweep: "already-swept",
+      status: failures.record("baseline-publish", error).status,
+    };
+  }
+  const baseline = await publishBaseline(input, work.epoch, budget, failures);
+  return {
+    sweep: "already-swept",
+    baseline: baseline.outcome,
+    status: baseline.status,
+  };
+}
+
+interface BaselineSubmission {
+  outcome: BaselineOutcome;
+  /** 200 unless the publish could not be submitted. */
+  status: number;
+}
+
+/**
+ * `POST /precompute/baseline` under `baselineTag(epoch)`. The worker solves
+ * or loads the result and writes the alias the cache-only readers probe.
+ */
+async function publishBaseline(
+  input: ShapleyInput,
+  epoch: number,
+  budget: WorkBudget,
+  failures: FailureLog,
+): Promise<BaselineSubmission> {
+  try {
+    const outcome = await startBaselinePrecompute(
+      input,
+      baselineTag(epoch),
+      budget.callOptions(),
+    );
+    return { outcome, status: 200 };
+  } catch (error) {
+    const failure = failures.record("baseline-publish", error);
+    return { outcome: { error: failure.message }, status: failure.status };
   }
 }
 
@@ -528,6 +606,7 @@ export async function runPrecomputeIngest(
       epoch,
       tag,
       isSwept: state.isSwept,
+      needsBaseline: !state.hasBaseline,
       needsShape: schedule.selected.includes(epoch),
     },
     budget,

@@ -125,7 +125,6 @@ async function main(): Promise<void> {
         b: { value: (1 - share) * 10, share: 1 - share },
       },
       tag,
-      variant: "foundation",
       input_hash: "0123456789abcdef",
     });
   }) as typeof fetch;

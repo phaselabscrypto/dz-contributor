@@ -54,7 +54,6 @@ fn input() -> ShapleyInputIn {
 fn alias_body(tag: &str, input_hash: &str) -> Value {
     json!({
         "tag": tag,
-        "variant": "foundation",
         "input_hash": input_hash,
         "method": "lp-per-city-stake-weighted-exact",
         "operator_count": 1,
@@ -125,7 +124,6 @@ async fn probe_hit_returns_the_alias_body() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["tag"], TAG);
-    assert_eq!(body["variant"], "foundation");
     assert_eq!(body["input_hash"], "00000000000000aa");
     assert_eq!(body["method"], "lp-per-city-stake-weighted-exact");
     assert_eq!(body["values"]["Alpha"]["share"], 1.0);
@@ -242,14 +240,13 @@ async fn publish_short_circuits_on_a_matching_alias() {
         app(state(Some(S3Cache::from(s3.cache_ref())))),
         Method::POST,
         "/precompute/baseline",
-        Some(json!({ "input": input, "tag": TAG, "variant": "foundation" })),
+        Some(json!({ "input": input, "tag": TAG })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "already-cached");
     assert_eq!(body["input_hash"], hash_hex);
     assert_eq!(body["tag"], TAG);
-    assert_eq!(body["variant"], "foundation");
 }
 
 #[tokio::test]
@@ -265,7 +262,7 @@ async fn publish_proceeds_past_a_stale_alias() {
         app(state(Some(S3Cache::from(s3.cache_ref())))),
         Method::POST,
         "/precompute/baseline",
-        Some(json!({ "input": input(), "tag": TAG, "variant": "snapshot" })),
+        Some(json!({ "input": input(), "tag": TAG })),
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -278,7 +275,7 @@ async fn publish_requires_s3_and_a_valid_tag() {
         app(state(None)),
         Method::POST,
         "/precompute/baseline",
-        Some(json!({ "input": input(), "tag": TAG, "variant": "foundation" })),
+        Some(json!({ "input": input(), "tag": TAG })),
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -289,7 +286,7 @@ async fn publish_requires_s3_and_a_valid_tag() {
         app(state(Some(S3Cache::from(s3.cache_ref())))),
         Method::POST,
         "/precompute/baseline",
-        Some(json!({ "input": input(), "tag": "bad\u{0}tag", "variant": "foundation" })),
+        Some(json!({ "input": input(), "tag": "bad\u{0}tag" })),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -298,12 +295,12 @@ async fn publish_requires_s3_and_a_valid_tag() {
         app(state(Some(S3Cache::from(s3.cache_ref())))),
         Method::POST,
         "/precompute/baseline",
-        Some(json!({ "input": input(), "tag": TAG, "variant": "nightly" })),
+        Some(json!({ "input": input() })),
     )
     .await;
     assert_eq!(
         status,
         StatusCode::UNPROCESSABLE_ENTITY,
-        "unknown variant is rejected by the body extractor"
+        "a missing tag is rejected by the body extractor"
     );
 }

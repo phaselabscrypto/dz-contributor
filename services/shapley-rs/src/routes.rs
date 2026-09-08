@@ -15,7 +15,7 @@ use axum::{
 use crate::cache::{self, BaselineResult, EpochCache, OperatorCache, response_from_baseline};
 use crate::inflight::{self, Flight};
 use crate::model::{
-    BaselinePublishPayload, BaselineVariant, HealthResponse, LinkEstimateOut, LinkEstimateRequest,
+    BaselinePublishPayload, HealthResponse, LinkEstimateOut, LinkEstimateRequest,
     LinkEstimateResponse, ShapleyInputIn, ShapleyOperatorOut, ShapleyResponse, SimulateRequest,
     SimulateResponse, SimulateStats, SweepPayload,
 };
@@ -766,7 +766,6 @@ fn validate_tag(tag: &str) -> Result<(), &'static str> {
 pub struct BaselinePublishRequest {
     pub input: ShapleyInputIn,
     pub tag: String,
-    pub variant: BaselineVariant,
 }
 
 /// `GET /shapley/baseline` query.
@@ -821,7 +820,6 @@ pub async fn precompute_baseline(
                     "status": "already-cached",
                     "input_hash": hash_hex,
                     "tag": request.tag,
-                    "variant": request.variant,
                 })),
             )
                 .into_response();
@@ -857,7 +855,6 @@ pub async fn precompute_baseline(
     let payload = BaselinePublishPayload {
         input: request.input,
         tag: request.tag,
-        variant: request.variant,
         is_publish_authorized: true,
     };
     match store
@@ -873,7 +870,6 @@ pub async fn precompute_baseline(
                     "job_id": job_id,
                     "input_hash": hash_hex,
                     "tag": payload.tag,
-                    "variant": payload.variant,
                 })),
             )
                 .into_response()

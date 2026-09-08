@@ -21,7 +21,7 @@ spinner plus wasted API-pod CPU in the window after each new epoch.
 
 Readers never compute. They ask the Rust service for one epoch's published
 baseline and answer in milliseconds with the result or a small `not-cached`
-body. Only the precompute cron and the worker compute.
+body. Only the link-value cron and the worker compute.
 
 ### Baselines are addressed by an epoch tag, not by input hash
 
@@ -32,11 +32,24 @@ cron therefore publishes an alias per epoch, keyed on
 `shapley/v3/publication/v1/`. This extends the alias machinery link-value
 already uses.
 
-There is one alias per epoch. The alias body records
-`variant: "foundation" | "snapshot"` so provenance stays visible, but the
-reader asks one question per epoch rather than probing the cron's preference
-order itself. Keying by `(tag, variant)` would double the probe count, which at
-tracking's N=16 is 32 requests instead of 16.
+There is one alias per epoch and one input source: the epoch snapshot in the
+Foundation S3 bucket, built with the canonical builder. The alias body carries
+the `input_hash`, so a republish under a changed builder is detectable. The
+optional Foundation CSV source (`DZ_CANONICAL_INPUTS_URL`) and the `variant`
+field that recorded it are removed. The CSV source was never enabled, and a
+second input for the same epoch made the published number depend on which cron
+ran last.
+
+### One cron, one download
+
+The link-value cron (`/api/link-value/precompute`) already downloads the epoch
+snapshot once per fire and feeds the sweep and the diff shape from it. The
+baseline publish is a third consumer of that same download, so the separate
+`/api/shapley/precompute` cron is deleted along with its input builder. Each
+fire probes `GET /shapley/baseline?tag=` next to the sweep marker and the
+missing-shape list, and publishes the alias when it is absent. An epoch that was
+swept before this change gets its alias on the next fire from one download, and
+the service aliases a result it already holds without a solve.
 
 ### The read route is a cache-only GET that never computes
 
@@ -83,8 +96,8 @@ zeros reorders nothing, and a header invites the click.
 With no reader computing, the shared per-epoch compute helper and its LRU and
 in-flight map, its typed service error, the soft-failure remote wrapper, the
 in-process TypeScript solver, the single-epoch SWR hook and the 202-warming
-contract all have no callers. They are removed. What remains of the compute
-helper is input building for the cron, so it is now `lib/utils/epoch-input.ts`.
+contract all have no callers. They are removed, and so are the compute helper's
+input builders: the cron builds its input from the snapshot it already holds.
 
 `app/api/shapley/simulate/route.ts` still solves synchronously on a cold epoch.
 That is a separate ticket and out of scope here.

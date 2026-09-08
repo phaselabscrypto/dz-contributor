@@ -6,9 +6,6 @@ import type { ShapleyOutput } from "@/lib/types/shapley";
  * once here so routes, hooks, components and scripts cannot drift apart.
  */
 
-/** Which canonical input built a published baseline. */
-export type BaselineVariant = "foundation" | "snapshot";
-
 /** 200 body of GET /api/shapley/baseline and GET /api/shapley?epoch=N. */
 export interface EpochBaseline {
   epoch: number;

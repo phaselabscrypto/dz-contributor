@@ -94,37 +94,11 @@ pub struct ShapleyResponse {
     pub values: std::collections::BTreeMap<String, ShapleyOperatorOut>,
 }
 
-/// Which canonical input built a baseline. The two variants hash differently,
-/// so an alias records which one produced it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BaselineVariant {
-    Foundation,
-    Snapshot,
-}
-
-impl BaselineVariant {
-    /// The wire spelling, also used in log lines and job summaries.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            BaselineVariant::Foundation => "foundation",
-            BaselineVariant::Snapshot => "snapshot",
-        }
-    }
-}
-
-impl std::fmt::Display for BaselineVariant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// The published baseline for one tag. Stored as the alias object and returned
 /// verbatim by `GET /shapley/baseline`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaselineAlias {
     pub tag: String,
-    pub variant: BaselineVariant,
     /// `cache::hash_input` of the input as `{:016x}`; names the `cache-` object.
     pub input_hash: String,
     #[serde(flatten)]
@@ -136,7 +110,6 @@ pub struct BaselineAlias {
 pub struct BaselinePublishPayload {
     pub input: ShapleyInputIn,
     pub tag: String,
-    pub variant: BaselineVariant,
     /// Set by the ingest-authenticated producer. A payload stored without it
     /// decodes as unauthorized and publishes nothing.
     #[serde(default)]
@@ -266,28 +239,13 @@ pub struct SimulateStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{BaselineAlias, BaselinePublishPayload, BaselineVariant, SweepPayload};
-
-    #[test]
-    fn baseline_variant_serializes_lowercase_and_rejects_unknown() {
-        assert_eq!(
-            serde_json::to_string(&BaselineVariant::Foundation).unwrap(),
-            "\"foundation\""
-        );
-        assert_eq!(
-            serde_json::from_str::<BaselineVariant>("\"snapshot\"").unwrap(),
-            BaselineVariant::Snapshot
-        );
-        assert!(serde_json::from_str::<BaselineVariant>("\"nightly\"").is_err());
-        assert_eq!(BaselineVariant::Snapshot.to_string(), "snapshot");
-    }
+    use super::{BaselineAlias, BaselinePublishPayload, SweepPayload};
 
     #[test]
     fn baseline_publish_payload_without_authorization_decodes_as_unauthorized() {
         let stored = r#"{
             "input": { "devices": [], "private_links": [], "public_links": [], "demands": [] },
-            "tag": "baseline:epoch-1:canonical-v1:00",
-            "variant": "foundation"
+            "tag": "baseline:epoch-1:canonical-v1:00"
         }"#;
         let payload: BaselinePublishPayload = serde_json::from_str(stored).unwrap();
         assert!(!payload.is_publish_authorized);
@@ -312,7 +270,6 @@ mod tests {
     fn baseline_alias_flattens_result_fields() {
         let alias = BaselineAlias {
             tag: "t".into(),
-            variant: BaselineVariant::Foundation,
             input_hash: "00000000000000aa".into(),
             result: super::ShapleyResponse {
                 method: "m".into(),
@@ -321,14 +278,7 @@ mod tests {
             },
         };
         let value = serde_json::to_value(&alias).unwrap();
-        for key in [
-            "tag",
-            "variant",
-            "input_hash",
-            "method",
-            "operator_count",
-            "values",
-        ] {
+        for key in ["tag", "input_hash", "method", "operator_count", "values"] {
             assert!(value.get(key).is_some(), "missing top-level {key}");
         }
         assert!(value.get("result").is_none(), "result must be flattened");

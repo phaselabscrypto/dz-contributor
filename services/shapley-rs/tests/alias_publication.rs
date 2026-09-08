@@ -12,8 +12,8 @@ use dz_shapley_service::{
     diff_store::{DiffStore, NoPersistence},
     jobs::RedisJobStore,
     model::{
-        BaselinePublishPayload, BaselineVariant, LinkEstimateRequest, LinkEstimateResponse,
-        ShapleyInputIn, SweepPayload,
+        BaselinePublishPayload, LinkEstimateRequest, LinkEstimateResponse, ShapleyInputIn,
+        SweepPayload,
     },
     queue::{self, JobKind},
     routes::{self, BaselinePublishRequest, LinkEstimateSweepRequest},
@@ -531,7 +531,6 @@ fn baseline_payload(tag: &str, is_publish_authorized: bool) -> BaselinePublishPa
     BaselinePublishPayload {
         input: support::canonical_two_operator_input(),
         tag: tag.into(),
-        variant: BaselineVariant::Foundation,
         is_publish_authorized,
     }
 }
@@ -558,7 +557,6 @@ async fn baseline_publish_persists_the_result_before_its_alias(h: &Harness) {
     let result = h.done(&enqueue_baseline_publish(h, &payload).await).await;
     assert_eq!(result["alias_written"], true, "{result}");
     assert_eq!(result["tag"], "baseline-order");
-    assert_eq!(result["variant"], "foundation");
     assert_eq!(result["result"]["operator_count"], 2);
 
     let hash = cache::hash_input(&payload.input);
@@ -606,7 +604,6 @@ async fn baseline_publish_route_round_trips(h: &Harness) {
     let request = || BaselinePublishRequest {
         input: support::canonical_two_operator_input(),
         tag: "baseline-route".into(),
-        variant: BaselineVariant::Snapshot,
     };
     let response = routes::precompute_baseline(State(h.state.clone()), Json(request()))
         .await
@@ -619,7 +616,6 @@ async fn baseline_publish_route_round_trips(h: &Harness) {
     )
     .unwrap();
     assert_eq!(value["status"], "accepted");
-    assert_eq!(value["variant"], "snapshot");
     let job_id = value["job_id"].as_str().unwrap().to_owned();
     assert_eq!(h.done(&job_id).await["alias_written"], true);
 

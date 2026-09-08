@@ -12,7 +12,7 @@ use std::time::Duration;
 use aws_config::timeout::TimeoutConfig;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{BaselineAlias, BaselineVariant, ShapleyOperatorOut, ShapleyResponse};
+use crate::model::{BaselineAlias, ShapleyOperatorOut, ShapleyResponse};
 
 /// Cached per-city Shapley values + aggregated baseline for a network topology.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,7 +303,6 @@ impl S3Cache {
     pub(crate) async fn publish_baseline(
         &self,
         tag: &str,
-        variant: BaselineVariant,
         cache: &EpochCache,
     ) -> anyhow::Result<()> {
         use anyhow::Context;
@@ -315,7 +314,6 @@ impl S3Cache {
         self.persist_baseline(cache).await?;
         let alias = BaselineAlias {
             tag: tag.to_owned(),
-            variant,
             input_hash: format!("{:016x}", cache.input_hash),
             result: response_from_baseline(baseline),
         };
@@ -335,7 +333,7 @@ impl S3Cache {
             .send()
             .await
             .context("persist baseline alias")?;
-        tracing::info!(%key, tag = %alias.tag, variant = %alias.variant, "stored baseline alias");
+        tracing::info!(%key, tag = %alias.tag, "stored baseline alias");
         Ok(())
     }
 
