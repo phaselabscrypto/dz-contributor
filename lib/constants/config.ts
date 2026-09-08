@@ -40,11 +40,9 @@ export const NEW_CONTRIBUTOR_SIM_CODE = "new_contributor_sim";
 // `services/shapley-rs` (deployed to Cloud Run / Lambda) which wraps
 // the canonical `network-shapley-rs` LP solver.
 //
-// When the env var is set, every Shapley route requires the remote
-// solver — failures return 502 instead of silently swapping to a local
-// heuristic (PR #7 review). When the env var is unset (local dev only),
-// the routes serve `local-ts-heuristic-DEV-ONLY` results so the
-// non-canonical path is impossible to miss.
+// Every Shapley route requires the remote solver: failures return 502
+// instead of silently swapping in another algorithm (PR #7 review), and
+// an unset env var returns 503. There is no in-process solver behind it.
 //
 // `PYTHON_SHAPLEY_URL` is retained for backwards compatibility with the
 // previous Python deployment and is treated as an alias.

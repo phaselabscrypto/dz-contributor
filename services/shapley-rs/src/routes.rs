@@ -12,11 +12,12 @@ use axum::{
     response::IntoResponse,
 };
 
-use crate::cache::{self, BaselineResult, EpochCache, OperatorCache};
+use crate::cache::{self, BaselineResult, EpochCache, OperatorCache, response_from_baseline};
+use crate::inflight::{self, Flight};
 use crate::model::{
-    HealthResponse, LinkEstimateOut, LinkEstimateRequest, LinkEstimateResponse, ShapleyInputIn,
-    ShapleyOperatorOut, ShapleyResponse, SimulateRequest, SimulateResponse, SimulateStats,
-    SweepPayload,
+    BaselinePublishPayload, HealthResponse, LinkEstimateOut, LinkEstimateRequest,
+    LinkEstimateResponse, ShapleyInputIn, ShapleyOperatorOut, ShapleyResponse, SimulateRequest,
+    SimulateResponse, SimulateStats, SweepPayload,
 };
 
 use network_shapley::{
@@ -470,28 +471,6 @@ pub(crate) fn reusable_city_values(
     out
 }
 
-/// Build a wire `ShapleyResponse` from a cached baseline result.
-fn response_from_baseline(baseline: &BaselineResult) -> ShapleyResponse {
-    let values: BTreeMap<String, ShapleyOperatorOut> = baseline
-        .values
-        .iter()
-        .map(|(op, oc)| {
-            (
-                op.clone(),
-                ShapleyOperatorOut {
-                    value: oc.value,
-                    share: oc.share,
-                },
-            )
-        })
-        .collect();
-    ShapleyResponse {
-        method: baseline.method.clone(),
-        operator_count: baseline.operator_count,
-        values,
-    }
-}
-
 /// Serve a baseline for `input_hash` from the in-memory cache, falling back to
 /// S3 (rehydrating the in-memory cache on an S3 hit). Returns `None` on a full
 /// miss. Cheap on the hot path — only clones the (small) baseline, not the
@@ -501,7 +480,6 @@ pub(crate) async fn try_cached_baseline(
     state: &crate::AppState,
     input_hash: u64,
 ) -> Option<ShapleyResponse> {
-    // In-memory first.
     {
         let guard = state.epoch_cache.read().await;
         if let Some(c) = guard.as_ref()
@@ -516,17 +494,15 @@ pub(crate) async fn try_cached_baseline(
         }
     }
 
-    // S3 fallback — rehydrate the in-memory cache so subsequent requests
-    // (and warm-start coalition reuse) hit memory.
+    // S3 fallback: rehydrate the in-memory cache so later requests (and
+    // warm-start coalition reuse) hit memory. The response is built first so
+    // the loaded epoch can be moved into the slot without a copy.
     let s3 = state.s3_cache.as_ref()?;
     let loaded = s3.load(input_hash).await?;
     if loaded.input_hash != input_hash {
         return None;
     }
-    let resp = match loaded.baseline_values.as_ref() {
-        Some(b) => response_from_baseline(b),
-        None => return None,
-    };
+    let resp = response_from_baseline(loaded.baseline_values.as_ref()?);
     {
         let mut guard = state.epoch_cache.write().await;
         *guard = Some(loaded);
@@ -535,10 +511,62 @@ pub(crate) async fn try_cached_baseline(
     Some(resp)
 }
 
-/// Compute the baseline Shapley values for `body`, store them in the in-memory
-/// epoch cache, and persist to S3 in the background. Shared by `/shapley` and
-/// the background `/precompute`. Returns the wire response or an error string.
+/// The whole epoch cache for `input_hash` with a baseline in it, from memory,
+/// else from S3 (rehydrating memory on the way). `None` on a full miss. This
+/// clones the per-city map, so it is for callers that persist or publish the
+/// epoch; the request hot path uses [`try_cached_baseline`].
+pub(crate) async fn load_cached_epoch(
+    state: &crate::AppState,
+    input_hash: u64,
+) -> Option<EpochCache> {
+    {
+        let guard = state.epoch_cache.read().await;
+        if let Some(c) = guard.as_ref()
+            && c.input_hash == input_hash
+            && c.baseline_values.is_some()
+        {
+            tracing::info!(
+                cities_cached = c.per_city_values.len(),
+                "baseline cache hit (memory)"
+            );
+            return Some(c.clone());
+        }
+    }
+
+    let s3 = state.s3_cache.as_ref()?;
+    let loaded = s3.load(input_hash).await?;
+    if loaded.input_hash != input_hash || loaded.baseline_values.is_none() {
+        return None;
+    }
+    {
+        let mut guard = state.epoch_cache.write().await;
+        *guard = Some(loaded.clone());
+    }
+    tracing::info!("baseline cache hit (S3 rehydrate)");
+    Some(loaded)
+}
+
+/// `compute_baseline` plus the detached, best-effort S3 store. Shared by
+/// `/shapley`, `/simulate` and the queued `/precompute`. Returns the wire
+/// response or an error string.
 pub(crate) async fn compute_and_store_baseline(
+    state: &crate::AppState,
+    body: &ShapleyInputIn,
+    input_hash: u64,
+    control: Option<&ComputeControl>,
+) -> Result<ShapleyResponse, String> {
+    let (epoch, response) = compute_baseline(state, body, input_hash, control).await?;
+    if let Some(s3) = &state.s3_cache {
+        let s3 = s3.handle();
+        tokio::spawn(async move { s3.store(&epoch).await });
+    }
+    Ok(response)
+}
+
+/// Compute the baseline Shapley values for `body` and store them in the
+/// in-memory epoch cache. Returns the stored epoch cache alongside the wire
+/// response so the caller decides how to persist it.
+pub(crate) async fn compute_baseline(
     state: &crate::AppState,
     body: &ShapleyInputIn,
     input_hash: u64,
@@ -546,7 +574,7 @@ pub(crate) async fn compute_and_store_baseline(
     // and honours cancellation through this control, so the async worker can show
     // a moving bar during a cold baseline. The synchronous endpoints pass `None`.
     control: Option<&ComputeControl>,
-) -> Result<ShapleyResponse, String> {
+) -> Result<(EpochCache, ShapleyResponse), String> {
     let operator_count = body
         .devices
         .iter()
@@ -610,7 +638,7 @@ pub(crate) async fn compute_and_store_baseline(
             .collect(),
     };
 
-    {
+    let stored = {
         let mut guard = state.epoch_cache.write().await;
         let cache = guard.get_or_insert_with(|| EpochCache::new(input_hash));
         if cache.input_hash != input_hash {
@@ -620,23 +648,52 @@ pub(crate) async fn compute_and_store_baseline(
         // source cities it doesn't change (see `reusable_city_values`).
         cache.per_city_values = per_city_result.per_city;
         cache.baseline_values = Some(baseline);
+        cache.clone()
+    };
 
-        // Persist to S3 in the background.
-        if let Some(s3) = &state.s3_cache {
-            let cache_clone = cache.clone();
-            let s3_bucket = s3.bucket_name().to_string();
-            let s3_client = s3.client_ref().clone();
-            tokio::spawn(async move {
-                let s3 = cache::S3CacheRef {
-                    client: s3_client,
-                    bucket: s3_bucket,
-                };
-                s3.store(&cache_clone).await;
+    Ok((stored, response))
+}
+
+/// Outcome of a cold baseline request through the single flight. Keeps the
+/// handlers' 422 (bad input) versus 500 (task failure) split explicit.
+pub(crate) enum BaselineOutcome {
+    Solved(ShapleyResponse),
+    Rejected(String),
+    TaskFailed(String),
+}
+
+/// Run at most one cold baseline solve per input hash in this process;
+/// concurrent callers await the first. The solve runs detached so a dropped
+/// request future still lands the result in memory and S3.
+pub(crate) async fn baseline_single_flight(
+    state: &Arc<crate::AppState>,
+    body: &ShapleyInputIn,
+    input_hash: u64,
+) -> BaselineOutcome {
+    match state.baseline_inflight.join(input_hash) {
+        Flight::Follow(receiver) => {
+            tracing::info!(input_hash = %format!("{input_hash:016x}"), "baseline solve already in flight; following");
+            match inflight::await_leader(receiver).await {
+                Ok(Ok(resp)) => BaselineOutcome::Solved(resp),
+                Ok(Err(e)) => BaselineOutcome::Rejected(e),
+                Err(gone) => BaselineOutcome::TaskFailed(gone.to_string()),
+            }
+        }
+        Flight::Lead(guard) => {
+            let task_state = Arc::clone(state);
+            let body = body.clone();
+            let task = tokio::spawn(async move {
+                let result = compute_and_store_baseline(&task_state, &body, input_hash, None).await;
+                guard.finish(result.clone());
+                result
             });
+            match task.await {
+                Ok(Ok(resp)) => BaselineOutcome::Solved(resp),
+                Ok(Err(e)) => BaselineOutcome::Rejected(e),
+                Err(e) => BaselineOutcome::TaskFailed(format!("baseline compute task failed: {e}")),
+            }
         }
     }
-
-    Ok(response)
 }
 
 pub async fn shapley(
@@ -658,34 +715,19 @@ pub async fn shapley(
         return Json(resp).into_response();
     }
 
-    // ── Cold path: compute + store, DETACHED from the request future. Axum
-    // drops this handler's future when the client (or the cluster router's
-    // ~30s timeout) disconnects; the solve itself always ran to completion on
-    // its spawn_blocking thread, but the STORE step used to live in the
-    // dropped future, so a cut request's result never reached the cache and
-    // only the precompute cron could heal it. Running solve+store in a
-    // detached task means a cut solve still lands in memory + S3 and the
-    // caller's warming retry becomes a cache hit. (Concurrent cold requests
-    // for the same hash may still each burn a solve — the TS layer
-    // single-flights per instance, and the first store wins.)
-    //
-    // The in-process compute load-shed was removed in Phase 2 (ADR 0001) —
-    // the heavy what-if path runs on the worker pool; this synchronous
-    // endpoint is bounded only by the request timeout + body-size limit.
-    let task_state = Arc::clone(&state);
-    let store_task = tokio::spawn(async move {
-        compute_and_store_baseline(&task_state, &body, input_hash, None).await
-    });
-    match store_task.await {
-        Ok(Ok(resp)) => Json(resp).into_response(),
-        Ok(Err(e)) => (
+    // ── Cold path: one detached solve per input hash. Axum drops this
+    // handler's future when the client disconnects, so the solve and its store
+    // run in a spawned task and a cut request still lands the result in memory
+    // and S3. Concurrent requests for the same hash follow that one task
+    // instead of each burning a solve.
+    match baseline_single_flight(&state, &body, input_hash).await {
+        BaselineOutcome::Solved(resp) => Json(resp).into_response(),
+        BaselineOutcome::Rejected(e) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({ "error": e })),
         )
             .into_response(),
-        // JoinError: the detached task itself panicked or was aborted —
-        // compute panics are already mapped to Err inside, so this is rare.
-        Err(e) => {
+        BaselineOutcome::TaskFailed(e) => {
             tracing::error!(error = %e, "detached baseline compute task failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -696,7 +738,180 @@ pub async fn shapley(
     }
 }
 
-/// `POST /precompute`: warm the baseline cache for an epoch as a QUEUED job.
+/// Largest tag accepted on the baseline routes; the tag becomes a query value.
+pub const MAX_TAG_BYTES: usize = 256;
+
+/// Bound on the S3 read behind `GET /shapley/baseline`. Above the 5 s connect
+/// timeout so a slow connect still succeeds, far below the SDK's retry budget,
+/// which is sized for the poller rather than a user-facing probe.
+pub const BASELINE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Why a tag is unusable as an alias component. The text is safe for clients.
+fn validate_tag(tag: &str) -> Result<(), &'static str> {
+    if tag.is_empty() {
+        return Err("tag must not be empty");
+    }
+    if tag.len() > MAX_TAG_BYTES {
+        return Err("tag is too long");
+    }
+    if tag.contains('\0') {
+        return Err("tag must not contain NUL");
+    }
+    Ok(())
+}
+
+/// `POST /precompute/baseline` request. Not a variant of `ShapleyInputIn`,
+/// whose serialization is the cache key.
+#[derive(Debug, serde::Deserialize)]
+pub struct BaselinePublishRequest {
+    pub input: ShapleyInputIn,
+    pub tag: String,
+}
+
+/// `GET /shapley/baseline` query.
+#[derive(Debug, serde::Deserialize)]
+pub struct BaselineProbeQuery {
+    pub tag: String,
+}
+
+fn error_response(status: StatusCode, message: &str) -> axum::response::Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+fn not_cached_response(tag: &str) -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "status": "not-cached", "tag": tag })),
+    )
+        .into_response()
+}
+
+/// `POST /precompute/baseline`: warm the baseline for an epoch as a queued job
+/// and publish it under `tag` when the result lands.
+///
+/// Answers `200 already-cached` only when an alias for `tag` exists and names
+/// this input's hash. A missing alias over a cached result still enqueues, so
+/// the worker aliases it without a solve; an alias with another hash is
+/// overwritten. Gated by the ingest token on top of the compute token.
+pub async fn precompute_baseline(
+    State(state): State<Arc<crate::AppState>>,
+    Json(request): Json<BaselinePublishRequest>,
+) -> impl IntoResponse {
+    if let Err(msg) = validate_dimensions(&request.input) {
+        return error_response(StatusCode::BAD_REQUEST, &msg);
+    }
+    if let Err(msg) = validate_tag(&request.tag) {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    let input_hash = cache::hash_input(&request.input);
+    let hash_hex = format!("{input_hash:016x}");
+
+    let Some(s3) = state.s3_cache.as_ref() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "S3 cache not configured — baseline publication requires the result store",
+        );
+    };
+    match s3.load_baseline_alias(&request.tag).await {
+        Ok(Some(alias)) if alias.input_hash == hash_hex => {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "already-cached",
+                    "input_hash": hash_hex,
+                    "tag": request.tag,
+                })),
+            )
+                .into_response();
+        }
+        Ok(Some(alias)) => {
+            tracing::warn!(
+                tag = %request.tag,
+                existing = %alias.input_hash,
+                requested = %hash_hex,
+                "baseline alias names another input; republishing"
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(?error, tag = %request.tag, "baseline alias read failed");
+            return error_response(StatusCode::BAD_GATEWAY, "baseline store unavailable");
+        }
+    }
+
+    let Some(store) = state.jobs.clone() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "async jobs disabled (REDIS_URL not configured) — precompute requires the job queue",
+        );
+    };
+    let job_id = match store.create().await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, "precompute baseline: failed to create job");
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "job store unavailable");
+        }
+    };
+    let payload = BaselinePublishPayload {
+        input: request.input,
+        tag: request.tag,
+        is_publish_authorized: true,
+    };
+    match store
+        .enqueue(&job_id, crate::queue::JobKind::BaselinePublish, &payload)
+        .await
+    {
+        Ok(_) => {
+            tracing::info!(job_id, input_hash = %hash_hex, tag = %payload.tag, "baseline publish job enqueued");
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "status": "accepted",
+                    "job_id": job_id,
+                    "input_hash": hash_hex,
+                    "tag": payload.tag,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, job_id, "precompute baseline: enqueue failed");
+            let _ = store.set_failed(&job_id, "enqueue failed").await;
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "enqueue failed")
+        }
+    }
+}
+
+/// `GET /shapley/baseline?tag=`: the published baseline for `tag`, or
+/// `404 not-cached`. This handler reads one object and nothing else: it never
+/// computes, never enqueues, and never touches the epoch cache.
+pub async fn baseline_probe(
+    State(state): State<Arc<crate::AppState>>,
+    Query(query): Query<BaselineProbeQuery>,
+) -> impl IntoResponse {
+    if let Err(msg) = validate_tag(&query.tag) {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    let Some(s3) = state.s3_cache.as_ref() else {
+        return not_cached_response(&query.tag);
+    };
+    match tokio::time::timeout(BASELINE_PROBE_TIMEOUT, s3.load_baseline_alias(&query.tag)).await {
+        Err(_) => {
+            tracing::warn!(tag = %query.tag, "baseline probe timed out");
+            error_response(StatusCode::BAD_GATEWAY, "baseline store unavailable")
+        }
+        Ok(Err(error)) => {
+            tracing::error!(?error, tag = %query.tag, "baseline probe failed");
+            error_response(StatusCode::BAD_GATEWAY, "baseline store unavailable")
+        }
+        Ok(Ok(None)) => not_cached_response(&query.tag),
+        Ok(Ok(Some(alias))) => Json(alias).into_response(),
+    }
+}
+
+/// `POST /precompute`: warm the baseline cache for an epoch as a QUEUED job,
+/// keyed by input hash only. The tagged, publishable form is
+/// [`precompute_baseline`].
 ///
 /// Validates the input; already-cached → `200 already-cached`; else enqueues a
 /// `JobKind::Baseline` job (`202 {job_id, input_hash}`) that a WORKER computes
@@ -813,26 +1028,32 @@ pub async fn simulate(
 
     // ── Step 1: Baseline (memory/S3 cache hit, else compute + store) ─
     let baseline_start = std::time::Instant::now();
-    let (baseline_response, baseline_cache_hit) = match try_cached_baseline(&state, baseline_hash)
-        .await
-    {
-        Some(resp) => {
-            tracing::info!("simulate: baseline cache hit");
-            (resp, true)
-        }
-        None => match compute_and_store_baseline(&state, &body.baseline, baseline_hash, None).await
-        {
-            Ok(resp) => (resp, false),
-            Err(e) => {
-                tracing::error!(error = %e, "simulate: baseline compute failed");
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(serde_json::json!({ "error": format!("baseline: {e}") })),
-                )
-                    .into_response();
+    let (baseline_response, baseline_cache_hit) =
+        match try_cached_baseline(&state, baseline_hash).await {
+            Some(resp) => {
+                tracing::info!("simulate: baseline cache hit");
+                (resp, true)
             }
-        },
-    };
+            None => match baseline_single_flight(&state, &body.baseline, baseline_hash).await {
+                BaselineOutcome::Solved(resp) => (resp, false),
+                BaselineOutcome::Rejected(e) => {
+                    tracing::error!(error = %e, "simulate: baseline compute failed");
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(serde_json::json!({ "error": format!("baseline: {e}") })),
+                    )
+                        .into_response();
+                }
+                BaselineOutcome::TaskFailed(e) => {
+                    tracing::error!(error = %e, "simulate: baseline compute task failed");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": "baseline compute task failed" })),
+                    )
+                        .into_response();
+                }
+            },
+        };
     let baseline_ms = baseline_start.elapsed().as_millis() as u64;
 
     // ── Step 2: Modified run (per-city EXACT, DZ-faithful) ───────────

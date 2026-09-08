@@ -11,6 +11,8 @@ use dz_shapley_service::{
     cache::S3CacheRef,
     diff::{DiffShape, LinkRef},
     epoch::Epoch,
+    model::ShapleyInputIn,
+    queue,
 };
 use std::{
     collections::HashMap,
@@ -226,4 +228,43 @@ pub fn shape(bandwidth: f64) -> DiffShape {
             link_type: "WAN".into(),
         }],
     }
+}
+
+/// The S3 key of the baseline alias for `tag`, mirroring the service's builder.
+pub fn baseline_alias_key(tag: &str) -> String {
+    format!(
+        "shapley/v3/publication/v1/baseline-alias-{:016x}.json",
+        queue::hash_payload(&format!("baseline\u{0}{tag}"))
+    )
+}
+
+/// The S3 key of the hash-keyed baseline result.
+pub fn baseline_cache_key(input_hash: u64) -> String {
+    format!("shapley/v3/cache-{input_hash:016x}.bin")
+}
+
+/// Two operators at one source city with unique device names and the
+/// `city_weights` the per-city reward path requires. Solves in well under a
+/// second, so tests can run the real solver.
+pub fn canonical_two_operator_input() -> ShapleyInputIn {
+    serde_json::from_value(serde_json::json!({
+        "devices": [
+            { "device": "FRA1", "edge": 1, "operator": "Alpha" },
+            { "device": "FRA2", "edge": 1, "operator": "Beta" },
+            { "device": "AMS1", "edge": 1, "operator": "Alpha" },
+            { "device": "AMS2", "edge": 1, "operator": "Beta" }
+        ],
+        "private_links": [
+            { "device1": "FRA1", "device2": "AMS1", "latency": 5.0, "bandwidth": 10.0, "uptime": 1.0, "shared": null },
+            { "device1": "FRA2", "device2": "AMS2", "latency": 6.0, "bandwidth": 10.0, "uptime": 1.0, "shared": null }
+        ],
+        "public_links": [
+            { "city1": "FRA", "city2": "AMS", "latency": 7.0 }
+        ],
+        "demands": [
+            { "start": "FRA", "end": "AMS", "receivers": 1, "traffic": 1.0, "priority": 1.0, "type": 1, "multicast": false }
+        ],
+        "city_weights": { "FRA": 1.0 }
+    }))
+    .expect("canonical input parses")
 }

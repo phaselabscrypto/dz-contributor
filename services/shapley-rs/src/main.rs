@@ -3,6 +3,8 @@
 //! Endpoints:
 //! - `GET  /health`            -> liveness + crate version
 //! - `POST /shapley`           -> compute Shapley values for a coalition input
+//! - `GET  /shapley/baseline`  -> a published baseline by tag; never computes
+//! - `POST /precompute/baseline` -> queue a baseline and publish it under a tag (second bearer token)
 //! - `POST /link-estimate`     -> per-link value-add for a focused operator
 //! - `GET  /diff`              -> network diff between two epochs
 //! - `GET  /diff/contributor/:code` -> one contributor's diff between two epochs
@@ -111,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
         ingest_token,
         jobs: dz_shapley_service::jobs::store_from_env(),
         diff_store,
+        baseline_inflight: Arc::default(),
     });
 
     match role.as_str() {
@@ -136,6 +139,7 @@ fn api_router(state: Arc<AppState>, serve_compute: bool) -> Router {
     if serve_compute {
         let compute_routes = Router::new()
             .route("/shapley", post(routes::shapley))
+            .route("/shapley/baseline", get(routes::baseline_probe))
             .route("/simulate", post(routes::simulate))
             .route("/link-estimate", post(routes::link_estimate))
             .route("/precompute", post(routes::precompute))
@@ -165,6 +169,7 @@ fn api_router(state: Arc<AppState>, serve_compute: bool) -> Router {
                         "/precompute/link-estimates",
                         post(routes::link_estimate_sweep),
                     )
+                    .route("/precompute/baseline", post(routes::precompute_baseline))
                     .route_layer(middleware::from_fn_with_state(
                         state.clone(),
                         require_ingest_auth,
@@ -370,6 +375,7 @@ mod tests {
             ingest_token: ingest.map(str::to_string),
             jobs: None,
             diff_store: Arc::new(DiffStore::new(Arc::new(NoPersistence))),
+            baseline_inflight: Arc::default(),
         })
     }
 
@@ -503,6 +509,63 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected);
         }
+    }
+    #[tokio::test]
+    async fn baseline_publish_route_requires_both_tokens() {
+        for (api, ingest, expected) in [
+            (Some("compute"), None, StatusCode::UNAUTHORIZED),
+            (None, Some("ingest"), StatusCode::UNAUTHORIZED),
+            (Some("compute"), Some("wrong"), StatusCode::UNAUTHORIZED),
+            (
+                Some("compute"),
+                Some("ingest"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            let state = state_with_tokens(Some("compute"), Some("ingest"));
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/precompute/baseline")
+                .header("content-type", "application/json");
+            if let Some(token) = api {
+                request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+            }
+            if let Some(token) = ingest {
+                request = request.header(INGEST_TOKEN_HEADER, token);
+            }
+            let response = api_router(state, true)
+                .oneshot(request.body(Body::from(r#"{"tag":"x"}"#)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+    #[tokio::test]
+    async fn baseline_probe_is_on_the_compute_router() {
+        let state = state_with_tokens(Some("compute"), None);
+        let response = api_router(state, true)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/shapley/baseline?tag=epoch-1")
+                    .header(AUTHORIZATION, "Bearer compute")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let unauthenticated = api_router(state_with_tokens(Some("compute"), None), true)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/shapley/baseline?tag=epoch-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
     }
     #[tokio::test]
     async fn unset_ingest_token_closes_sweep_route_but_not_compute() {

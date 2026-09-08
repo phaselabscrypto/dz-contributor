@@ -15,14 +15,14 @@ use network_shapley::shapley::ComputeControl;
 use crate::cache;
 use crate::jobs::RedisJobStore;
 use crate::model::{
-    LinkEstimateRequest, LinkEstimateResponse, ShapleyInputIn, ShapleyResponse, SimulateRequest,
-    SimulateResponse, SimulateStats, SweepPayload,
+    BaselinePublishPayload, LinkEstimateRequest, LinkEstimateResponse, ShapleyInputIn,
+    ShapleyResponse, SimulateRequest, SimulateResponse, SimulateStats, SweepPayload,
 };
 use crate::queue::{self, JobKind};
 use crate::routes::{
     LinkEstimateError, PerCityError, SWEEP_MAX_FOCUS_LINKS, compute_and_store_baseline,
-    compute_per_city, count_focus_links, link_estimate_payload_hash, reusable_city_values,
-    try_cached_baseline,
+    compute_baseline, compute_per_city, count_focus_links, link_estimate_payload_hash,
+    load_cached_epoch, reusable_city_values, try_cached_baseline,
 };
 
 /// Outcome of a single solve, so `process_entry` (not the compute) owns the
@@ -163,8 +163,8 @@ async fn process_entry(
         .map(str::to_owned);
 
     // 3. Idempotency: a cached result is republished instead of recomputed.
-    //    Sweep summaries are never cached, so a sweep always re-expands.
-    if entry.kind != JobKind::Sweep
+    //    Sweep and publish summaries are never cached (`is_result_cached`).
+    if entry.kind.is_result_cached()
         && let Some(resp) = store.result_cache_get(&entry.input_hash).await?
         && reconcile_cached_result(state, store, &entry, alias_tag.as_deref(), &resp).await?
     {
@@ -265,6 +265,18 @@ async fn process_entry(
                 return Ok(());
             }
         },
+        JobKind::BaselinePublish => {
+            match store
+                .get_payload::<BaselinePublishPayload>(&entry.job_id)
+                .await?
+            {
+                Some(payload) => run_baseline_publish(state, store, &entry.job_id, payload).await,
+                None => {
+                    tracing::warn!(job_id = %entry.job_id, "payload missing — leaving pending for reclaim");
+                    return Ok(());
+                }
+            }
+        }
     };
 
     // 6. Terminal handling. process_entry owns the XACK/cache/state ordering,
@@ -278,7 +290,7 @@ async fn process_entry(
             // report, and a re-sweep must re-expand (cheap) to observe state
             // that changed since — caching it would serve stale bookkeeping.
             store.set_done(&entry.job_id, &resp).await?;
-            if entry.kind != JobKind::Sweep
+            if entry.kind.is_result_cached()
                 && let Err(e) = store.result_cache_set(&entry.input_hash, &resp).await
             {
                 tracing::warn!(error = %e, "result cache_set failed (non-fatal)");
@@ -861,15 +873,100 @@ async fn run_baseline(
                 serde_json::to_value(resp).expect("ShapleyResponse serializes to JSON"),
             ))
         }
-        Err(e) => {
-            // A cancel during the solve surfaces as an error string; map it to
-            // Cancelled (terminal, XACK'd) rather than a failure — same rule as
-            // run_simulate's baseline phase.
-            if control.cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                Outcome::Cancelled
-            } else {
-                Outcome::Deterministic(format!("baseline: {e}"))
+        Err(e) => baseline_failure(e, &control),
+    }
+}
+
+/// A failed baseline solve is `Cancelled` when the job's cancel flag was set,
+/// since a cancel surfaces as an error string, and `Deterministic` otherwise.
+fn baseline_failure(error: String, control: &ComputeControl) -> Outcome {
+    if control.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        Outcome::Cancelled
+    } else {
+        Outcome::Deterministic(format!("baseline: {error}"))
+    }
+}
+
+/// Baseline publication: load the cached epoch or solve it, then persist the
+/// result and write its alias. The result is always stored; only the alias is
+/// gated on authority and cancellation. A failed alias write is reported in the
+/// summary, not fatal: the next `POST /precompute/baseline` enqueues a retry
+/// that takes the cached path and skips the solve.
+async fn run_baseline_publish(
+    state: &Arc<crate::AppState>,
+    store: &RedisJobStore,
+    job_id: &str,
+    payload: BaselinePublishPayload,
+) -> Outcome {
+    let input_hash = cache::hash_input(&payload.input);
+    let epoch = match load_cached_epoch(state, input_hash).await {
+        Some(epoch) => {
+            tracing::info!(job = %job_id, tag = %payload.tag, served_from = "cache", "baseline publish: result already cached");
+            epoch
+        }
+        None => {
+            let control = ComputeControl::default();
+            let bridge = TaskGuard::spawn(bridge_control(
+                store.clone(),
+                job_id.to_string(),
+                control.clone(),
+            ));
+            let _ = store.set_phase(job_id, "baseline").await;
+            tracing::info!(job = %job_id, tag = %payload.tag, "baseline publish: solve start");
+            let start = std::time::Instant::now();
+            let result = compute_baseline(state, &payload.input, input_hash, Some(&control)).await;
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            bridge.stop().await;
+            match result {
+                Ok((epoch, _)) => {
+                    tracing::info!(job = %job_id, elapsed_ms, "baseline publish: solve done");
+                    epoch
+                }
+                Err(e) => return baseline_failure(e, &control),
             }
+        }
+    };
+
+    let Some(baseline) = epoch.baseline_values.as_ref() else {
+        return Outcome::Deterministic("baseline: epoch cache has no baseline".to_string());
+    };
+    let response = cache::response_from_baseline(baseline);
+    let alias_written = publish_baseline_epoch(state, store, job_id, &payload, &epoch).await;
+    Outcome::Done(Box::new(serde_json::json!({
+        "input_hash": format!("{input_hash:016x}"),
+        "tag": payload.tag,
+        "alias_written": alias_written,
+        "result": response,
+    })))
+}
+
+/// Write the alias for a finished baseline when the job may publish. Returns
+/// whether the alias landed. When it may not publish, the result is still
+/// stored best-effort so the hash-keyed cache stays warm.
+async fn publish_baseline_epoch(
+    state: &crate::AppState,
+    store: &RedisJobStore,
+    job_id: &str,
+    payload: &BaselinePublishPayload,
+    epoch: &cache::EpochCache,
+) -> bool {
+    let Some(s3) = &state.s3_cache else {
+        return false;
+    };
+    let Some(tag) = payload.publish_tag() else {
+        tracing::warn!(job = %job_id, "baseline publish: payload is not authorized; storing without alias");
+        s3.store(epoch).await;
+        return false;
+    };
+    if should_skip_publication(store, job_id).await {
+        s3.store(epoch).await;
+        return false;
+    }
+    match s3.publish_baseline(tag, epoch).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::error!(%error, job = %job_id, tag, "baseline alias publication failed");
+            false
         }
     }
 }

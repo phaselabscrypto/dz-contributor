@@ -7,13 +7,16 @@ use axum::{Json, extract::State, http::Method, response::IntoResponse};
 use deadpool_redis::redis::streams::{StreamAutoClaimOptions, StreamAutoClaimReply};
 use deadpool_redis::{Config, Connection, Runtime, redis::AsyncCommands};
 use dz_shapley_service::{
-    AppState,
+    AppState, cache,
     cache::S3Cache,
     diff_store::{DiffStore, NoPersistence},
     jobs::RedisJobStore,
-    model::{LinkEstimateRequest, LinkEstimateResponse, ShapleyInputIn, SweepPayload},
+    model::{
+        BaselinePublishPayload, LinkEstimateRequest, LinkEstimateResponse, ShapleyInputIn,
+        SweepPayload,
+    },
     queue::{self, JobKind},
-    routes::{self, LinkEstimateSweepRequest},
+    routes::{self, BaselinePublishRequest, LinkEstimateSweepRequest},
     worker,
 };
 use serde_json::{Value, json};
@@ -94,6 +97,7 @@ impl Harness {
             ingest_token: Some("ingest".into()),
             jobs: Some(store.clone()),
             diff_store: Arc::new(DiffStore::new(Arc::new(NoPersistence))),
+            baseline_inflight: Arc::default(),
         });
         let input: ShapleyInputIn =
             serde_json::from_str(include_str!("fixtures/simple.json")).unwrap();
@@ -517,4 +521,114 @@ async fn publication_reconciles_cached_results_and_keeps_claims_alive() {
     fresh_solves_publish_then_mark(&h).await;
     nul_in_tag_is_rejected(&h).await;
     stalled_publication_keeps_claim_and_recovers_after_restart(&mut h).await;
+    baseline_publish_persists_the_result_before_its_alias(&h).await;
+    baseline_alias_is_withheld_when_the_result_store_fails(&h).await;
+    unauthorized_baseline_payload_publishes_nothing(&h).await;
+    baseline_publish_route_round_trips(&h).await;
+}
+
+fn baseline_payload(tag: &str, is_publish_authorized: bool) -> BaselinePublishPayload {
+    BaselinePublishPayload {
+        input: support::canonical_two_operator_input(),
+        tag: tag.into(),
+        is_publish_authorized,
+    }
+}
+
+async fn enqueue_baseline_publish(h: &Harness, payload: &BaselinePublishPayload) -> String {
+    let job_id = h.store.create().await.unwrap();
+    h.store
+        .enqueue(&job_id, JobKind::BaselinePublish, payload)
+        .await
+        .unwrap();
+    job_id
+}
+
+fn first_put_index(requests: &[(Method, String)], needle: &str) -> Option<usize> {
+    requests
+        .iter()
+        .position(|(method, key)| *method == Method::PUT && key.contains(needle))
+}
+
+/// The alias is written after the hash-keyed result it points at.
+async fn baseline_publish_persists_the_result_before_its_alias(h: &Harness) {
+    let payload = baseline_payload("baseline-order", true);
+    let before = h.requests().len();
+    let result = h.done(&enqueue_baseline_publish(h, &payload).await).await;
+    assert_eq!(result["alias_written"], true, "{result}");
+    assert_eq!(result["tag"], "baseline-order");
+    assert_eq!(result["result"]["operator_count"], 2);
+
+    let hash = cache::hash_input(&payload.input);
+    assert!(h.s3.has(&support::baseline_cache_key(hash)));
+    assert!(h.s3.has(&support::baseline_alias_key("baseline-order")));
+    let requests = &h.requests()[before..];
+    let cache_put = first_put_index(requests, "/cache-").expect("result was put");
+    let alias_put = first_put_index(requests, "baseline-alias-").expect("alias was put");
+    assert!(cache_put < alias_put, "alias must follow the result");
+}
+
+/// A result store failure withholds the alias; the retry publishes from the
+/// cached epoch without solving again.
+async fn baseline_alias_is_withheld_when_the_result_store_fails(h: &Harness) {
+    let payload = baseline_payload("baseline-retry", true);
+    h.fail_puts(Some(("cache-", 403)));
+    let result = h.done(&enqueue_baseline_publish(h, &payload).await).await;
+    assert_eq!(result["alias_written"], false, "{result}");
+    assert!(!h.s3.has(&support::baseline_alias_key("baseline-retry")));
+
+    h.fail_puts(None);
+    let result = h.done(&enqueue_baseline_publish(h, &payload).await).await;
+    assert_eq!(result["alias_written"], true, "{result}");
+    assert!(h.s3.has(&support::baseline_alias_key("baseline-retry")));
+}
+
+/// A payload that did not come through the ingest route stores the result
+/// and nothing else.
+async fn unauthorized_baseline_payload_publishes_nothing(h: &Harness) {
+    let payload = baseline_payload("baseline-unauthorized", false);
+    let result = h.done(&enqueue_baseline_publish(h, &payload).await).await;
+    assert_eq!(result["alias_written"], false, "{result}");
+    assert!(
+        !h.s3
+            .has(&support::baseline_alias_key("baseline-unauthorized"))
+    );
+    assert!(h.s3.has(&support::baseline_cache_key(cache::hash_input(
+        &payload.input
+    ))));
+}
+
+/// The route enqueues, the worker publishes, and the same request then
+/// short-circuits on the alias.
+async fn baseline_publish_route_round_trips(h: &Harness) {
+    let request = || BaselinePublishRequest {
+        input: support::canonical_two_operator_input(),
+        tag: "baseline-route".into(),
+    };
+    let response = routes::precompute_baseline(State(h.state.clone()), Json(request()))
+        .await
+        .into_response();
+    assert_eq!(response.status(), 202);
+    let value: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["status"], "accepted");
+    let job_id = value["job_id"].as_str().unwrap().to_owned();
+    assert_eq!(h.done(&job_id).await["alias_written"], true);
+
+    let response = routes::precompute_baseline(State(h.state.clone()), Json(request()))
+        .await
+        .into_response();
+    assert_eq!(response.status(), 200);
+    let value: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["status"], "already-cached");
+    assert_eq!(value["tag"], "baseline-route");
 }

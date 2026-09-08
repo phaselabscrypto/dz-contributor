@@ -59,6 +59,7 @@ async function main(): Promise<void> {
   }
   process.env.SHAPLEY_INGEST_TOKEN = "test-ingest";
   const { getSnapshotUrl } = await import("@/lib/constants/config");
+  const { baselineTag } = await import("@/lib/utils/sweep-tag");
   const { runPrecomputeIngest } = await import("@/lib/utils/precompute-ingest");
   const { EpochSnapshotError, fetchEpochSnapshot } = await import(
     "@/lib/utils/epoch-snapshot"
@@ -76,6 +77,7 @@ async function main(): Promise<void> {
   let now = baseTime;
   let missing: unknown = [181, 182, 183, 211];
   let isSwept = false;
+  let hasBaseline = false;
   let mismatch = false;
   let inputBuildable = true;
   let hasBaselineFailure = false;
@@ -92,8 +94,25 @@ async function main(): Promise<void> {
     calls.push(`${method} ${url}`);
     if (url.startsWith("https://service.test")) {
       assert.equal(headers.get("authorization"), "Bearer test-compute");
-      if (method === "PUT" || url.endsWith("/precompute/link-estimates"))
+      if (
+        method === "PUT" ||
+        url.endsWith("/precompute/link-estimates") ||
+        url.endsWith("/precompute/baseline")
+      )
         assert.equal(headers.get("x-ingest-token"), "test-ingest");
+      if (url.includes("/shapley/baseline?")) {
+        const tag = new URL(url).searchParams.get("tag");
+        assert.equal(tag, baselineTag(211));
+        return hasBaseline
+          ? Response.json({
+              tag,
+              input_hash: "hash",
+              method: "lp-test",
+              operator_count: 0,
+              values: {},
+            })
+          : Response.json({ status: "not-cached", tag }, { status: 404 });
+      }
       if (url.includes("/status?")) {
         now += statusDelayMs;
         return Response.json({
@@ -104,7 +123,9 @@ async function main(): Promise<void> {
       if (url.includes("/diff/missing?")) return Response.json({ missing });
       if (url.endsWith("/precompute/link-estimates"))
         return Response.json({ job_id: "sweep-test" }, { status: 202 });
-      if (url.endsWith("/precompute"))
+      if (url.endsWith("/precompute/baseline")) {
+        const submitted = JSON.parse(String(init?.body)) as { tag: string };
+        assert.equal(submitted.tag, baselineTag(211));
         return hasBaselineFailure
           ? new Response("unavailable", { status: 503 })
           : Response.json(
@@ -112,9 +133,11 @@ async function main(): Promise<void> {
                 status: "accepted",
                 job_id: "baseline-test",
                 input_hash: "hash",
+                tag: submitted.tag,
               },
               { status: 202 },
             );
+      }
       if (url.includes("/diff/shape/")) {
         const submitted = JSON.parse(String(init?.body)) as { epoch: number };
         assert.equal(submitted.epoch, Number(url.split("/").at(-1)));
@@ -199,7 +222,7 @@ async function main(): Promise<void> {
     result = await run();
     assert.equal(result.status, 200);
     assert.equal(result.body.sweep_job_id, "sweep-test");
-    assert.ok(result.body.errors?.["baseline-warm"]);
+    assert.ok(result.body.errors?.["baseline-publish"]);
     hasBaselineFailure = false;
 
     reset();
@@ -229,12 +252,48 @@ async function main(): Promise<void> {
     statusDelayMs = 0;
     historyDelayMs = 0;
 
+    // Swept, shapes complete, no baseline alias: one download, one publish,
+    // no sweep.
     reset();
     isSwept = true;
     missing = [];
     result = await run();
     assert.equal(result.status, 200);
-    assert.equal(calls.length, 2);
+    assert.equal(result.body.sweep, "already-swept");
+    assert.equal(
+      calls.filter((call) => call === `GET ${getSnapshotUrl(211)}`).length,
+      1,
+    );
+    assert.ok(
+      calls.includes("POST https://service.test/precompute/baseline"),
+    );
+    assert.ok(
+      !calls.includes("POST https://service.test/precompute/link-estimates"),
+    );
+    assert.equal(
+      (result.body.baseline as { status?: string } | undefined)?.status,
+      "accepted",
+    );
+
+    // The alias is this fire's only output, so its failure is the status.
+    reset();
+    hasBaselineFailure = true;
+    result = await run();
+    assert.equal(result.status, 503);
+    assert.equal(result.body.sweep, "already-swept");
+    assert.ok(result.body.errors?.["baseline-publish"]);
+    hasBaselineFailure = false;
+
+    // Everything published: three status reads and no download.
+    reset();
+    hasBaseline = true;
+    result = await run();
+    assert.equal(result.status, 200);
+    assert.equal(calls.length, 3);
+    assert.ok(
+      calls.every((call) => call.startsWith("GET https://service.test")),
+    );
+    hasBaseline = false;
     isSwept = false;
     missing = [211, 211];
     await assert.rejects(

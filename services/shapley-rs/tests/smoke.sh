@@ -37,13 +37,13 @@ require jq
 TOL="${TOL:-0.01}"
 
 # 1) /health
-yellow "[1/8] GET $BASE/health"
+yellow "[1/9] GET $BASE/health"
 HEALTH=$(curl -fsS "$BASE/health")
 echo "$HEALTH" | jq -e '.status == "ok"' >/dev/null
 green "    ok"
 
 # 2) /shapley with upstream simple example
-yellow "[2/8] POST $BASE/shapley (simple example)"
+yellow "[2/9] POST $BASE/shapley (simple example)"
 RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} -X POST "$BASE/shapley" \
   -H 'content-type: application/json' \
   --data-binary @"$ROOT/tests/fixtures/simple.json")
@@ -83,7 +83,7 @@ else
 fi
 
 # 3) /link-estimate with Alpha as focus
-yellow "[3/8] POST $BASE/link-estimate (focus=Alpha)"
+yellow "[3/9] POST $BASE/link-estimate (focus=Alpha)"
 LE_BODY=$(jq '{ input: ., operator_focus: "Alpha" }' "$ROOT/tests/fixtures/simple.json")
 LE_RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} -X POST "$BASE/link-estimate" \
   -H 'content-type: application/json' \
@@ -94,7 +94,7 @@ echo "    links scored: $LINKS"
 test "$LINKS" -ge 1 || { red "expected >= 1 link"; exit 1; }
 
 # 4) /shapley with three-operator scenario (structural correctness)
-yellow "[4/8] POST $BASE/shapley (three-operator fixture)"
+yellow "[4/9] POST $BASE/shapley (three-operator fixture)"
 TO_RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} -X POST "$BASE/shapley" \
   -H 'content-type: application/json' \
   --data-binary @"$ROOT/tests/fixtures/three-operator.json")
@@ -119,7 +119,7 @@ assert a >= g, f'expected alpha ({a}) >= gamma ({g})'
 green "    three-operator structural checks passed"
 
 # 5) Round-trip latency budget — total < 30s on cold-start, < 5s warm.
-yellow "[5/8] Latency check"
+yellow "[5/9] Latency check"
 START=$(date +%s%N)
 curl -fsS "$BASE/health" >/dev/null
 END=$(date +%s%N)
@@ -128,24 +128,33 @@ echo "    /health round-trip: ${MS}ms"
 test "$MS" -le 5000 || yellow "    warning: ${MS}ms > 5s warm budget"
 
 # 6) /diff over the fixture window: epoch 208 removed one stakefac link.
-yellow "[6/8] GET $BASE/diff?from=204&to=211"
+yellow "[6/9] GET $BASE/diff?from=204&to=211"
 DIFF_RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} "$BASE/diff?from=204&to=211")
 echo "$DIFF_RESP" | jq -e '.summary.linksRemoved == 1' >/dev/null \
   || { red "    expected summary.linksRemoved == 1"; exit 1; }
 green "    ok"
 
 # 7) /diff/contributor/:code: the body carries the code and no display name.
-yellow "[7/8] GET $BASE/diff/contributor/tsw?from=204&to=211"
+yellow "[7/9] GET $BASE/diff/contributor/tsw?from=204&to=211"
 CDIFF_RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} "$BASE/diff/contributor/tsw?from=204&to=211")
 echo "$CDIFF_RESP" | jq -e '.code == "tsw"' >/dev/null \
   || { red "    expected code == tsw"; exit 1; }
 green "    ok"
 
 # 8) /diff/precompute warms the two latest epochs.
-yellow "[8/8] POST $BASE/diff/precompute?depth=2"
+yellow "[8/9] POST $BASE/diff/precompute?depth=2"
 PRE_RESP=$(curl -fsS ${AUTH[@]+"${AUTH[@]}"} -X POST "$BASE/diff/precompute?depth=2")
 echo "$PRE_RESP" | jq -e '(.results | length) == 2 and all(.results[]; .status == "ok")' >/dev/null \
   || { red "    expected every precompute status == ok"; echo "$PRE_RESP" | jq .; exit 1; }
+green "    ok"
+
+# 9) /shapley/baseline is cache-only: an unknown tag is a clean miss, never a solve.
+yellow "[9/9] GET $BASE/shapley/baseline?tag=smoke-missing"
+PROBE_CODE=$(curl -sS -o /tmp/smoke-probe.json -w '%{http_code}' ${AUTH[@]+"${AUTH[@]}"} \
+  "$BASE/shapley/baseline?tag=smoke-missing")
+test "$PROBE_CODE" = "404" || { red "    expected 404, got $PROBE_CODE"; exit 1; }
+jq -e '.status == "not-cached"' /tmp/smoke-probe.json >/dev/null \
+  || { red "    expected status == not-cached"; exit 1; }
 green "    ok"
 
 green ""

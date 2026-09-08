@@ -27,7 +27,8 @@
 //!
 //! Entry schemas: `whatif/v1` (simulate), `linkest/v1` (link-estimate; optional
 //! additive `focus` field — absent means self-contained payload), `sweep/v1`
-//! (sweep expansion), `baseline/v1` (baseline precompute).
+//! (sweep expansion), `baseline/v1` (baseline precompute), `baseline-publish/v1`
+//! (tagged baseline precompute that also writes the epoch alias).
 
 use std::collections::HashMap;
 
@@ -137,6 +138,12 @@ pub const SWEEP_SCHEMA: &str = "sweep/v1";
 /// `compute_and_store_baseline`). Own tag per the [`LINKEST_SCHEMA`] rule.
 pub const BASELINE_SCHEMA: &str = "baseline/v1";
 
+/// Schema version stamped onto tagged baseline-publish entries (payload is a
+/// `BaselinePublishPayload`; the worker computes or loads the baseline, then
+/// persists it and writes its epoch alias). Own tag per the [`LINKEST_SCHEMA`]
+/// rule, and distinct from [`BASELINE_SCHEMA`] because the payload shape differs.
+pub const BASELINE_PUBLISH_SCHEMA: &str = "baseline-publish/v1";
+
 // ── Key builders (the only place `{job_id}` / `{hash}` are interpolated) ──
 
 /// `shapley:whatif:payload:{job_id}` — TTL'd String holding the JSON
@@ -227,6 +234,10 @@ pub enum JobKind {
     /// Baseline precompute: payload is a self-contained `ShapleyInputIn`; the
     /// worker runs `compute_and_store_baseline` (memory + S3).
     Baseline,
+    /// Tagged baseline publication: payload is a `BaselinePublishPayload`; the
+    /// worker computes or loads the baseline, persists it, and writes the
+    /// epoch alias `GET /shapley/baseline` reads.
+    BaselinePublish,
 }
 
 impl JobKind {
@@ -236,6 +247,7 @@ impl JobKind {
             JobKind::LinkEstimate => "link-estimate",
             JobKind::Sweep => "sweep",
             JobKind::Baseline => "baseline",
+            JobKind::BaselinePublish => "baseline-publish",
         }
     }
 
@@ -248,6 +260,7 @@ impl JobKind {
             "link-estimate" => JobKind::LinkEstimate,
             "sweep" => JobKind::Sweep,
             "baseline" => JobKind::Baseline,
+            "baseline-publish" => JobKind::BaselinePublish,
             _ => JobKind::Simulate,
         }
     }
@@ -259,7 +272,16 @@ impl JobKind {
             JobKind::LinkEstimate => LINKEST_SCHEMA,
             JobKind::Sweep => SWEEP_SCHEMA,
             JobKind::Baseline => BASELINE_SCHEMA,
+            JobKind::BaselinePublish => BASELINE_PUBLISH_SCHEMA,
         }
+    }
+
+    /// Whether a finished job of this kind may be completed from, and written
+    /// to, the `result:{hash}` idempotency cache. A sweep or publish summary is
+    /// a point-in-time report, and a re-run must re-attempt the alias write, so
+    /// those kinds never consult the cache.
+    pub fn is_result_cached(self) -> bool {
+        !matches!(self, JobKind::Sweep | JobKind::BaselinePublish)
     }
 }
 
@@ -402,6 +424,7 @@ impl StreamEntry {
             || self.schema == LINKEST_SCHEMA
             || self.schema == SWEEP_SCHEMA
             || self.schema == BASELINE_SCHEMA
+            || self.schema == BASELINE_PUBLISH_SCHEMA
     }
 }
 
@@ -523,6 +546,23 @@ mod tests {
         assert_eq!(baseline.schema, BASELINE_SCHEMA);
         assert!(baseline.schema_supported());
         assert_eq!(JobKind::from_wire("baseline"), JobKind::Baseline);
+
+        let publish = StreamEntry::new("p".into(), JobKind::BaselinePublish, "00".into(), 1);
+        assert_eq!(publish.schema, BASELINE_PUBLISH_SCHEMA);
+        assert!(publish.schema_supported());
+        assert_eq!(
+            JobKind::from_wire("baseline-publish"),
+            JobKind::BaselinePublish
+        );
+    }
+
+    #[test]
+    fn result_cache_is_skipped_for_sweep_and_publish() {
+        assert!(JobKind::Simulate.is_result_cached());
+        assert!(JobKind::LinkEstimate.is_result_cached());
+        assert!(JobKind::Baseline.is_result_cached());
+        assert!(!JobKind::Sweep.is_result_cached());
+        assert!(!JobKind::BaselinePublish.is_result_cached());
     }
 
     #[test]

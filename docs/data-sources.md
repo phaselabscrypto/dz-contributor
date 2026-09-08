@@ -56,7 +56,7 @@ The DoubleZero Foundation publishes immutable per-epoch JSON snapshots to a publ
 | Server LRU cache | 8 entries, TTL 5 min (`snapshotCache` in `app/api/snapshot/route.ts`) |
 | CDN headers | `public, max-age=3600, s-maxage=3600, stale-while-revalidate=86400` |
 | Fetch timeout | 30 s |
-| Consuming routes | `app/api/snapshot/route.ts`, `app/api/epochs/route.ts`, `app/api/shapley/route.ts`, `app/api/shapley/baseline/route.ts`; `app/api/diff/route.ts` and `app/api/diff/contributor/[code]/route.ts` proxy to the Rust service, which reads the bucket itself |
+| Consuming routes | `app/api/snapshot/route.ts`, `app/api/epochs/route.ts`; `app/api/diff/route.ts` and `app/api/diff/contributor/[code]/route.ts` proxy to the Rust service, which reads the bucket itself |
 | Failure | 404 propagated when epoch not found; other S3 errors forwarded verbatim |
 
 Snapshots for completed epochs are immutable; the aggressive CDN TTL (1 h fresh, 24 h stale-while-revalidate) reflects this. Epoch discovery avoids a hard-coded ceiling by probing S3 directly; see `lib/utils/epoch-discovery.ts` for the algorithm.
@@ -142,24 +142,7 @@ Direct on-chain reads require two RPC endpoints: a standard Solana RPC for mainn
 
 ---
 
-## 8. Canonical Shapley inputs (optional)
-
-When the Foundation ships frozen per-epoch CSV inputs, the app can consume them directly instead of deriving inputs from the snapshot blob.
-
-| Fact | Value |
-|---|---|
-| Env var | `DZ_CANONICAL_INPUTS_URL` |
-| URL pattern | e.g. `https://…/epoch-{N}/` — `{N}` is replaced with the epoch number |
-| Files fetched | `private_links.csv`, `devices.csv`, `public_links.csv`, `demand.csv` |
-| Module | `lib/utils/canonical-inputs.ts` |
-| Consuming routes | `app/api/shapley/route.ts` (highest-priority input source when set) |
-| Failure | Returns `null`; route falls back to snapshot-derived inputs (labelled `inputSource: "canonical-snapshot"` or `"snapshot-heuristic"` in response) |
-
-When `DZ_CANONICAL_INPUTS_URL` is unset, all Shapley routes derive inputs from the Foundation S3 snapshot (source 3). For the full input-construction pipeline see [shapley-pipeline.md](shapley-pipeline.md).
-
----
-
-## 9. Health probing
+## 8. Health probing
 
 `/api/health` probes all configured upstreams in parallel and exposes a summary for the `/status` page and the sidebar network-pulse indicator.
 
@@ -195,4 +178,3 @@ Response hardening (security fix H17): full URLs, paths, and auth tokens stay in
 | Jupiter prices | `https://lite-api.jup.ag/price/v3` | 60 s | `app/api/prices/route.ts`, `lib/utils/fee-parser.ts` | 502 |
 | Solana RPC | `SOLANA_RPC_URL` | On-demand | `app/api/onchain/*` | 503 unconfigured (`topology`/`validators` only) / 502 |
 | DZ ledger RPC | `DZ_LEDGER_RPC_URL` | On-demand | `app/api/onchain/*` | 503 unconfigured (`topology`/`validators` only) / 502 |
-| Canonical Shapley inputs | `DZ_CANONICAL_INPUTS_URL` | On-demand | `app/api/shapley/route.ts` | Falls back to snapshot inputs |

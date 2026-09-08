@@ -21,3 +21,8 @@ export function canonicalParamsFingerprint(): string {
 export function sweepTag(epoch: number): string {
   return `epoch-${epoch}:${CANONICAL_SWEEP_VERSION}:${canonicalParamsFingerprint()}`;
 }
+
+/** Alias tag the shapley cron publishes and the baseline probe reads. */
+export function baselineTag(epoch: number): string {
+  return `baseline:${sweepTag(epoch)}`;
+}

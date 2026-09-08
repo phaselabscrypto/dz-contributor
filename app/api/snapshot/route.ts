@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSnapshotUrl } from "@/lib/constants/config";
 import { reportError } from "@/lib/observability";
+import {
+  EpochSnapshotError,
+  fetchEpochSnapshot,
+  snapshotFailure,
+} from "@/lib/utils/epoch-snapshot";
 import { LruCache } from "@/lib/utils/lru-cache";
 
 // Snapshots are ~5MB JSON blobs. Capped at 8 entries so worst-case memory
@@ -42,28 +46,22 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const url = getSnapshotUrl(epoch);
-    const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
-
-    if (!res.ok) {
-      if (res.status === 404) {
-        return NextResponse.json(
-          { error: `Epoch ${epoch} not found` },
-          { status: 404 }
-        );
-      }
-      return NextResponse.json(
-        { error: `Failed to fetch snapshot: ${res.status}` },
-        { status: res.status }
-      );
-    }
-
-    const data = await res.json();
+    const data = await fetchEpochSnapshot(epoch, { timeoutMs: 30_000 });
     snapshotCache.set(epoch, data);
     return NextResponse.json(data, {
       headers: { "Cache-Control": cacheControl },
     });
   } catch (err) {
+    if (err instanceof EpochSnapshotError) {
+      const failure = snapshotFailure(err);
+      if (failure.status !== 404) {
+        reportError(err, { source: "api/snapshot", extras: { epoch } });
+      }
+      return NextResponse.json(
+        { error: failure.message },
+        { status: failure.status }
+      );
+    }
     reportError(err, { source: "api/snapshot", extras: { epoch } });
     // Generic to the client — ${err} can carry upstream fetch detail.
     return NextResponse.json(

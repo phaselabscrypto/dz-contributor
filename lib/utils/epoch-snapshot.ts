@@ -105,3 +105,42 @@ export async function fetchEpochSnapshot(
     });
   }
 }
+
+/** The HTTP status a caller answers for a failed snapshot read. */
+export function snapshotFailureStatus(error: EpochSnapshotError): number {
+  switch (error.category) {
+    case "timeout":
+    case "aborted":
+      return 504;
+    case "epoch-mismatch":
+    case "envelope":
+    case "json":
+      return 422;
+    case "http":
+      return error.status === 404 ? 404 : 502;
+    case "network":
+      return 502;
+  }
+}
+
+/**
+ * The status and a client-safe message for a failed snapshot read. The
+ * message never carries the upstream URL or error text.
+ */
+export function snapshotFailure(error: EpochSnapshotError): {
+  status: number;
+  message: string;
+} {
+  const status = snapshotFailureStatus(error);
+  const { epoch } = error;
+  switch (status) {
+    case 404:
+      return { status, message: `Epoch ${epoch} not found` };
+    case 422:
+      return { status, message: `Epoch ${epoch} snapshot is invalid` };
+    case 504:
+      return { status, message: `Snapshot fetch for epoch ${epoch} timed out` };
+    default:
+      return { status, message: `Snapshot for epoch ${epoch} is unavailable` };
+  }
+}
