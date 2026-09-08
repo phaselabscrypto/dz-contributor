@@ -462,6 +462,7 @@ pub(crate) mod test_support {
     #[derive(Default)]
     pub(crate) struct MemoryPersistence {
         records: Mutex<Records>,
+        stalled: Mutex<BTreeSet<Epoch>>,
         load_calls: AtomicUsize,
         store_calls: AtomicUsize,
         is_store_failing: AtomicBool,
@@ -497,11 +498,27 @@ pub(crate) mod test_support {
         pub(crate) fn fail_loads(&self) {
             self.is_load_failing.store(true, Ordering::SeqCst);
         }
+        /// Makes loads of `epoch` never resolve, modelling a store that
+        /// accepted the read and went quiet.
+        pub(crate) fn stall(&self, epoch: Epoch) {
+            self.stalled
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(epoch);
+        }
     }
     impl ShapePersistence for MemoryPersistence {
         fn load(&self, epoch: Epoch) -> BoxFuture<'_, Result<ShapeRead, anyhow::Error>> {
             Box::pin(async move {
                 self.load_calls.fetch_add(1, Ordering::SeqCst);
+                let is_stalled = self
+                    .stalled
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains(&epoch);
+                if is_stalled {
+                    std::future::pending::<()>().await;
+                }
                 anyhow::ensure!(
                     !self.is_load_failing.load(Ordering::SeqCst),
                     "injected GET failure"

@@ -29,9 +29,18 @@ use crate::epoch::{Epoch, MIN_DZ_EPOCH};
 /// Concurrent shape reads for the intermediate epochs of one `GET /diff`.
 pub(crate) const INTERMEDIATE_CONCURRENCY: usize = 10;
 /// Deadline for one intermediate shape read. Short, because a missed
-/// intermediate only degrades `first_observed_epoch`, while the Next.js proxy
-/// abandons the whole request at 20 s.
+/// intermediate only degrades `first_observed_epoch`.
 pub(crate) const INTERMEDIATE_READ_TIMEOUT: Duration = Duration::from_secs(6);
+/// Whole-request read budget, measured from handler entry: the Next.js proxy
+/// abandons the request at 20 s, so 18 s leaves 2 s of transport inside it.
+/// Endpoint reads take at most [`ENDPOINT_READ_TIMEOUT`] of it and each
+/// intermediate at most [`INTERMEDIATE_READ_TIMEOUT`]; intermediates still
+/// unread when the budget elapses count as skipped.
+pub(crate) const DIFF_READ_BUDGET: Duration = Duration::from_secs(18);
+/// Deadline for one window-end shape read. The endpoints are not optional, so
+/// this is an error, not a degradation, and it needs its own bound because
+/// `DiffStore::get` has none and the S3 client allows 90 s per operation.
+pub(crate) const ENDPOINT_READ_TIMEOUT: Duration = Duration::from_secs(8);
 /// Marks a body whose attribution was computed without every intermediate
 /// epoch, so the proxy can refuse to cache it.
 pub(crate) const DEGRADED_HEADER: &str = "x-diff-degraded";
@@ -49,6 +58,7 @@ pub(crate) const MAX_SHAPE_CONTRIBUTORS: usize = 1_000;
 pub(crate) const MAX_SHAPE_BANDWIDTH_GBPS: f64 = 1.0e6;
 
 const FETCH_FAILED_MESSAGE: &str = "snapshot fetch failed";
+const BUDGET_ELAPSED_MESSAGE: &str = "diff read budget elapsed";
 const DEPTH_MESSAGE: &str = "depth must be an integer in [1, 200]";
 const EPOCH_MESSAGE: &str = "epoch must be an integer in [48, 100000]";
 const LATEST_MESSAGE: &str = "latest must be an integer in [48, 100000]";
@@ -90,15 +100,16 @@ async fn network_diff(
     State(state): State<Arc<AppState>>,
     Query(query): Query<WindowQuery>,
 ) -> Response {
+    let deadline = tokio::time::Instant::now() + DIFF_READ_BUDGET;
     let window = match validate_window(query.from.as_deref(), query.to.as_deref()) {
         Ok(window) => window,
         Err(message) => return error_json(StatusCode::BAD_REQUEST, message),
     };
-    let (before, after) = match load_window_ends(&state.diff_store, window).await {
+    let (before, after) = match load_window_ends(&state.diff_store, window, deadline).await {
         Ok(ends) => ends,
         Err(error) => return snapshot_error_response(&error),
     };
-    let (intermediates, skipped) = load_intermediates(&state.diff_store, window).await;
+    let (intermediates, skipped) = load_intermediates(&state.diff_store, window, deadline).await;
     let mut response = Json(compute_network_diff(
         &before,
         &after,
@@ -121,11 +132,12 @@ async fn contributor_diff(
     Path(code): Path<String>,
     Query(query): Query<WindowQuery>,
 ) -> Response {
+    let deadline = tokio::time::Instant::now() + DIFF_READ_BUDGET;
     let window = match validate_window(query.from.as_deref(), query.to.as_deref()) {
         Ok(window) => window,
         Err(message) => return error_json(StatusCode::BAD_REQUEST, message),
     };
-    match load_window_ends(&state.diff_store, window).await {
+    match load_window_ends(&state.diff_store, window, deadline).await {
         Ok((before, after)) => Json(compute_contributor_diff(
             &before,
             &after,
@@ -140,8 +152,16 @@ async fn contributor_diff(
 async fn load_window_ends(
     store: &Arc<DiffStore>,
     window: EpochWindow,
+    deadline: tokio::time::Instant,
 ) -> Result<(Arc<DiffShape>, Arc<DiffShape>), DiffStoreError> {
-    let (before, after) = tokio::join!(store.get(window.from), store.get(window.to));
+    let until = deadline.min(tokio::time::Instant::now() + ENDPOINT_READ_TIMEOUT);
+    let read = |epoch: Epoch| async move {
+        match tokio::time::timeout_at(until, store.get(epoch)).await {
+            Ok(result) => result,
+            Err(_) => Err(DiffStoreError::persistence(epoch, BUDGET_ELAPSED_MESSAGE)),
+        }
+    };
+    let (before, after) = tokio::join!(read(window.from), read(window.to));
     Ok((before?, after?))
 }
 
@@ -150,6 +170,7 @@ async fn load_window_ends(
 async fn load_intermediates(
     store: &Arc<DiffStore>,
     window: EpochWindow,
+    deadline: tokio::time::Instant,
 ) -> (Vec<Arc<DiffShape>>, usize) {
     let epochs = (window.from.0.saturating_add(1)..window.to.0).map(Epoch);
     let reads = read_bounded(
@@ -157,30 +178,38 @@ async fn load_intermediates(
         epochs,
         INTERMEDIATE_CONCURRENCY,
         INTERMEDIATE_READ_TIMEOUT,
+        deadline,
     )
     .await;
-    let mut shapes = Vec::with_capacity(reads.len());
+    let total = reads.len();
+    let mut shapes = Vec::with_capacity(total);
     let mut skipped = 0usize;
     for read in reads {
         match read.result {
             Ok(shape) => shapes.push(shape),
             Err(error) => {
                 skipped += 1;
-                tracing::warn!(epoch = read.epoch.0, error = %error,
+                tracing::debug!(epoch = read.epoch.0, error = %error,
                     "diff: intermediate epoch skipped");
             }
         }
+    }
+    if skipped > 0 {
+        tracing::warn!(skipped, total, "diff: intermediate epochs skipped");
     }
     (shapes, skipped)
 }
 
 /// Read every epoch through the store with at most `concurrency` reads in
-/// flight, each bounded by `per_read`. Results come back ascending by epoch.
+/// flight, each bounded by `per_read` and by the shared `deadline`. Every
+/// epoch gets a result, so the loop returns by the deadline with epochs it
+/// never started marked as failures. Results come back ascending by epoch.
 async fn read_bounded(
     store: &Arc<DiffStore>,
     epochs: impl IntoIterator<Item = Epoch>,
     concurrency: usize,
     per_read: Duration,
+    deadline: tokio::time::Instant,
 ) -> Vec<ShapeRead> {
     let mut pending = epochs.into_iter();
     let mut tasks: JoinSet<ShapeRead> = JoinSet::new();
@@ -190,11 +219,20 @@ async fn read_bounded(
         while tasks.len() < concurrency.max(1)
             && let Some(epoch) = pending.next()
         {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                reads.push(ShapeRead {
+                    epoch,
+                    result: Err(DiffStoreError::persistence(epoch, BUDGET_ELAPSED_MESSAGE)),
+                });
+                continue;
+            }
+            let until = deadline.min(now + per_read);
             let store = Arc::clone(store);
             let handle = tasks.spawn(async move {
-                let result = match tokio::time::timeout(per_read, store.get(epoch)).await {
+                let result = match tokio::time::timeout_at(until, store.get(epoch)).await {
                     Ok(result) => result,
-                    Err(_) => Err(DiffStoreError::persistence(epoch, "read deadline elapsed")),
+                    Err(_) => Err(DiffStoreError::persistence(epoch, BUDGET_ELAPSED_MESSAGE)),
                 };
                 ShapeRead { epoch, result }
             });
@@ -579,6 +617,79 @@ mod tests {
             Some("1"),
             "epoch 50 has no record, so attribution is incomplete"
         );
+    }
+
+    /// A window whose intermediates all stall must still answer inside the
+    /// read budget, degraded, and must stop spawning reads at the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_window_degrades_at_the_read_budget() {
+        let persistence = Arc::new(MemoryPersistence::default());
+        persistence.insert(shape(48, false));
+        persistence.insert(shape(80, false));
+        for epoch in 49..=79 {
+            persistence.stall(Epoch(epoch));
+        }
+        let wall = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
+        let response = routes()
+            .with_state(state_with(Arc::clone(&persistence)))
+            .oneshot(
+                Request::builder()
+                    .uri("/diff?from=48&to=80")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router answers");
+        let virtual_elapsed = started.elapsed();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(DEGRADED_HEADER)
+                .map(|v| v.to_str().unwrap_or("")),
+            Some("1")
+        );
+        assert!(
+            virtual_elapsed >= DIFF_READ_BUDGET
+                && virtual_elapsed < DIFF_READ_BUDGET + Duration::from_secs(1),
+            "answered at {virtual_elapsed:?}, not at the budget"
+        );
+        assert!(
+            persistence.load_calls() < 33,
+            "the deadline must stop spawning reads: {} calls",
+            persistence.load_calls()
+        );
+        assert!(
+            wall.elapsed() < Duration::from_secs(2),
+            "the budget must be virtual time only"
+        );
+    }
+
+    /// A stalled window end is not optional, so it is a 502, bounded by the
+    /// endpoint timeout rather than the whole budget.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_window_end_is_a_502_at_the_endpoint_timeout() {
+        for uri in [
+            "/diff?from=48&to=49",
+            "/diff/contributor/beta?from=48&to=49",
+        ] {
+            let persistence = Arc::new(MemoryPersistence::default());
+            persistence.insert(shape(49, true));
+            persistence.stall(Epoch(48));
+            let started = tokio::time::Instant::now();
+            let (status, body) = call(state_with(persistence), "GET", uri).await;
+            let virtual_elapsed = started.elapsed();
+
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{uri}: {body}");
+            assert_eq!(body["error"], FETCH_FAILED_MESSAGE);
+            assert!(
+                virtual_elapsed >= ENDPOINT_READ_TIMEOUT
+                    && virtual_elapsed < ENDPOINT_READ_TIMEOUT + Duration::from_secs(1),
+                "{uri}: answered at {virtual_elapsed:?}"
+            );
+        }
     }
 
     #[tokio::test]

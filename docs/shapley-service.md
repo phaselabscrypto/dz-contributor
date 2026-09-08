@@ -262,7 +262,7 @@ Creates use `If-None-Match: *`. A readable existing record returns 409 without a
 
 The cron handles the current epoch before history. It reuses one snapshot for the sweep and shape, limits work to 270 seconds, and allows at most three shape attempts. Historical repairs have a 90-second budget and a 40-second attempt limit, with rotating candidates. `pnpm run backfill:diff` fills deeper history.
 
-Diff comparisons retain their existing intermediate-read behavior: concurrency ten and six seconds per intermediate. An unavailable intermediate sets `x-diff-degraded: 1`, and the frontend serves that result without caching it.
+Diff comparisons read under one 18-second budget per request, measured from handler entry, so the answer arrives inside the frontend's 20-second proxy timeout. Each window end gets at most eight seconds of that budget, and a window end that misses it is a 502. Intermediates keep concurrency ten and six seconds per read, and no intermediate read starts after the budget elapses. An unavailable or unread intermediate sets `x-diff-degraded: 1`, and the frontend serves that result without caching it.
 
 Error responses: 400 for invalid windows; 404 for absent or corrupt endpoint records; 409 for a verified readable duplicate; 422 for invalid submitted shapes; 502 for storage errors; 503 when persistence or ingest authorization is unavailable. Underlying storage details remain in logs.
 
