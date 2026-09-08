@@ -1,9 +1,10 @@
 import {
   MIN_DZ_EPOCH,
-  SHAPLEY_SERVICE_URL,
   shapleyEndpointUrl,
   shapleyServiceBase,
 } from "@/lib/constants/config";
+import type { BaselineVariant } from "@/lib/types/baseline";
+import { isNotCached } from "@/lib/types/baseline";
 import type { DiffShapeRecord } from "@/lib/types/diff";
 import type { ShapleyInput, ShapleyOutput } from "@/lib/types/shapley";
 import { reportError } from "@/lib/observability";
@@ -15,13 +16,6 @@ import {
 /**
  * Single source of truth for talking to the Rust Shapley microservice
  * (network-shapley-rs HTTP wrapper, deployed to Cloud Run / Fly / etc.).
- *
- * Two modes:
- *   - `computeShapleyRemote(input)`: throws on misconfiguration or HTTP
- *     failure. Callers that want canonical-or-bust use this.
- *   - `tryComputeShapleyRemote(input)`: returns null on any failure
- *     (missing URL, network error, non-2xx). Callers that gracefully
- *     fall back to the TS solver use this.
  */
 
 const DEFAULT_METHOD = "lp-multi-commodity-flow-rs";
@@ -84,8 +78,7 @@ function decodeResponse(data: RustShapleyResponse): ShapleyRemoteResult {
 /**
  * Typed failure from the Rust Shapley `/shapley` call: carries the upstream
  * HTTP status (when a response arrived) and whether the failure was a
- * client-side timeout. The baseline route's 202-warming vs 502 split hangs
- * off these fields — see `ShapleyServiceError` in `epoch-shapley.ts`.
+ * client-side timeout.
  */
 export class RemoteSolveError extends Error {
   constructor(
@@ -126,8 +119,7 @@ export async function computeShapleyRemote(
     throw new Error(
       "SHAPLEY_SERVICE_URL not configured. Set it in Vercel " +
         "(vercel env add SHAPLEY_SERVICE_URL production) to point at " +
-        "the deployed network-shapley-rs service. Without it, routes " +
-        "fall back to the local TS heuristic in lib/utils/shapley-solver.ts.",
+        "the deployed network-shapley-rs service.",
     );
   }
 
@@ -172,32 +164,6 @@ export async function computeShapleyRemote(
 
   const data = (await response.json()) as RustShapleyResponse;
   return decodeResponse(data);
-}
-
-/**
- * Soft-failure variant: returns null on any error (missing URL, network
- * failure, non-2xx response). Use this when the caller falls back to a
- * different solver path and never wants the request to abort.
- *
- * The error reason is intentionally NOT returned — if a caller needs to
- * distinguish failure modes, use `computeShapleyRemote` and catch.
- */
-export async function tryComputeShapleyRemote(
-  input: ShapleyInput,
-): Promise<ShapleyRemoteResult | null> {
-  if (!SHAPLEY_SERVICE_URL) return null;
-  try {
-    return await computeShapleyRemote(input);
-  } catch (err) {
-    // Soft-failure path: the error is intentionally not propagated to
-    // the caller (which renders a skip / fallback marker in its UI),
-    // but we still log it so the failure surfaces in observability —
-    // no silent swallowing rule (#19).
-    reportError(err, {
-      source: "lib/utils/shapley-remote#tryComputeShapleyRemote",
-    });
-    return null;
-  }
 }
 
 // ── /simulate endpoint ──────────────────────────────────────────────
@@ -603,20 +569,48 @@ export interface BaselinePrecompute {
   status: "already-cached" | "accepted";
   job_id?: string;
   input_hash: string;
+  tag?: string;
+  variant?: string;
 }
 
-/** Warm the epoch's baseline cache as a queued job. */
+/**
+ * Warm the epoch's baseline as a queued job. With a `publish` target the worker
+ * also writes the epoch alias when the result lands (`POST /precompute/baseline`,
+ * compute + ingest tokens). With `null` it warms by input hash only
+ * (`POST /precompute`), which is what the simulate variant and the link-value
+ * cron want.
+ */
 export async function startBaselinePrecompute(
   input: ShapleyInput,
+  publish: { tag: string; variant: BaselineVariant } | null,
   options: RequestDeadline = {},
 ): Promise<BaselinePrecompute> {
-  const response = await precomputeRequest(
-    "/precompute",
-    { method: "POST", headers: buildHeaders(), body: JSON.stringify(input) },
-    options,
-  );
-  const { status, input_hash: inputHash, job_id: jobId } =
-    precomputeObject(response);
+  const response = publish
+    ? await precomputeRequest(
+        "/precompute/baseline",
+        {
+          method: "POST",
+          headers: buildIngestHeaders(),
+          body: JSON.stringify({
+            input,
+            tag: publish.tag,
+            variant: publish.variant,
+          }),
+        },
+        options,
+      )
+    : await precomputeRequest(
+        "/precompute",
+        { method: "POST", headers: buildHeaders(), body: JSON.stringify(input) },
+        options,
+      );
+  const {
+    status,
+    input_hash: inputHash,
+    job_id: jobId,
+    tag,
+    variant,
+  } = precomputeObject(response);
   if (status !== "already-cached" && status !== "accepted") {
     throw new JobStartError("invalid baseline response", 502);
   }
@@ -630,6 +624,8 @@ export async function startBaselinePrecompute(
     status,
     input_hash: inputHash,
     ...(typeof jobId === "string" ? { job_id: jobId } : {}),
+    ...(typeof tag === "string" ? { tag } : {}),
+    ...(typeof variant === "string" ? { variant } : {}),
   };
 }
 
@@ -909,4 +905,109 @@ export async function startLinkEstimateJobByTag(
   }
   const data = (await response.json()) as { job_id: string };
   return data.job_id;
+}
+
+// ── Baseline alias probe ────────────────────────────────────────────────
+
+/** Above the service's own 8 s bound on the S3 read, so its typed 502 wins. */
+const BASELINE_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * Failure talking to `GET /shapley/baseline`: a timeout, a network error, or a
+ * status other than 200 / 404-with-`not-cached`.
+ */
+export class BaselineServiceError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly timedOut: boolean = false,
+  ) {
+    super(message);
+    this.name = "BaselineServiceError";
+  }
+}
+
+export type BaselineProbe =
+  | { status: "hit"; result: ShapleyRemoteResult }
+  | { status: "miss" };
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function isRustShapleyResponse(value: unknown): value is RustShapleyResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const { method, values } = value as { method?: unknown; values?: unknown };
+  return (
+    typeof method === "string" &&
+    typeof values === "object" &&
+    values !== null &&
+    !Array.isArray(values)
+  );
+}
+
+/**
+ * Cache-only read of one epoch's published baseline alias. 200 is a hit; a 404
+ * carrying `{status:"not-cached"}` is a miss. A 404 without that body means the
+ * service predates the route, so it throws like every other failure.
+ */
+export async function fetchBaselineByTagRemote(
+  tag: string,
+  options: RequestDeadline = {},
+): Promise<BaselineProbe> {
+  const url = `${jobsBase()}/shapley/baseline?tag=${encodeURIComponent(tag)}`;
+  const signal = boundedSignal(options, BASELINE_PROBE_TIMEOUT_MS);
+  let response: Response;
+  let body: string;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers: buildHeaders(),
+      signal,
+    });
+    body = await response.text();
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      (err.name === "TimeoutError" || err.name === "AbortError")
+    ) {
+      throw new BaselineServiceError(
+        "baseline probe timed out",
+        undefined,
+        true,
+      );
+    }
+    throw new BaselineServiceError(
+      `baseline probe failed: ${err instanceof Error ? err.name : "unknown"}`,
+    );
+  }
+
+  if (response.status === 404) {
+    if (isNotCached(parseJson(body))) return { status: "miss" };
+    throw new BaselineServiceError(
+      "baseline probe answered 404 without a not-cached body",
+      404,
+    );
+  }
+
+  if (response.status === 200) {
+    const parsed = parseJson(body);
+    if (!isRustShapleyResponse(parsed)) {
+      throw new BaselineServiceError(
+        "baseline probe returned an unexpected body",
+        200,
+      );
+    }
+    return { status: "hit", result: decodeResponse(parsed) };
+  }
+
+  const detail = body.slice(0, MAX_ERROR_DETAIL_CHARS);
+  throw new BaselineServiceError(
+    `baseline probe HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
+    response.status,
+  );
 }

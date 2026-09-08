@@ -351,7 +351,7 @@ async function warmBaseline(
   failures: FailureLog,
 ): Promise<BaselineOutcome> {
   try {
-    return await startBaselinePrecompute(input, budget.callOptions());
+    return await startBaselinePrecompute(input, null, budget.callOptions());
   } catch (error) {
     return { error: failures.record("baseline-warm", error).message };
   }

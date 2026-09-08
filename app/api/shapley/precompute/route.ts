@@ -5,23 +5,24 @@ import {
   buildInputForEpoch,
   buildSnapshotInputForEpoch,
   EpochNotFoundError,
-} from "@/lib/utils/epoch-shapley";
+} from "@/lib/utils/epoch-input";
 import {
   JobStartError,
   startBaselinePrecompute,
 } from "@/lib/utils/shapley-remote";
 import { bearerMatches } from "@/lib/utils/cron-auth";
+import { baselineTag } from "@/lib/utils/sweep-tag";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
 import { reportError } from "@/lib/observability";
 
 /**
  * GET /api/shapley/precompute  (cron)
  *
- * Warms the baseline for the latest epoch so `/api/shapley/baseline`
- * (and `/api/shapley?epoch=N`) serve a cache hit instead of triggering a
- * cold per-city solve inside a user request. Builds the SAME input
- * those routes build, then QUEUES the OKD baseline precompute (async worker);
- * the result lands in the input-hash cache. `?epoch=N` for manual backfill.
+ * The only thing that starts a baseline solve. Builds the epoch's canonical
+ * input and queues the OKD baseline precompute under `baselineTag(epoch)`; the
+ * worker publishes that epoch alias once the result is durable. Readers
+ * (`/api/shapley/baseline`, `/api/shapley?epoch=N`, `/api/shapley/tracking`)
+ * only ever probe the alias. `?epoch=N` for manual backfill.
  *
  * Auth: requires `CRON_SECRET` (Vercel sends `Authorization: Bearer $CRON_SECRET`).
  */
@@ -87,27 +88,30 @@ export async function GET(request: NextRequest) {
         { status: 422 },
       );
     }
-    const res = await startBaselinePrecompute(input);
+    const tag = baselineTag(epoch);
+    const res = await startBaselinePrecompute(input, {
+      tag,
+      variant:
+        inputSource === "canonical-foundation" ? "foundation" : "snapshot",
+    });
     console.log(
       `[shapley/precompute] epoch=${epoch} inputSource=${inputSource} ` +
-        `status=${res.status}` +
+        `tag=${tag} status=${res.status}` +
         (res.job_id ? ` job_id=${res.job_id}` : "") +
         ` input_hash=${res.input_hash}`,
     );
 
     // The foundation and snapshot-built inputs hash to DIFFERENT service
-    // cache keys. /baseline and /api/shapley prefer the foundation variant
-    // (and fall back to the snapshot variant when the CSVs are missing or a
-    // fetch fails), while simulate/jobs always build from the snapshot — so
-    // when the primary warm was the foundation variant, warm the snapshot
-    // variant too. Fail-soft: the primary warm is already enqueued, and the
-    // enqueue is idempotent per input hash.
+    // cache keys, and simulate/jobs always build from the snapshot, so when
+    // the primary warm was the foundation variant, warm the snapshot variant
+    // by hash too. It publishes no alias: one epoch has one published
+    // baseline. Fail-soft, since the primary warm is already enqueued.
     let snapshotVariant: Record<string, unknown> | undefined;
     if (inputSource === "canonical-foundation") {
       try {
         const snap = await buildSnapshotInputForEpoch(epoch);
         if (snap.inputSource === "canonical-snapshot") {
-          const snapRes = await startBaselinePrecompute(snap.input);
+          const snapRes = await startBaselinePrecompute(snap.input, null);
           snapshotVariant = { ...snapRes };
           console.log(
             `[shapley/precompute] epoch=${epoch} snapshot-variant ` +
@@ -129,6 +133,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       epoch,
+      tag,
       inputSource,
       ...res,
       ...(snapshotVariant ? { snapshotVariant } : {}),

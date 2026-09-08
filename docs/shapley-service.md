@@ -55,10 +55,12 @@ All compute endpoints require auth (see above). `/health` is always open.
 | Method | Path | Auth | Purpose | Notable limits |
 |---|---|---|---|---|
 | `GET` | `/health` | None | Liveness probe; returns `{status, service, version}` | — |
-| `POST` | `/shapley` | Required | Synchronous per-city exact Shapley values for an epoch input; reads from in-memory / S3 cache, computes on miss | Body ≤ 2 MB, timeout 120 s |
+| `POST` | `/shapley` | Required | Synchronous per-city exact Shapley values for an epoch input; reads from in-memory / S3 cache, computes on miss. Concurrent cold requests for one input hash share a single in-process solve (`src/inflight.rs`) | Body ≤ 2 MB, timeout 120 s |
 | `POST` | `/simulate` | Required | Synchronous what-if: baseline + modified Shapley in one shot, reusing unchanged source cities from the cache | Body ≤ 2 MB, timeout 120 s |
 | `POST` | `/link-estimate` | Required | Synchronous per-link value-add (retag-Shapley) for a focus operator; S3 read-through; 422 if focus owns > 12 links | Body ≤ 2 MB, timeout 120 s |
+| `GET` | `/shapley/baseline?tag=` | Required | Cache-only read of the published baseline for `tag`: 200 alias body (`method`, `operator_count`, `values`, `tag`, `variant`, `input_hash`), `404 {status:"not-cached", tag}` on a miss or when S3 is unset, 400 for an empty/oversized/NUL tag, 502 when the store fails or the 8 s read bound elapses; never computes or enqueues | tag ≤ 256 bytes |
 | `POST` | `/precompute` | Required | Enqueue a `JobKind::Baseline` job; short-circuits with `200 already-cached` on a cache hit; `503` if Redis is absent | — |
+| `POST` | `/precompute/baseline` | Compute + ingest tokens | Body `{input, tag, variant: "foundation"\|"snapshot"}`; `200 already-cached` only when an alias for `tag` names this input's hash; otherwise enqueues a `baseline-publish` job (`202 {job_id, input_hash, tag, variant}`) whose worker loads or solves the baseline, persists it, then writes the alias; `503` without S3 or Redis | tag ≤ 256 bytes |
 | `POST` | `/jobs/simulate` | Required | Enqueue a what-if simulation; returns `202 {job_id}` | — |
 | `POST` | `/jobs/link-estimate` | Required | Enqueue a per-link value-add; in-flight dedup via `SET NX`; S3 short-circuit at submit time; returns `202 {job_id}` | — |
 | `GET` | `/jobs/{id}` | Required | Poll job state, progress, and result | — |
@@ -202,7 +204,7 @@ Source of truth: the **constants** in `src/queue.rs` and `src/jobs.rs` (`JOB_TTL
 | `input_hash` | Yes | Hex-encoded u64 hash of the payload JSON |
 | `enqueued_at` | Yes | Unix epoch milliseconds |
 | `schema` | Yes | Schema version tag (see table below) |
-| `kind` | No (defaults to `simulate`) | `simulate`, `link-estimate`, `sweep`, or `baseline` |
+| `kind` | No (defaults to `simulate`) | `simulate`, `link-estimate`, `sweep`, `baseline`, or `baseline-publish` |
 | `focus` | No | Operator name; present only on sweep-spawned link-estimate children |
 
 **Schema version tags** (from `src/queue.rs`):
@@ -213,6 +215,7 @@ Source of truth: the **constants** in `src/queue.rs` and `src/jobs.rs` (`JOB_TTL
 | `linkest/v1` | `LINKEST_SCHEMA` | `link-estimate` |
 | `sweep/v1` | `SWEEP_SCHEMA` | `sweep` (epoch fan-out) |
 | `baseline/v1` | `BASELINE_SCHEMA` | `baseline` (precompute) |
+| `baseline-publish/v1` | `BASELINE_PUBLISH_SCHEMA` | `baseline-publish` (tagged precompute + alias) |
 
 A separate tag per kind means an older worker that does not recognize `linkest/v1` dead-letters the entry (with an accurate "unsupported job schema" error) rather than burning `MAX_DELIVERIES` blind retries on a mis-decoded payload.
 
@@ -234,6 +237,7 @@ When `S3_CACHE_ENDPOINT` is set, the AWS SDK client is configured with that URL 
 | `shapley/v3/link-estimate-{hash:016x}.bin` | `shapley/v3/link-estimate-0000abcd1234ef56.bin` | bincode-serialized `LinkEstimateResponse` |
 | `shapley/v3/simulate-{hash:016x}.json` | `shapley/v3/simulate-0000abcd1234ef56.json` | JSON-serialized `SimulateResponse` (what-if result, persisted forever by whole-request payload hash; PSYS-557) |
 | `shapley/v3/publication/v1/sweep-marker-{hash:016x}.json` | `shapley/v3/publication/v1/sweep-marker-0000abcd1234ef56.json` | JSON `{"tag": "..."}` marker indicating a fully swept epoch; tag is hashed before use as the key suffix |
+| `shapley/v3/publication/v1/baseline-alias-{hash:016x}.json` | `shapley/v3/publication/v1/baseline-alias-0000abcd1234ef56.json` | JSON `BaselineAlias` (`tag`, `variant`, `input_hash`, plus the `ShapleyResponse` fields); the key hash is `hash_payload("baseline\0" + tag)`; written only after `cache-{hash}.bin` |
 | `diff/v1/shape-{epoch:06}.json` | `diff/v1/shape-000211.json` | JSON-serialized `DiffShape` (lean links and contributors for one epoch); its own version prefix, see [Snapshot diff index](#snapshot-diff-index) |
 
 The `v3` prefix must be bumped on any change to the serialized shape or the engine that produced the values, so results from an older engine are never served for the same input hash.

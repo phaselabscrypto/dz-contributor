@@ -1,133 +1,74 @@
 import { NextResponse } from "next/server";
+import { shapleyServiceBase } from "@/lib/constants/config";
+import { categorizeError, reportError, reportEvent } from "@/lib/observability";
 import {
-  getEpochShapley,
-  EpochNotFoundError,
-  ShapleyServiceError,
-  type EpochShapleyResult,
-} from "@/lib/utils/epoch-shapley";
+  baselineResponse,
+  LATEST_BASELINE_CACHE_CONTROL,
+  NO_STORE_HEADERS,
+  probeEpochBaseline,
+  SERVICE_UNAVAILABLE_BODY,
+} from "@/lib/utils/baseline-probe";
 import { getEpochAvailability } from "@/lib/utils/epoch-discovery";
-import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
-import { reportError } from "@/lib/observability";
+import { enforceRateLimit, RATE_LIMIT_STANDARD } from "@/lib/utils/rate-limit";
+import { BaselineServiceError } from "@/lib/utils/shapley-remote";
 
 /**
  * GET /api/shapley/baseline
  *
- * The reward "baseline" widgets want: the LATEST completed epoch's
- * Shapley shares (DZ-current methodology). This route resolves the latest
- * available epoch and returns its result from the shared per-epoch
- * cache — the heavy solve runs once (warmed by the precompute cron), never
- * on-demand per request, and never against heuristic live topology.
- *
- * (Previously this ran a full Shapley solve against LIVE Malbec topology on
- * demand, which was expensive, un-warmed, and heuristic — replaced.)
+ * The latest completed epoch's Shapley baseline. The route never computes: a
+ * hit is the alias the precompute cron published for that epoch, and a miss is
+ * `404 {status:"not-cached"}`, which the widgets read as "no card".
  */
-// Cold path = epoch discovery + snapshot fetch + remote call; the upstream
-// HAProxy route cuts a cold solve at ~30s, and this function must survive
-// past that to translate the failure into 202/502 (Vercel's default
-// maxDuration would kill it first and clients would see a raw 504).
-export const maxDuration = 60;
-
-/** The 200 body — mirrors EpochShapleyResult plus route provenance fields. */
-interface BaselineReady {
-  method: string;
-  computedAt: string;
-  source: "latest-epoch";
-  epoch: number;
-  operatorCount: number;
-  values: EpochShapleyResult["values"];
-  inputSummary: EpochShapleyResult["inputSummary"];
-}
-interface CacheEntry {
-  data: BaselineReady;
-  timestamp: number;
-}
-const CACHE_TTL = 5 * 60 * 1000;
-let cached: CacheEntry | null = null;
+// The probe itself is milliseconds. The budget covers a cold epoch-discovery
+// HEAD walk, the only slow step left on this path.
+export const maxDuration = 30;
 
 export async function GET(request: Request) {
   const limited = enforceRateLimit(request, {
     bucket: "shapley-baseline",
-    ...RATE_LIMIT_HEAVY,
+    ...RATE_LIMIT_STANDARD,
   });
   if (limited) return limited;
 
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return NextResponse.json(cached.data);
+  if (!shapleyServiceBase()) {
+    reportError(new Error("SHAPLEY_SERVICE_URL not configured"), {
+      source: "api/shapley/baseline",
+    });
+    return NextResponse.json(
+      { error: "shapley service not configured" },
+      { status: 503, headers: NO_STORE_HEADERS },
+    );
   }
 
   let epoch: number;
   try {
     epoch = (await getEpochAvailability()).latest;
   } catch (err) {
-    reportError(err, { source: "api/shapley/baseline", extras: { phase: "epoch-discovery" } });
-    if (cached) return NextResponse.json(cached.data); // serve last-good rather than 502
-    return NextResponse.json({ error: "Service temporarily unavailable" }, { status: 502 });
+    reportError(err, {
+      source: "api/shapley/baseline",
+      extras: { phase: "epoch-discovery" },
+    });
+    return NextResponse.json(SERVICE_UNAVAILABLE_BODY, {
+      status: 502,
+      headers: NO_STORE_HEADERS,
+    });
   }
 
   try {
-    const r = await getEpochShapley(epoch);
-    const result: BaselineReady = {
-      method: r.method,
-      computedAt: new Date().toISOString(),
-      source: "latest-epoch",
-      epoch: r.epoch,
-      operatorCount: r.operatorCount,
-      values: r.values,
-      inputSummary: r.inputSummary,
-    };
-    cached = { data: result, timestamp: Date.now() };
-    return NextResponse.json(result);
+    const probe = await probeEpochBaseline(epoch);
+    if (probe.status === "miss") {
+      // Sustained events mean the cron or the worker stopped publishing.
+      reportEvent("baseline-not-cached", { epoch });
+    }
+    return baselineResponse(probe, LATEST_BASELINE_CACHE_CONTROL);
   } catch (err) {
-    // Report EVERY failure before deciding the response. Warm instances
-    // serve last-good below, so without this a hard outage would produce
-    // nothing but quiet 200s until instances recycle — an unmonitorable
-    // failure mode (instances live minutes-to-hours).
-    const warming = err instanceof ShapleyServiceError && err.warming;
-    const phase = warming
-      ? "warming"
-      : err instanceof EpochNotFoundError
-        ? "epoch-not-found"
-        : err instanceof ShapleyServiceError
-          ? "remote-call"
-          : "outer";
-    reportError(err, {
+    reportError(err instanceof BaselineServiceError ? err : categorizeError(err), {
       source: "api/shapley/baseline",
-      extras: {
-        epoch,
-        phase,
-        servedLastGood: cached !== null,
-        ...(err instanceof ShapleyServiceError ? { status: err.status } : {}),
-      },
+      extras: { epoch, phase: "probe" },
     });
-
-    // Prefer last-good over any error response.
-    if (cached) return NextResponse.json(cached.data);
-    if (err instanceof EpochNotFoundError) {
-      return NextResponse.json({ error: err.message }, { status: 404 });
-    }
-    if (warming) {
-      // Timeout-class failure: a solve was cut mid-flight, so the epoch
-      // exists but isn't cached yet. The service now finishes cut solves in
-      // a detached task (memory + S3 land anyway — services/shapley-rs
-      // routes.rs `shapley`), so warming self-heals on a later request; the
-      // precompute cron is the proactive warmer. Sustained warming therefore
-      // means BOTH are broken — the reportError above must stay visible.
-      return NextResponse.json(
-        {
-          status: "warming",
-          message:
-            "Baseline warming — result not yet cached for the latest epoch",
-          epoch,
-        },
-        { status: 202 },
-      );
-    }
-    // Everything else is a hard failure: service down/misconfigured, Rust
-    // 4xx/5xx, snapshot-fetch errors. 502 per the no-silent-degradation rule
-    // (docs/shapley-pipeline.md) — never disguised as warming.
-    return NextResponse.json(
-      { error: "Service temporarily unavailable" },
-      { status: 502 },
-    );
+    return NextResponse.json(SERVICE_UNAVAILABLE_BODY, {
+      status: 502,
+      headers: NO_STORE_HEADERS,
+    });
   }
 }

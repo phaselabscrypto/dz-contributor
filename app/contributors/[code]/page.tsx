@@ -4,11 +4,11 @@ import { useMemo } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
+  cachedBaseline,
   useLiveTopology,
   useEconomicHub,
   useLiveStatus,
   useBaselineShapley,
-  isBaselineWarming,
 } from "@/lib/hooks/use-live";
 import { usePrices } from "@/lib/hooks/use-prices";
 import { PageHeader } from "@/components/ui/page-header";
@@ -116,13 +116,11 @@ export default function ContributorDetailPage() {
   const earned2ZViaUsd = twoZUsd > 0 ? earnedUsd / twoZUsd : 0;
   // Use Jupiter spot when available for sanity; otherwise hub's USD figure stands
 
-  // Live-network Shapley share (current footing). May be 0 for operators
-  // whose devices are present but have no flowing demand routed through
-  // them in the live LP. Warming (202) = not computed yet, shown as "computing".
-  const baselineReady =
-    baseline && !isBaselineWarming(baseline) ? baseline : null;
-  const livePct = (baselineReady?.values?.[code]?.share ?? 0) * 100;
-  const liveDeltaPct = livePct - rewardPct;
+  const baselineReady = cachedBaseline(baseline);
+  const livePct = baselineReady
+    ? (baselineReady.values[code]?.share ?? 0) * 100
+    : null;
+  const liveDeltaPct = (livePct ?? 0) - rewardPct;
 
   // active vs degraded link counts
   const activeLinks = links.filter((l) => l.status === "activated").length;
@@ -228,18 +226,22 @@ export default function ContributorDetailPage() {
             />
             <Stat
               label="Live network share"
-              value={livePct > 0 ? `${livePct.toFixed(2)}%` : "—"}
+              value={
+                livePct !== null && livePct > 0
+                  ? `${livePct.toFixed(2)}%`
+                  : "—"
+              }
               numeric={false}
               sub={
-                livePct > 0 && rewardPct > 0
+                livePct === null
+                  ? "latest epoch not cached yet"
+                  : livePct > 0 && rewardPct > 0
                   ? liveDeltaPct >= 0
                     ? `+${liveDeltaPct.toFixed(2)} pts vs all-time`
                     : `${liveDeltaPct.toFixed(2)} pts vs all-time`
                   : livePct > 0
                   ? "current footing"
-                  : baselineReady
-                  ? "no demand routed"
-                  : "computing…"
+                  : "no demand routed"
               }
             />
             <Stat

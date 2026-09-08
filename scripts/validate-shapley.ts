@@ -2,7 +2,8 @@
 /**
  * Self-validation harness for our Shapley pipeline.
  *
- * Hits /api/shapley?epoch=N for a range of epochs and produces a
+ * Reads /api/shapley?epoch=N (cache-only) for a range of epochs, skipping any
+ * epoch the precompute cron has not published, and produces a
  * `validation-report.md` with:
  *   1. Per-epoch operator shares from our solver
  *   2. All-time payout shares from economic-hub for the same operators
@@ -26,29 +27,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-interface ShapleyValue {
-  value: number;
-  share: number;
-}
-
-interface ShapleyResponse {
-  epoch: number;
-  method: string;
-  /** "canonical-foundation" once DZ_CANONICAL_INPUTS_URL is wired */
-  inputSource?:
-    | "canonical-foundation"
-    | "canonical-snapshot"
-    | "snapshot-heuristic"
-    | "snapshot-derived"; // legacy label for old cached responses
-  operatorCount: number;
-  values: Record<string, ShapleyValue>;
-  inputSummary: {
-    deviceCount: number;
-    privateLinkCount: number;
-    publicLinkCount: number;
-    demandCount: number;
-  };
-}
+import type { EpochBaseline } from "../lib/types/baseline";
 
 interface EconomicHubContributor {
   name: string;
@@ -103,8 +82,13 @@ async function discoverEpochs(): Promise<number[]> {
   return data.available.slice(0, 4).sort((a, b) => a - b);
 }
 
-async function fetchShapley(epoch: number): Promise<ShapleyResponse> {
-  return getJson<ShapleyResponse>(`${BASE_URL}/api/shapley?epoch=${epoch}`);
+/** `null` when the cron has not published this epoch's baseline yet. */
+async function fetchShapley(epoch: number): Promise<EpochBaseline | null> {
+  const url = `${BASE_URL}/api/shapley?epoch=${epoch}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
+  return (await res.json()) as EpochBaseline;
 }
 
 async function fetchEconomicHub(): Promise<EconomicHub | null> {
@@ -148,11 +132,15 @@ async function main() {
     }
   }
 
-  const responses: ShapleyResponse[] = [];
+  const responses: EpochBaseline[] = [];
   for (const ep of epochs) {
     process.stdout.write(`  fetching epoch ${ep}… `);
     try {
       const r = await fetchShapley(ep);
+      if (r === null) {
+        console.log("not cached, skipped");
+        continue;
+      }
       console.log(`${r.method}, ${r.operatorCount} ops`);
       responses.push(r);
     } catch (err) {
@@ -161,7 +149,7 @@ async function main() {
   }
 
   if (responses.length === 0) {
-    console.error("All epochs failed. Aborting.");
+    console.error("No epoch had a published baseline. Aborting.");
     process.exit(1);
   }
 
@@ -198,7 +186,6 @@ async function main() {
       operatorCount: r.operatorCount,
       shareSum: total,
       sumOk: Math.abs(total - 1) < 0.001,
-      inputSummary: r.inputSummary,
     };
   });
 
@@ -252,42 +239,18 @@ async function main() {
   const methods = new Set(responses.map((r) => r.method));
   for (const m of methods) {
     const note =
-      m === "lp-multi-commodity-flow-rs"
-        ? "✅ canonical Rust solver"
-        : m === "local-ts-heuristic-DEV-ONLY"
-        ? "⚠️ dev-only TS heuristic — SHAPLEY_SERVICE_URL unset"
-        : m === "coalition-enumeration-v1-fallback"
-        ? "⚠️ legacy fallback label — should not appear post-PR-22"
-        : m;
+      m === "lp-multi-commodity-flow-rs" ? "✅ canonical Rust solver" : m;
     lines.push(`- \`${m}\` — ${note}`);
-  }
-  lines.push("");
-
-  lines.push(`## Input sources`);
-  lines.push("");
-  const sources = new Set(
-    responses.map((r) => r.inputSource ?? "snapshot-derived"),
-  );
-  for (const s of sources) {
-    const note =
-      s === "canonical-foundation"
-        ? "✅ Foundation per-epoch CSVs (DZ_CANONICAL_INPUTS_URL set)"
-        : s === "canonical-snapshot"
-        ? "✅ canonical TS port — bit-comparable to DZ reference on epoch 149"
-        : s === "snapshot-derived" || s === "snapshot-heuristic"
-        ? "⚠️ heuristic fallback — snapshot missing canonical fields"
-        : s;
-    lines.push(`- \`${s}\` — ${note}`);
   }
   lines.push("");
 
   lines.push(`## Invariants`);
   lines.push("");
-  lines.push(`| Epoch | Method | Ops | Share Σ | Sum=1? | Devices | Links | Demands |`);
-  lines.push(`|---|---|---|---|---|---|---|---|`);
+  lines.push(`| Epoch | Method | Ops | Share Σ | Sum=1? |`);
+  lines.push(`|---|---|---|---|---|`);
   for (const inv of invariants) {
     lines.push(
-      `| ${inv.epoch} | \`${inv.method}\` | ${inv.operatorCount} | ${fmtPct(inv.shareSum, 4)} | ${inv.sumOk ? "✅" : "❌"} | ${inv.inputSummary.deviceCount} | ${inv.inputSummary.privateLinkCount} | ${inv.inputSummary.demandCount} |`,
+      `| ${inv.epoch} | \`${inv.method}\` | ${inv.operatorCount} | ${fmtPct(inv.shareSum, 4)} | ${inv.sumOk ? "✅" : "❌"} |`,
     );
   }
   lines.push("");

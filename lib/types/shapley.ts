@@ -91,16 +91,3 @@ export interface SimulateResponse {
   delta: { share: number };
   allContributors: SimulateContributorResult[];
 }
-
-export interface ShapleyResponse {
-  epoch: number;
-  method: string;
-  operatorCount: number;
-  values: ShapleyOutput;
-  inputSummary: {
-    deviceCount: number;
-    privateLinkCount: number;
-    publicLinkCount: number;
-    demandCount: number;
-  };
-}

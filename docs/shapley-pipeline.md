@@ -32,7 +32,7 @@ The `reason` returned by the canonical builder is surfaced on the response as `i
 - `snapshot missing start_us/end_us epoch window`
 - `snapshot missing metro_prices`
 
-`inputFallbackReason` is only populated on the `canonical-snapshot → snapshot-heuristic` fallback; a `canonical-foundation` hit (or a clean `canonical-snapshot` build) leaves it undefined. The full response shape from `/api/shapley` carries `method`, `inputSource`, `inputFallbackReason`, `operatorCount`, `values`, and an `inputSummary` (device/link/demand counts). The input-source label is also surfaced through `/methodology` and the UI's method badge.
+`inputFallbackReason` is only populated on the `canonical-snapshot → snapshot-heuristic` fallback; a `canonical-foundation` hit (or a clean `canonical-snapshot` build) leaves it undefined. Both labels are internal to the cron: `/api/shapley/precompute` logs them and returns them, while the read routes carry only what the published alias holds (`epoch`, `tag`, `method`, `operatorCount`, `values`, `fetchedAt`).
 
 > Tuning constants (`operator_uptime`, `contiguity_bonus`, `demand_multiplier`) are emitted by every builder, but the two builders intentionally differ on `demand_multiplier`: the canonical builder hardcodes the Foundation-faithful `1.2` (`DEMAND_MULTIPLIER` in `canonical-input-builder.ts`), while the heuristic builder uses `SHAPLEY_PARAMS.demandMultiplier = 1.0` from `lib/constants/config.ts`. The divergence is deliberate — the multiplier normalizes out of the final share proportions — and the canonical values are verified against the Foundation reference on a pinned mainnet epoch.
 
@@ -49,24 +49,23 @@ The canonical builder (`buildCanonicalShapleyInput(snap, override?)`) reads thes
 
 ## Solver dispatch
 
-`lib/utils/shapley-remote.ts` is the single place that talks to the Rust microservice. `computeShapleyRemote(input)` POSTs the input as JSON to the `/shapley` endpoint of `SHAPLEY_SERVICE_URL`, with `Content-Type: application/json` and — when `SHAPLEY_API_TOKEN` is set — an `Authorization: Bearer ${SHAPLEY_API_TOKEN}` header that is never exposed to the browser. The request timeout constant `TIMEOUT_MS` is `180_000` (180s). The function throws on a missing URL, a network failure, or any non-2xx response.
+`lib/utils/shapley-remote.ts` is the single place that talks to the Rust microservice. `computeShapleyRemote(input)` POSTs the input as JSON to the `/shapley` endpoint of `SHAPLEY_SERVICE_URL`, with `Content-Type: application/json` and — when `SHAPLEY_API_TOKEN` is set — an `Authorization: Bearer ${SHAPLEY_API_TOKEN}` header that is never exposed to the browser. The request timeout constant `TIMEOUT_MS` is `180_000` (180s). The function throws on a missing URL, a network failure, or any non-2xx response. Only `/api/shapley/simulate` still calls it; the reward-facing routes use `fetchBaselineByTagRemote`, a 10-second cache-only read of `GET /shapley/baseline?tag=`.
 
-The governing rule is **no silent fallback**: a canonical route must never quietly swap algorithms when the service is unhealthy, because that would hide divergence between the two solvers in production. Concretely:
+The governing rule is **no silent fallback**: a canonical route must never quietly swap algorithms or invent a number when the service is unhealthy, because that would hide divergence in production. Concretely:
 
-- `/api/shapley`, `/api/shapley/baseline`, and `/api/shapley/tracking` require the Rust service when `SHAPLEY_SERVICE_URL` is set. A service failure returns **502**; an unset URL on the tracking route (which exists to detect drift in the canonical solver) returns **503**. None of them substitute the TS solver.
-- `/api/shapley/baseline` has one narrow, non-silent carve-out: when the latest epoch's solve is cut mid-flight by a timeout (client abort, upstream `504` from the HAProxy route, or `408` from the service's own `TimeoutLayer`) the route returns **202 `{status: "warming", message, epoch}`** — the epoch exists but its result isn't cached yet, and healing is two-layered: the service finishes a cut solve in a detached task so the result still lands in the cache (warming self-heals on a later request), and the `/api/shapley/precompute` cron proactively warms each new epoch so user requests rarely go cold at all. The classification lives in `ShapleyServiceError.warming` (`lib/utils/epoch-shapley.ts`), fed by the typed `RemoteSolveError` from `shapley-remote.ts`. Every warming response is still reported to observability (`phase: "warming"`) — a broken cron surfaces as sustained warming reports, not silence. All other failures (service down, router 502/503, Rust 4xx/5xx, snapshot-fetch errors) remain hard **502**s.
-- **Only** when `SHAPLEY_SERVICE_URL` is *unset* (local dev, no Rust service running) does `/api/shapley` (and `/api/shapley/baseline`) fall back to the in-process TS solver, and it stamps the result `local-ts-heuristic-DEV-ONLY` so the non-canonical path is impossible to miss.
-- `/api/shapley/tracking` runs the latest N snapshots through `tryComputeShapleyRemote` (the soft-failure variant); any epoch the service can't compute lands in `skippedEpochs[]` with a `snapshot-fetch-failed` or `rust-solver-failed` reason, rather than being filled by a different algorithm.
+- `/api/shapley`, `/api/shapley/baseline` and `/api/shapley/tracking` are cache-only. Each probes `GET {service}/shapley/baseline?tag=<baselineTag(epoch)>` and never computes: a published alias is **200**, an epoch the cron has not published is **404 `{status:"not-cached", epoch, tag}`**, and any other outcome (timeout, network failure, a status the contract does not name) is a **502** with a generic body. An unset `SHAPLEY_SERVICE_URL` is **503** on all three. None of them substitute another algorithm, and none of them start a solve.
+- Only `/api/shapley/precompute` (the cron) asks the service to compute. It posts `{input, tag, variant}` to `POST {service}/precompute/baseline` with both tokens; the worker solves, persists the result, then writes the epoch alias the readers probe.
+- A miss is reported to observability as a `baseline-not-cached` event rather than an error, because it is the normal state of a fresh epoch. Sustained events for the latest epoch mean the cron or the worker is broken.
 
 ```mermaid
 flowchart TD
     A["GET /api/shapley?epoch=N"] --> B{"SHAPLEY_SERVICE_URL set?"}
-    B -- "no (local dev)" --> C["computeShapley (TS)<br/>method = local-ts-heuristic-DEV-ONLY"]
-    B -- "yes" --> D["computeShapleyRemote → POST /shapley<br/>TIMEOUT_MS = 180s, optional Bearer token"]
-    D -- "2xx" --> E["method from service<br/>(lp-per-city-stake-weighted-exact)"]
-    D -- "throws / non-2xx" --> F["502 Service temporarily unavailable<br/>(no algorithm swap)"]
-    C --> G["JSON response"]
-    E --> G
+    B -- "no" --> C["503 shapley service not configured"]
+    B -- "yes" --> D["fetchBaselineByTagRemote → GET /shapley/baseline?tag=<br/>10s bound, Bearer token"]
+    D -- "200" --> E["method from service<br/>(lp-per-city-stake-weighted-exact)"]
+    D -- "404 not-cached" --> H["404 {status:'not-cached', epoch, tag}<br/>(widget hides)"]
+    D -- "throws / other status" --> F["502 Service temporarily unavailable<br/>(no algorithm swap)"]
+    E --> G["JSON response"]
 
     subgraph simulate ["/api/shapley/simulate"]
         S0["POST /api/shapley/simulate"] --> S1{"SHAPLEY_SERVICE_URL set?"}
@@ -88,25 +87,8 @@ Every Shapley response carries a `method` string. The table below enumerates the
 | Label | Set by | Meaning |
 |---|---|---|
 | `lp-per-city-stake-weighted-exact` | `compute_per_city` in `services/shapley-rs/src/routes.rs` | Canonical reward path: per-source-city exact Shapley + stake-weighted aggregation. This is what the Rust `/shapley`, `/simulate`, and `/precompute` paths actually return. |
-| `lp-multi-commodity-flow-rs` | `DEFAULT_METHOD` in `lib/utils/shapley-remote.ts` | The default the TS client substitutes if a service response omits `method` — never reached with the current service, which always stamps its own label. Some UI checks (`components/contributors/reward-reconciliation.tsx`, `app/methodology/page.tsx`) still compare against this string and therefore never match a live response — known drift, also flagged in [architecture.md](./architecture.md). |
+| `lp-multi-commodity-flow-rs` | `DEFAULT_METHOD` in `lib/utils/shapley-remote.ts` | The default the TS client substitutes if a service response omits `method` — never reached with the current service, which always stamps its own label. `app/methodology/page.tsx` still compares against this string and therefore never matches a live response — known drift, also flagged in [architecture.md](./architecture.md). |
 | `retag-shapley-rs` | `run_link_estimate` in `services/shapley-rs/src/routes.rs` | Per-link value (retag method) — see below. |
-| `local-ts-heuristic-DEV-ONLY` | `app/api/shapley/route.ts`, `app/api/shapley/baseline/route.ts` | The in-process TS solver, emitted only when `SHAPLEY_SERVICE_URL` is unset. Never produced in production. |
-
-`scripts/validate-shapley.ts` additionally recognizes `coalition-enumeration-v1-fallback` as a **legacy** label that should no longer appear; nothing in the current code emits it.
-
-## The dev-only TS solver
-
-`lib/utils/shapley-solver.ts` is a self-contained, in-process solver used **only** for local development when no Rust service is configured. It is directionally correct but is **not** the canonical LP and is never used in production.
-
-How it works, as written:
-
-- **Coalition enumeration.** It collects the distinct operators, sorts them, and enumerates all `2^n` coalitions as bitmasks (`computeShapley`). It throws for `n > 20` (`2^20 = 1M` coalitions is the stated ceiling).
-- **Value function — greedy bandwidth-aware demand packing.** For each coalition it builds a directed graph (`buildCoalitionGraph`): private links between two active-operator endpoints get finite Gbps capacity (bidirectional as two edges); public links are added with `Infinity` capacity (uncapped internet baseline). Demands are sorted by priority descending and routed greedily via a shortest-path search (`shortestPathWithCapacity`) that skips edges whose residual capacity can't carry the demand, then debits residual along the chosen path. Each routed demand contributes `traffic * priority * receivers / (1 + latency)`, and the coalition total is scaled by `demand_multiplier`.
-- **Contiguity penalty.** The path search adds a per-crossover penalty when a route transitions between private and public edges. Note the value function calls this with a hardcoded `10` (ms per private↔public crossing) rather than the input's `contiguity_bonus`.
-- **Uptime adjustment.** `applyUptime` replaces each coalition value with its expected value under independent per-operator availability before the Shapley step (skipped when uptime ≥ 0.9999).
-- **Shapley weighting.** Marginal contributions are weighted by `|S|! · (n−|S|−1)! / n!` (`precomputeFactorials`), then normalized to shares (`share = value / Σ value`).
-
-Limitations called out in the file's own comments: public-internet edges are uncapped (`Infinity`), full-duplex links are modeled as two edges sharing a nominal capacity, and the routing is a greedy priority-ordered packing rather than a true multi-commodity flow LP. `/methodology` summarizes it the same way: "The TS fallback uses bandwidth-aware greedy demand packing." Treat its numbers as a development sanity check, not canonical output.
 
 ## Canonical engine (per-city)
 
