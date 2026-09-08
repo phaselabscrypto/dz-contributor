@@ -5,11 +5,14 @@
 //! the cities they didn't change instead of re-solving every per-city LP.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use aws_config::timeout::TimeoutConfig;
 use serde::{Deserialize, Serialize};
+
+use crate::model::{BaselineAlias, BaselineVariant, ShapleyOperatorOut, ShapleyResponse};
 
 /// Cached per-city Shapley values + aggregated baseline for a network topology.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +53,55 @@ impl EpochCache {
         }
     }
 }
+
+/// Build a wire `ShapleyResponse` from a cached baseline result.
+pub(crate) fn response_from_baseline(baseline: &BaselineResult) -> ShapleyResponse {
+    let values: BTreeMap<String, ShapleyOperatorOut> = baseline
+        .values
+        .iter()
+        .map(|(op, oc)| {
+            (
+                op.clone(),
+                ShapleyOperatorOut {
+                    value: oc.value,
+                    share: oc.share,
+                },
+            )
+        })
+        .collect();
+    ShapleyResponse {
+        method: baseline.method.clone(),
+        operator_count: baseline.operator_count,
+        values,
+    }
+}
+
+/// Why a baseline alias read produced no answer. `detail` is for logs only and
+/// never reaches a client.
+#[derive(Debug)]
+pub enum BaselineAliasError {
+    /// The object store failed the read.
+    Storage {
+        /// Underlying error text, for logs.
+        detail: String,
+    },
+    /// The object exists but is not an alias for the requested tag.
+    Malformed {
+        /// What was wrong, for logs.
+        detail: String,
+    },
+}
+
+impl fmt::Display for BaselineAliasError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Storage { .. } => f.write_str("baseline store unavailable"),
+            Self::Malformed { .. } => f.write_str("baseline alias is malformed"),
+        }
+    }
+}
+
+impl std::error::Error for BaselineAliasError {}
 
 /// Compute a deterministic hash of the Shapley input for cache keying.
 ///
@@ -185,7 +237,7 @@ impl S3Cache {
     /// the prefix so results computed by an older engine are never served as
     /// valid for identical inputs.
     fn cache_key(input_hash: u64) -> String {
-        format!("{CACHE_VERSION_PREFIX}/cache-{input_hash:016x}.bin")
+        S3CacheRef::cache_key(input_hash)
     }
 
     /// Load a cached epoch from S3, if it exists and deserialises cleanly.
@@ -227,12 +279,111 @@ impl S3Cache {
 
     /// Persist a cache epoch to S3. Errors are logged but never fatal.
     pub async fn store(&self, cache: &EpochCache) {
-        S3CacheRef {
-            client: self.client.clone(),
-            bucket: self.bucket.clone(),
+        self.handle().store(cache).await;
+    }
+
+    /// Awaited persistence of a baseline, for callers that must know the result
+    /// is durable before pointing an alias at it.
+    pub(crate) async fn persist_baseline(&self, cache: &EpochCache) -> anyhow::Result<()> {
+        self.handle().try_store(cache).await
+    }
+
+    // The fixed prefix keeps this key space apart from link-estimate aliases
+    // built from the same tag; callers reject NUL in the tag.
+    fn baseline_alias_key(tag: &str) -> String {
+        let hash = crate::queue::hash_payload(&format!("baseline\u{0}{tag}"));
+        format!(
+            "{CACHE_VERSION_PREFIX}/{PUBLICATION_VERSION_PREFIX}/baseline-alias-{hash:016x}.json"
+        )
+    }
+
+    /// Publish the baseline in `cache` under `tag`, after the result itself is
+    /// durable. The cache object is always re-put: a memory hit does not prove
+    /// the detached store ever landed.
+    pub(crate) async fn publish_baseline(
+        &self,
+        tag: &str,
+        variant: BaselineVariant,
+        cache: &EpochCache,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
+        anyhow::ensure!(!tag.contains('\0'), "invalid alias key");
+        let baseline = cache
+            .baseline_values
+            .as_ref()
+            .context("epoch cache has no baseline")?;
+        self.persist_baseline(cache).await?;
+        let alias = BaselineAlias {
+            tag: tag.to_owned(),
+            variant,
+            input_hash: format!("{:016x}", cache.input_hash),
+            result: response_from_baseline(baseline),
+        };
+        self.store_baseline_alias(&alias).await
+    }
+
+    async fn store_baseline_alias(&self, alias: &BaselineAlias) -> anyhow::Result<()> {
+        use anyhow::Context;
+        let body = serde_json::to_vec(alias).context("serialize baseline alias")?;
+        let key = Self::baseline_alias_key(&alias.tag);
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .content_type("application/json")
+            .body(body.into())
+            .send()
+            .await
+            .context("persist baseline alias")?;
+        tracing::info!(%key, tag = %alias.tag, variant = %alias.variant, "stored baseline alias");
+        Ok(())
+    }
+
+    /// The published baseline for `tag`. `Ok(None)` is an ordinary miss. A
+    /// storage failure is an error, because the probe route must tell "not
+    /// cached" from "store down".
+    pub async fn load_baseline_alias(
+        &self,
+        tag: &str,
+    ) -> Result<Option<BaselineAlias>, BaselineAliasError> {
+        let key = Self::baseline_alias_key(tag);
+        let response = match self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) if e.as_service_error().is_some_and(|se| se.is_no_such_key()) => {
+                tracing::debug!(%key, "no baseline alias in S3");
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(BaselineAliasError::Storage {
+                    detail: format!("{e:?}"),
+                });
+            }
+        };
+        let bytes = response
+            .body
+            .collect()
+            .await
+            .map_err(|e| BaselineAliasError::Storage {
+                detail: format!("{e:?}"),
+            })?
+            .into_bytes();
+        let alias: BaselineAlias =
+            serde_json::from_slice(&bytes).map_err(|e| BaselineAliasError::Malformed {
+                detail: format!("{key}: {e}"),
+            })?;
+        if alias.tag != tag {
+            return Err(BaselineAliasError::Malformed {
+                detail: format!("{key}: stored tag {:?} differs from request", alias.tag),
+            });
         }
-        .store(cache)
-        .await;
+        Ok(Some(alias))
     }
 
     /// Clone of the client and bucket as a `Send + 'static` handle, so other
@@ -619,34 +770,34 @@ pub struct S3CacheRef {
 }
 
 impl S3CacheRef {
-    // Keep in lockstep with `S3Cache::cache_key` (shares [`CACHE_VERSION_PREFIX`];
-    // per-city layout + linear-uptime engine).
+    /// The one builder for the baseline result key (per-city layout +
+    /// linear-uptime engine under [`CACHE_VERSION_PREFIX`]).
     fn cache_key(input_hash: u64) -> String {
         format!("{CACHE_VERSION_PREFIX}/cache-{input_hash:016x}.bin")
     }
 
-    pub async fn store(&self, cache: &EpochCache) {
+    /// Persist an epoch cache and report the failure to the caller.
+    pub(crate) async fn try_store(&self, cache: &EpochCache) -> anyhow::Result<()> {
+        use anyhow::Context;
         let key = Self::cache_key(cache.input_hash);
-        let bytes = match bincode::serialize(cache) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to serialise cache");
-                return;
-            }
-        };
-
+        let bytes = bincode::serialize(cache).context("serialise cache")?;
         let size = bytes.len();
-        match self
-            .client
+        self.client
             .put_object()
             .bucket(&self.bucket)
             .key(&key)
             .body(bytes.into())
             .send()
             .await
-        {
-            Ok(_) => tracing::info!(%key, size_bytes = size, "stored cache to S3"),
-            Err(e) => tracing::error!(error = %e, "failed to store cache to S3"),
+            .context("store cache to S3")?;
+        tracing::info!(%key, size_bytes = size, "stored cache to S3");
+        Ok(())
+    }
+
+    /// Best-effort persistence; logs and never fails the compute that produced it.
+    pub async fn store(&self, cache: &EpochCache) {
+        if let Err(error) = self.try_store(cache).await {
+            tracing::error!(%error, "failed to store cache to S3");
         }
     }
 }
@@ -739,5 +890,46 @@ mod alias_tests {
             assert_ne!(alias, S3Cache::simulate_key(hash));
             assert_ne!(alias, S3Cache::cache_key(hash));
         }
+    }
+}
+
+#[cfg(test)]
+mod baseline_alias_tests {
+    use super::*;
+
+    #[test]
+    fn baseline_alias_key_is_under_the_publication_prefix() {
+        let key = S3Cache::baseline_alias_key("baseline:epoch-211:canonical-v1:9f2c");
+        assert!(key.starts_with("shapley/v3/publication/v1/baseline-alias-"));
+        assert!(key.ends_with(".json"));
+    }
+
+    #[test]
+    fn baseline_alias_key_differs_from_the_link_estimate_alias_of_the_same_tag() {
+        let tag = "epoch-211:canonical-v1:9f2c";
+        assert_ne!(
+            S3Cache::baseline_alias_key(tag),
+            S3Cache::link_estimate_alias_key(tag, "")
+        );
+        assert_ne!(
+            S3Cache::baseline_alias_key(tag),
+            S3Cache::sweep_marker_key(tag)
+        );
+        assert_ne!(
+            S3Cache::baseline_alias_key("epoch-210:v1:a"),
+            S3Cache::baseline_alias_key("epoch-211:v1:a")
+        );
+    }
+
+    #[test]
+    fn baseline_alias_error_detail_stays_out_of_display() {
+        let error = BaselineAliasError::Storage {
+            detail: "http://gateway.internal:7480 refused".into(),
+        };
+        assert_eq!(error.to_string(), "baseline store unavailable");
+        let error = BaselineAliasError::Malformed {
+            detail: "key: stored tag differs".into(),
+        };
+        assert_eq!(error.to_string(), "baseline alias is malformed");
     }
 }

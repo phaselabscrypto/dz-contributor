@@ -7,6 +7,7 @@ pub mod diff_error;
 pub mod diff_routes;
 pub mod diff_store;
 pub mod epoch;
+pub mod inflight;
 pub mod jobs;
 pub mod model;
 pub mod queue;
@@ -24,8 +25,9 @@ use tokio::sync::RwLock;
 /// what-if path now runs on the externalized worker pool (concurrency = worker
 /// count, governed by the worker autoscaler), not in the API process. The remaining synchronous
 /// compute endpoints (`/shapley`, `/simulate`, `/link-estimate`) run in-process
-/// unbounded except by the axum request timeout + body-size limit; protecting
-/// them is a separate follow-up if it ever matters.
+/// unbounded except by the axum request timeout + body-size limit, with one
+/// exception: the cold baseline solve is single-flighted per input hash through
+/// `baseline_inflight`, so concurrent identical requests share one solve.
 pub struct AppState {
     /// In-memory epoch cache (populated on first Shapley compute, and
     /// rehydrated from S3 on a cache miss when an S3 cache is configured).
@@ -51,4 +53,7 @@ pub struct AppState {
     /// when `S3_CACHE_BUCKET` is set. Records arrive by `PUT /diff/shape/:epoch`
     /// from the Next.js cron; the service never reads the snapshot bucket.
     pub diff_store: Arc<diff_store::DiffStore>,
+    /// One in-flight cold baseline solve per input hash in this process. See
+    /// `routes::baseline_single_flight`.
+    pub baseline_inflight: Arc<inflight::BaselineInflight>,
 }

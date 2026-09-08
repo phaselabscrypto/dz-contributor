@@ -27,6 +27,7 @@ fn app() -> Router {
         ingest_token: None,
         jobs: None,
         diff_store: Arc::new(DiffStore::new(Arc::new(NoPersistence))),
+        baseline_inflight: Arc::default(),
     });
     Router::new()
         .route(

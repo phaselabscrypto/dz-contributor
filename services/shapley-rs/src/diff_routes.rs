@@ -445,6 +445,7 @@ mod tests {
             ingest_token: None,
             jobs: None,
             diff_store: Arc::new(DiffStore::new(persistence)),
+            baseline_inflight: Arc::default(),
         })
     }
 
@@ -465,6 +466,7 @@ mod tests {
             ingest_token: None,
             jobs: None,
             diff_store: Arc::new(DiffStore::new(Arc::new(NoPersistence))),
+            baseline_inflight: Arc::default(),
         })
     }
 

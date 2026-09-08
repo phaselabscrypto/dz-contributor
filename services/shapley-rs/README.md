@@ -10,6 +10,9 @@ LP-correct Shapley values without bundling a Rust solver client-side.
 ```
 GET  /health           -> { status, service, version }
 POST /shapley          -> ShapleyResponse        { method, operator_count, values }
+GET  /shapley/baseline?tag= -> BaselineAlias     (cache-only read of a published baseline; 404 not-cached; never computes)
+POST /precompute       -> 200 already-cached | 202 { job_id, input_hash }   (baseline warm by input hash)
+POST /precompute/baseline -> 200 already-cached | 202 { job_id, input_hash, tag, variant }   (compute + ingest tokens; publishes the epoch alias)
 POST /link-estimate    -> LinkEstimateResponse   (faithful retag-Shapley; sync, S3-served when precomputed)
 POST /jobs/link-estimate -> 202 { job_id }       (async: progress + cancel via /jobs/:id; done-at-submit on S3 hit)
 POST /precompute/link-estimates -> 202 { job_id }   (compute + ingest tokens)
@@ -39,6 +42,24 @@ The body contains `input` and `tag`. Omit `operators` to derive the complete set
 
 Result keys remain under `shapley/v3/`; trusted aliases and markers use `shapley/v3/publication/v1/`. Publication awaits result and alias writes, while the claim heartbeat remains active. A failed alias leaves the marker absent so a later sweep can retry from cached results.
 
+### Baseline aliases
+
+The hash-keyed `shapley/v3/cache-{hash}.bin` object is not addressable without
+the full input, and building that input means downloading the epoch snapshot.
+`POST /precompute/baseline` therefore takes a `tag` (the Next.js `baselineTag`)
+and a `variant`; when the result lands, the worker writes
+`shapley/v3/publication/v1/baseline-alias-{hash(tag)}.json`, which carries the
+full `ShapleyResponse` plus `tag`, `variant` and `input_hash`. The alias is
+written after the result object, so it never points at nothing. The route
+answers `200 already-cached` only when an alias for the tag names this input's
+hash; a cached result with no alias still enqueues, and the worker aliases it
+without solving. `GET /shapley/baseline?tag=` reads that one object and answers
+`404 {status:"not-cached"}` on a miss. It is the only surface user-facing
+requests hit, so a browser can never start a solve.
+
+Concurrent cold `POST /shapley` requests for one input hash share a single
+solve inside a process (`src/inflight.rs`); later callers await the first.
+
 Wire-types live in `src/model.rs` and mirror the JSON our Next.js routes
 already produce (see `lib/types/shapley.ts`).
 
@@ -52,7 +73,7 @@ running the LP solver to prevent pathological inputs:
 | `devices` | 500 |
 | `private_links` | 2,000 |
 | `public_links` | 2,000 |
-| `demands` | 1,000 |
+| `demands` | 2,000 |
 
 Request body limit: **2 MB**.
 
