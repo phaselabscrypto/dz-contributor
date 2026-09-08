@@ -24,7 +24,7 @@ The canonical builder returns `{ canonical: false, reason }` when the snapshot i
 - `snapshot missing start_us/end_us epoch window`
 - `snapshot missing metro_prices`
 
-The read routes carry only what the published alias holds (`epoch`, `tag`, `method`, `operatorCount`, `values`, `fetchedAt`). `buildShapleyInput` in `shapley-input-builder.ts` is the older heuristic builder; the cron does not call it.
+The read routes carry only what the published alias holds (`epoch`, `tag`, `method`, `operatorCount`, `values`, `fetchedAt`). `buildShapleyInput` in `shapley-input-builder.ts` is the older heuristic builder; no route calls it. The simulate, jobs and link-value routes build from the snapshot the same way and answer `422` when the canonical builder cannot use it.
 
 > Tuning constants (`operator_uptime`, `contiguity_bonus`, `demand_multiplier`) are emitted by every builder, but the two builders intentionally differ on `demand_multiplier`: the canonical builder hardcodes the Foundation-faithful `1.2` (`DEMAND_MULTIPLIER` in `canonical-input-builder.ts`), while the heuristic builder uses `SHAPLEY_PARAMS.demandMultiplier = 1.0` from `lib/constants/config.ts`. The divergence is deliberate — the multiplier normalizes out of the final share proportions — and the canonical values are verified against the Foundation reference on a pinned mainnet epoch.
 

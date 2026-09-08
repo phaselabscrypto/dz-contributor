@@ -1,15 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  getSnapshotUrl,
-  MIN_DZ_EPOCH,
-  SHAPLEY_SERVICE_URL,
-  SNAPSHOT_FETCH_TIMEOUT_MS,
-} from "@/lib/constants/config";
-import type { RawSnapshot } from "@/lib/types/snapshot";
-import type { ShapleyInput } from "@/lib/types/shapley";
+import { MIN_DZ_EPOCH, SHAPLEY_SERVICE_URL } from "@/lib/constants/config";
 import { parseSnapshot } from "@/lib/utils/snapshot-parser";
-import { buildShapleyInput } from "@/lib/utils/shapley-input-builder";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
+import {
+  EpochSnapshotError,
+  fetchEpochSnapshot,
+  snapshotFailure,
+} from "@/lib/utils/epoch-snapshot";
 import { startSimulateJob } from "@/lib/utils/shapley-remote";
 import { modifyShapleyInput } from "@/lib/utils/shapley-input-modifier";
 import {
@@ -25,8 +22,8 @@ import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
 /**
  * POST /api/shapley/jobs — start an async what-if simulation.
  *
- * Builds the baseline + modified Shapley inputs (snapshot → canonical/heuristic
- * builder → modifier), kicks off a background job on the Rust service, and
+ * Builds the baseline + modified Shapley inputs (snapshot → canonical builder
+ * → modifier), kicks off a background job on the Rust service, and
  * returns `{ jobId }` immediately (202). The browser then polls
  * `GET /api/shapley/jobs/{id}` for progress + result and can `DELETE` to cancel.
  */
@@ -86,37 +83,30 @@ export async function POST(request: NextRequest) {
   const overrides = normalized.overrides;
 
   try {
-    const url = getSnapshotUrl(epoch);
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(SNAPSHOT_FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      return NextResponse.json(
-        { error: `Epoch ${epoch} not found` },
-        { status: 404 }
-      );
-    }
-
-    const raw: RawSnapshot = await res.json();
+    const raw = await fetchEpochSnapshot(epoch);
     const parsed = parseSnapshot(raw);
 
-    let baselineInput: ShapleyInput;
-    const canonical = buildCanonicalShapleyInput(raw);
-    if (canonical.canonical) {
-      baselineInput = canonical.input;
-    } else {
-      baselineInput = buildShapleyInput(raw, parsed);
+    // The canonical builder is the only input source. A snapshot it cannot
+    // use is a 422, never a heuristic substitute.
+    const built = buildCanonicalShapleyInput(raw);
+    if (!built.canonical) {
+      return NextResponse.json(
+        {
+          error: `Epoch ${epoch} snapshot cannot build the canonical input: ${built.reason ?? "unknown"}`,
+        },
+        { status: 422 }
+      );
     }
+    const baselineInput = built.input;
 
     // Demand overrides regenerate the demand table from override-patched
-    // city stats (DZ-parity) — only meaningful for canonical snapshots.
+    // city stats (DZ-parity).
     const overridden = buildOverriddenInput({
       snap: raw,
       baselineInput,
       overrides,
       epoch,
-      canonical: canonical.canonical,
-      canonicalReason: canonical.reason,
+      canonical: true,
     });
     if (!overridden.ok) {
       return NextResponse.json({ error: overridden.error }, { status: 400 });
@@ -145,6 +135,13 @@ export async function POST(request: NextRequest) {
     const jobId = await startSimulateJob(baselineInput, modifiedInput);
     return NextResponse.json({ jobId }, { status: 202 });
   } catch (err) {
+    if (err instanceof EpochSnapshotError) {
+      const failure = snapshotFailure(err);
+      if (failure.status !== 404) {
+        console.error("POST /api/shapley/jobs snapshot failed:", err);
+      }
+      return NextResponse.json({ error: failure.message }, { status: failure.status });
+    }
     // Log the full reason server-side (incl. `.cause`, which carries the
     // ECONNREFUSED/ENOTFOUND + host:port) — but never echo it to the client:
     // this route calls the internal Shapley service and the error can name its

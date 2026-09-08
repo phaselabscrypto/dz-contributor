@@ -134,7 +134,7 @@ There are **29** `route.ts` files. They fall into three behavioral groups:
 
 The builders, solver clients, and caches that the routes compose:
 
-- **Input builders** — `canonical-input-builder.ts` (bit-comparable to the Foundation reference), `shapley-input-builder.ts` (heuristic fallback), `live-shapley-input.ts`, `shapley-input-modifier.ts` (applies simulate edits). `snapshot-parser.ts` parses S3 snapshots; the epoch diff is computed in the Rust service (`diff-window.ts` holds the shared window validation).
+- **Input builders** — `canonical-input-builder.ts` (bit-comparable to the Foundation reference), `shapley-input-builder.ts` (older heuristic builder; no route calls it), `live-shapley-input.ts`, `shapley-input-modifier.ts` (applies simulate edits). `snapshot-parser.ts` parses S3 snapshots; the epoch diff is computed in the Rust service (`diff-window.ts` holds the shared window validation).
 - **Solver clients** — `shapley-remote.ts` is the single source of truth for talking to the Rust service (compute, simulate, job start/poll/cancel, precompute sweep, baseline alias probe, network and contributor diff).
 - **Caching + safety** — `lru-cache.ts` (TTL + size-capped LRU used by the compute routes), `rate-limit.ts` (per-instance advisory IP limiter), `sweep-tag.ts` (S3 marker key per epoch).
 - **Feed helpers** — `live-topology-fetch.ts`, `economic-hub-fetch.ts`, `epoch-discovery.ts`, `fee-parser.ts`, `jupiter-price.ts`, `csv.ts`.

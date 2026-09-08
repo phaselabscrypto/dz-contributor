@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  getSnapshotUrl,
-  MIN_DZ_EPOCH,
-  SHAPLEY_SERVICE_URL,
-} from "@/lib/constants/config";
-import type { RawSnapshot } from "@/lib/types/snapshot";
+import { MIN_DZ_EPOCH, SHAPLEY_SERVICE_URL } from "@/lib/constants/config";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
+import {
+  EpochSnapshotError,
+  fetchEpochSnapshot,
+  snapshotFailure,
+} from "@/lib/utils/epoch-snapshot";
 import {
   JobStartError,
   startLinkEstimateJob,
@@ -95,16 +95,7 @@ export async function POST(request: NextRequest) {
     console.log(
       `[link-value/jobs] epoch=${epoch} contributor=${contributorCode} served_from=snapshot`,
     );
-    const snapRes = await fetch(getSnapshotUrl(epoch), {
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!snapRes.ok) {
-      return NextResponse.json(
-        { error: `Epoch ${epoch} not found` },
-        { status: snapRes.status === 404 ? 404 : 500 },
-      );
-    }
-    const raw: RawSnapshot = await snapRes.json();
+    const raw = await fetchEpochSnapshot(epoch, { timeoutMs: 30_000 });
     // Same canonical input (and therefore same cache keys) as every other
     // link-value path. A snapshot that can't build canonically is a loud 422.
     const built = buildCanonicalShapleyInput(raw);
@@ -120,6 +111,16 @@ export async function POST(request: NextRequest) {
     const jobId = await startLinkEstimateJob(built.input, contributorCode);
     return NextResponse.json({ jobId }, { status: 202 });
   } catch (err) {
+    if (err instanceof EpochSnapshotError) {
+      const failure = snapshotFailure(err);
+      if (failure.status !== 404) {
+        reportError(err, {
+          source: "api/link-value/jobs",
+          extras: { epoch, contributorCode, phase: "snapshot" },
+        });
+      }
+      return NextResponse.json({ error: failure.message }, { status: failure.status });
+    }
     reportError(err, {
       source: "api/link-value/jobs",
       extras: { epoch, contributorCode },

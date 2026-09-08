@@ -13,6 +13,7 @@ import { getEpochAvailability } from "@/lib/utils/epoch-discovery";
 import {
   EpochSnapshotError,
   fetchEpochSnapshot,
+  snapshotFailureStatus,
 } from "@/lib/utils/epoch-snapshot";
 import {
   boundedSignal,
@@ -159,22 +160,6 @@ function describeFailure(error: unknown): Failure {
     return { message: "precompute work timed out or aborted", status: 504 };
   }
   return { message: "precompute work failed", status: 502 };
-}
-
-function snapshotFailureStatus(error: EpochSnapshotError): number {
-  switch (error.category) {
-    case "timeout":
-    case "aborted":
-      return 504;
-    case "epoch-mismatch":
-    case "envelope":
-    case "json":
-      return 422;
-    case "http":
-      return error.status === 404 ? 404 : 502;
-    case "network":
-      return 502;
-  }
 }
 
 /** `?epoch=N` must be an integer inside the diff window. */
