@@ -2,8 +2,9 @@
 
 This directory contains DZ ledger and Solana mainnet readers. **Not
 all files are live**: the sections below say which paths are verified
-against on-chain data and which are stubs waiting on layout work of
-our own. Nothing here waits on a program IDL.
+against on-chain data and which are stubs. Every stub is waiting on
+byte-layout work in this repository. Nothing here is blocked on an
+external dependency.
 
 ## ✅ Live (verified end-to-end)
 
@@ -25,9 +26,9 @@ These modules exist so call sites can be wired against a stable
 function signature before the decoders are written. Every call throws
 `OnchainNotConfigured` or returns `{ epochs: [], source: "stub" }`.
 
-None of them needs a program IDL. The live modules above read their
-accounts by decoding verified byte offsets. The same approach applies
-here. What is missing is the layout work.
+Each one needs the byte layout of its account type, verified against a
+live account. The live modules above were built exactly that way, and
+the same approach applies here.
 
 | Module | What it would read | What it needs |
 |---|---|---|
@@ -36,11 +37,11 @@ here. What is missing is the layout work.
 | `validators.ts` | Per-epoch validator payout history (SOL) | The payout record layout on the rewards program. `DZ_REWARDS_PROGRAM_ID` is already known. |
 | `client.ts` | Hand-rolled JSON-RPC client used only by `topology.ts` | Nothing. It works. `@solana/web3.js` would replace it if `topology.ts` is rewritten. |
 
-`idl-registry.ts` and `borsh-registry.ts` were written on an earlier
-assumption that an Anchor IDL was required. `borsh-registry.ts` is the
-closer starting point: it decodes with raw borsh and reads its schemas
-from `idl/schemas.ts`, where they are still placeholders
-(`haveSchemas = false`).
+`borsh-registry.ts` is the closer starting point of the two unused
+registries: it decodes with raw borsh and reads its schemas from
+`idl/schemas.ts`, where they are still placeholders
+(`haveSchemas = false`). `idl-registry.ts` holds the active
+`stubRegistry` plus an `anchorRegistry` that is never wired.
 
 The `ACCOUNT_DISCRIMINATORS` table in `program-ids.ts` holds guesses
 from before the layout work. It lists Contributor as `0x04`. The

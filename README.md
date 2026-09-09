@@ -162,13 +162,15 @@ Solana sidechain.
 
 The registry decoders (`decoders.ts`, `topology.ts`, `validators.ts`)
 are stubs, so `GET /api/onchain/topology` and `GET
-/api/onchain/validators` return `503`. What they need is the byte
-layout for the Metro, Device, and Link account types, which nobody has
-written yet. They do not need a program IDL: `contributor-directory.ts`
-reads `AccountType::Contributor` from the same DoubleZero
-serviceability program (`ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv`)
-by decoding verified byte offsets, and `dz-rewards-record.ts` does the
-same for reward records. `GET
+/api/onchain/validators` return `503`. Each one needs the byte layout
+of its account type written and verified against a live account: Metro,
+Device, and Link on the serviceability program, and the payout record
+on the rewards program. That is work in this repository and nothing
+external blocks it. `contributor-directory.ts` reads
+`AccountType::Contributor` from the same serviceability program
+(`ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv`) by verified byte
+offsets, and `dz-rewards-record.ts` does the same for reward records,
+so the pattern is already proven on both programs. `GET
 /api/onchain/{contributors,rewards,contributor-rewards}` read live data
 today and return `502` on an upstream failure.
 

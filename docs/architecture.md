@@ -57,7 +57,7 @@ flowchart TD
     rust --> s3cache
 ```
 
-All external feeds are reached **server-side** from the API routes; the browser only ever talks to `/api/*` on its own origin. The Content-Security-Policy in `next.config.ts` enforces this: `connect-src 'self'` in production. Two on-chain routes, `topology` and `validators`, are dark by default and return `503` with a stable shape until DoubleZero ships the registry IDL (see `lib/onchain/README.md`); the other three on-chain routes read live from the DZ ledger.
+All external feeds are reached **server-side** from the API routes; the browser only ever talks to `/api/*` on its own origin. The Content-Security-Policy in `next.config.ts` enforces this: `connect-src 'self'` in production. Two on-chain routes, `topology` and `validators`, are dark and return `503` with a stable shape, because their account decoders are unwritten (see `lib/onchain/README.md`). The other three on-chain routes read live from the DZ ledger.
 
 ## Layer tour
 
@@ -144,7 +144,7 @@ The builders, solver clients, and caches that the routes compose:
 
 ### `lib/onchain`
 
-Three modules are live: `dz-rewards-record.ts` and `rewards.ts` read contributor-rewards records from the DZ ledger, and `contributor-directory.ts` reads the contributor directory from the same ledger. A fourth, `vote-stake.ts`, resolves activated stake for any Solana vote account and backs `/api/validators/stake`. The Metro/Device/Link registry decoders (`decoders.ts`, `idl-registry.ts`, `topology.ts`, `validators.ts`) are still stubs. They need the byte layout for those three account types, which is unwritten. They do not need a program IDL: the accounts belong to the DoubleZero serviceability program (`ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv`) that `contributor-directory.ts` already reads by verified byte offsets, and `dz-rewards-record.ts` decodes reward records the same way.
+Three modules are live: `dz-rewards-record.ts` and `rewards.ts` read contributor-rewards records from the DZ ledger, and `contributor-directory.ts` reads the contributor directory from the same ledger. A fourth, `vote-stake.ts`, resolves activated stake for any Solana vote account and backs `/api/validators/stake`. Two readers are stubs. `topology.ts` needs the byte layout of the Metro, Device, and Link accounts, which `decoders.ts` currently routes to a registry that throws. `validators.ts` needs the payout record layout on the rewards program; it fetches the accounts and discards them. Both are byte-layout work in this repository. The Metro, Device, and Link accounts belong to the DoubleZero serviceability program (`ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv`) that `contributor-directory.ts` already reads by verified byte offsets, and `dz-rewards-record.ts` decodes reward records on the record program the same way, so the pattern is proven on both.
 
 `program-ids.ts` defines `SOLANA_RPC_URL` (defaults to `https://api.mainnet-beta.solana.com`), `DZ_REGISTRY_PROGRAM_ID`, `DZ_REWARDS_PROGRAM_ID`, and the `ONCHAIN_ENABLED` toggle. The live reward paths separately require `DZ_LEDGER_RPC_URL`, which has no default: a baked-in value would expose a paid RPC key in the deployed bundle. While the registry layouts are unwritten, `/api/onchain/topology` and `/api/onchain/validators` return `503` with a stable shape; `/api/onchain/contributors`, `/api/onchain/rewards`, and `/api/onchain/contributor-rewards` read live and return `502` only if the upstream call fails. What each stub still needs is listed in `lib/onchain/README.md`.
 

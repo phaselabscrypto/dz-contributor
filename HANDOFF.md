@@ -50,7 +50,7 @@ Details: `docs/shapley-pipeline.md` (Limits) and `docs/shapley-service.md` (Inpu
 
 - The progress screen on `/simulate` cannot tell a queued job from a solve that is still starting; both read as starting.
 - `services/shapley-rs/tests/smoke.sh` step 8 calls `POST /diff/precompute`, a route the service does not serve. That step fails until the script is updated.
-- `GET /api/onchain/topology` and `GET /api/onchain/validators` return `503`. The Metro, Device, and Link account layouts are not written yet. This is our own remaining work, not an external dependency: those accounts sit on the DoubleZero serviceability program that `contributor-directory.ts` already reads, and its `AccountType::Contributor` offsets were verified against every live account. Decoding the other account types takes the same layout work. No program IDL is required. The `decoders.ts` and `idl-registry.ts` scaffolding was written on an earlier assumption that one was.
+- `GET /api/onchain/topology` and `GET /api/onchain/validators` return `503`. Four account layouts are unwritten: Metro, Device, and Link on the serviceability program, and the payout record on the rewards program. That is byte-layout work in this repository, and nothing external blocks it. `contributor-directory.ts` reads `AccountType::Contributor` from the same serviceability program with offsets verified against every live account, and `dz-rewards-record.ts` decodes reward records on the record program the same way, so the pattern is proven on both. Everything else on-chain is live.
 - Open engineering notes are in `services/shapley-rs/TODO.md`.
 
 ## Not included, on purpose
