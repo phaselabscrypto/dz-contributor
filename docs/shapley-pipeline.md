@@ -111,7 +111,20 @@ The production solver is the Rust microservice in `services/shapley-rs`, which w
 
 `/link-estimate` answers "what is each of operator X's links worth?" It is a faithful port of the Python `network_linkestimate`, distinct from the per-city reward methodology. `run_link_estimate` in `services/shapley-rs/src/routes.rs` delegates to the engine's `network_link_estimate` (in the pinned upstream crate), which retags each focus-owned link as its own pseudo-operator and runs **one** exact `2^n` coalition Shapley over the epoch's full demand set; every non-focus operator collapses to a single `Others` player (on/off-ramps collapse to `Private`). The result is labeled `retag-shapley-rs`. Per-link `value` is signed (negatives mean no positive contribution) and `percent` is `max(value, 0) / Σ max(value, 0)`.
 
-Players are one pseudo-operator per focus-owned link, plus a single `Others` player for every non-focus operator. `Private` and `Public` are filtered out of the player set: they are never players. Cost is exactly `2^(links+1)` coalitions. The [Limits](#limits) section below lists every cap this bounds, its value, and where the service enforces it.
+Players are one pseudo-operator per focus-owned link, plus a single `Others` player for every non-focus operator. `Private` and `Public` are filtered out of the player set: they are never players. Cost is exactly `2^(links+1)` coalitions.
+
+Measured on the production worker, 4 solver threads on a 16 GiB pod, from the `elapsed_ms` each link-estimate job logs:
+
+| Focus links | Coalitions | Elapsed | ms/coalition |
+|---|---|---|---|
+| 1 | 4 | 9 s | 2,173 |
+| 5 | 64 | 80 s | 1,256 |
+| 7 | 256 | 101 s | 395 |
+| 9 | 1,024 | 431 s | 421 |
+| 10 | 2,048 | 774 s | 378 |
+| 12 | 8,192 | 1,783 s | 218 |
+
+The amortised rate is 218 ms per coalition. Projecting it past the measured range: 18 links is 31.7 h, 19 is 63.4 h, and 20 is about 127 h. A Solana epoch is 43.9 h, so 18 focus links is the largest breakdown that finishes inside one. The cap sits at 19. The [Limits](#limits) section below lists every cap this bounds, its value, and where the service enforces it.
 
 `count_focus_links` counts a link as focus-owned when either endpoint's device belongs to the focus operator. Results are served from an S3 cache before the sync cap is even checked, so a precomputed large operator is servable even when computing it inline would not be. The async job path and the per-epoch precompute sweep are covered in [shapley-service.md](./shapley-service.md) (queue mechanics) and [architecture.md](./architecture.md) (UI flow).
 
@@ -119,8 +132,8 @@ Players are one pseudo-operator per focus-owned link, plus a single `Others` pla
 
 | Cap | Value | Enforced where | Reason |
 |---|---|---|---|
-| Sync `/link-estimate` focus cap | `SYNC_MAX_FOCUS_LINKS` = 12 | `link_estimate` handler, `services/shapley-rs/src/routes.rs` | Cost is `2^(links+1)` coalition LPs: 12 focus links is 8,192, and each further link doubles it. Twelve is the most that plausibly returns inside the 120 s request timeout. Above it the sync path returns 422 and points the caller at `POST /jobs/link-estimate`. Nothing in the site calls this path; the page uses the async one |
-| Sweep / async focus cap | `SWEEP_MAX_FOCUS_LINKS` = 19 | `link_estimate_start` (422) and `run_sweep` (skip), `services/shapley-rs/src/routes.rs` and `src/worker.rs` | The user-facing limit. At 19 focus links the solve is over a million coalitions and runs for many hours, so operators above it get no per-link breakdown and are listed in the sweep summary's `skipped`. `MAX_BREAKDOWN_FOCUS_LINKS` in `lib/constants/config.ts` mirrors it so the UI matches |
+| Sync `/link-estimate` focus cap | `SYNC_MAX_FOCUS_LINKS` = 12 | `link_estimate` handler, `services/shapley-rs/src/routes.rs` | 12 focus links is 8,192 coalitions, measured at 1,783 s. Above it the sync path returns 422 and points the caller at `POST /jobs/link-estimate`. Nothing in the site calls this path; the page uses the async one |
+| Sweep / async focus cap | `SWEEP_MAX_FOCUS_LINKS` = 19 | `link_estimate_start` (422) and `run_sweep` (skip), `services/shapley-rs/src/routes.rs` and `src/worker.rs` | The user-facing limit. 19 focus links is 1,048,576 coalitions, about 63.4 h. Operators above it get no per-link breakdown and are listed in the sweep summary's `skipped`. `MAX_BREAKDOWN_FOCUS_LINKS` in `lib/constants/config.ts` mirrors it so the UI matches |
 | Frontend focus-link mirror | `MAX_BREAKDOWN_FOCUS_LINKS` = 19 | `lib/constants/config.ts` | Mirrors `SWEEP_MAX_FOCUS_LINKS` so the operator picker in the UI matches what the backend will solve. |
 | Engine operator cap, full uptime | `MAX_OPERATORS` = 20 | `check_operator_limit`, `network-shapley-rs/src/validation.rs` | Coalition cost is `2^n`; the exact solver is infeasible past 20 operators at `operator_uptime = 1.0`. Enforced inside the engine, not by the service's `validate_dimensions`. |
 | Engine operator cap, partial uptime | `MAX_OPERATORS_PARTIAL_UPTIME` = 15 | `check_operator_limit`, `network-shapley-rs/src/validation.rs` | Applies when `operator_uptime < 1.0` (production uses 0.98). The uptime expectation pass costs more than the plain coalition solve, so the cap tightens to 15. |
