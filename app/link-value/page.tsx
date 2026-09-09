@@ -167,7 +167,7 @@ function Inner() {
           <Loader2 className="size-4 animate-spin shrink-0" />
           <span>
             {typeof progress === "number" && progress > 0 ? (
-              <>Calculating link values — {Math.round(progress)}%</>
+              <>Calculating link values: {Math.round(progress)}%</>
             ) : (
               <>
                 Calculating link values… This is usually quick, but can take a
@@ -278,14 +278,7 @@ function Inner() {
             <span>
               Share is each link&apos;s portion of this operator&apos;s total
               contribution for the epoch. Tiers: High ≥ 25%, Medium ≥ 8%.
-              Links marked &quot;n/a&quot; have no value this epoch. See{" "}
-              <Link
-                href="/methodology"
-                className="underline decoration-dotted hover:text-foreground"
-              >
-                Methodology
-              </Link>{" "}
-              for how values are computed.
+              Links marked &quot;n/a&quot; have no value this epoch.
             </span>
           </div>
         </>

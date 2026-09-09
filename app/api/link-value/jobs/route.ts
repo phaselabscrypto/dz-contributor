@@ -65,7 +65,7 @@ export async function POST(request: NextRequest) {
 
   if (!SHAPLEY_SERVICE_URL) {
     return NextResponse.json(
-      { error: "SHAPLEY_SERVICE_URL not configured — canonical link values unavailable." },
+      { error: "SHAPLEY_SERVICE_URL not configured. Canonical link values unavailable." },
       { status: 503 },
     );
   }

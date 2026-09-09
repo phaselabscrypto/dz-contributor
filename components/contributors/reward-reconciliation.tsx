@@ -68,7 +68,7 @@ export function RewardReconciliation({ contributorCode }: Props) {
 
   const headlineCopy = (() => {
     if (allTimePct === 0) {
-      return "New on the network — no historical payouts yet, but they're already contributing measurable Shapley value.";
+      return "They are new to the network and have no historical payouts yet, but already contribute measurable Shapley value.";
     }
     if (livePct === 0) {
       return "Currently contributes no Shapley value against the live network. Their historical earnings come from prior coalitions that no longer exist as-is.";

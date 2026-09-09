@@ -11,9 +11,8 @@ import { getEpochRate, toPublicEpochRate } from "@/lib/utils/epoch-rate";
  * GET /api/methodology
  *
  * Machine-readable manifest of every formula, constant, and data source
- * the site uses to compute the figures we display. Mirrors the prose in
- * /methodology so external auditors (DZ algorithm team in particular)
- * can spot-check our work programmatically.
+ * the site uses to compute the figures we display, so external auditors
+ * (DZ algorithm team in particular) can spot-check our work programmatically.
  *
  * Stable contract: never remove a key, only add. Bump `version` on any
  * formula change so consumers can diff.

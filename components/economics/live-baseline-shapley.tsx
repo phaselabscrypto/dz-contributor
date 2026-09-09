@@ -130,7 +130,7 @@ export function LiveBaselineShapley() {
       )}
 
       <div className="px-4 py-2 text-xs text-muted-foreground font-mono border-t border-border">
-        Latest completed epoch (DZ-current methodology) — different
+        Latest completed epoch (DZ-current methodology). This differs
         from the all-time share above, which sums historical pool distributions.
       </div>
     </div>

@@ -20,7 +20,7 @@ dz-contributor/
 │   ├── api/                17 server routes (live + on-chain + shapley + diff)
 │   ├── (pages)/            Network, Contributors, Validators, Links,
 │   │                       Simulate, Link Value, Economics, Rewards,
-│   │                       Changelog, Status, Methodology
+│   │                       Changelog, Status
 │   └── layout.tsx          Sidebar shell + keyboard shortcuts + OG metadata
 ├── components/             UI primitives + page clients
 ├── lib/
@@ -55,7 +55,6 @@ dz-contributor/
 | `/rewards` | Historical 2Z fee distribution per epoch |
 | `/changelog` | Cross-epoch topology diff |
 | `/status` | Source-feed health table |
-| `/methodology` | Every formula and source documented inline |
 
 ### API
 

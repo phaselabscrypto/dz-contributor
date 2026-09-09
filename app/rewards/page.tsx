@@ -127,14 +127,7 @@ export default function RewardsPage() {
               ), <span className="text-foreground">15.75%</span> to validator
               clients, <span className="text-foreground">10%</span> burned.
               Values recorded on chain in lamports; this page shows SOL plus a
-              live USD equivalent from Jupiter. Full math:{" "}
-              <Link
-                href="/methodology"
-                className="underline decoration-dotted hover:text-foreground"
-              >
-                /methodology
-              </Link>
-              .
+              live USD equivalent from Jupiter.
             </div>
 
             {/* Summary cards */}
@@ -241,7 +234,7 @@ export default function RewardsPage() {
                             {epoch.isEstimated ? (
                               <span
                                 className="text-amber-400"
-                                title="Back-filled from previous_fees aggregate — every pre-934 epoch shares the same averaged value"
+                                title="Back-filled from previous_fees aggregate. Every pre-934 epoch shares the same averaged value."
                               >
                                 estimated
                               </span>

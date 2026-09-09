@@ -139,7 +139,7 @@ export default function ContributorsPage() {
     <>
       <PageHeader
         title="Contributors"
-        description="Live operator footprint on DoubleZero — devices, links, metros, and historic reward share."
+        description="Live operator footprint on DoubleZero, covering devices, links, metros and historic reward share."
       />
       <div className="flex-1 px-4 sm:px-6 py-4 sm:py-6">
         {error && !topology ? (

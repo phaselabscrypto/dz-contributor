@@ -85,7 +85,6 @@ Sixteen routes, all under the sidebar shell in `app/layout.tsx`. Most pages are 
 | `/rewards` | `app/rewards/page.tsx` | Historical 2Z fee distribution per epoch |
 | `/changelog` | `app/changelog/page.tsx` | Cross-epoch topology diff |
 | `/status` | `app/status/page.tsx` | Source-feed health table |
-| `/methodology` | `app/methodology/page.tsx` | Every formula, source, and method label documented inline |
 
 ### Components (`components/`)
 
@@ -265,9 +264,9 @@ Every Shapley response carries a `method` field so the UI can be honest about wh
 | `lp-multi-commodity-flow-rs` | Legacy decode default on the TS side, applied only if a service response lacked `method` (never the case with the current service) | `DEFAULT_METHOD`, `lib/utils/shapley-remote.ts` |
 | `retag-shapley-rs` | Per-link value-add (faithful retag port of `network_linkestimate`) | `services/shapley-rs/src/routes.rs` |
 
-> **Drift resolved (PR #4):** UI checks no longer compare against a specific solver label — `live-baseline-shapley.tsx` matches the `lp-` prefix, so a service-side method rename cannot silently break it. The `/methodology` prose names the current label (`lp-per-city-stake-weighted-exact`) as an example only.
+> **Drift resolved (PR #4):** UI checks no longer compare against a specific solver label — `live-baseline-shapley.tsx` matches the `lp-` prefix, so a service-side method rename cannot silently break it.
 
-**No-silent-fallback policy.** `app/api/shapley/route.ts`, `app/api/shapley/baseline/route.ts` and `app/api/shapley/tracking/route.ts` are read-only proxies over the Rust service's published epoch aliases. They serve **only** Rust-solver results, and a probe failure is a `502` rather than a different algorithm, because masking that divergence in production would make it undetectable. An epoch the cron has not published is `404 {status:"not-cached"}`, which the widgets read as "no card"; a request never triggers a solve, so nothing self-heals on a user request. With `SHAPLEY_SERVICE_URL` unset every one of the three answers `503`. The whole system is documented for external auditors in `/methodology` (`app/methodology/page.tsx`, `app/api/methodology/route.ts`).
+**No-silent-fallback policy.** `app/api/shapley/route.ts`, `app/api/shapley/baseline/route.ts` and `app/api/shapley/tracking/route.ts` are read-only proxies over the Rust service's published epoch aliases. They serve **only** Rust-solver results, and a probe failure is a `502` rather than a different algorithm, because masking that divergence in production would make it undetectable. An epoch the cron has not published is `404 {status:"not-cached"}`, which the widgets read as "no card"; a request never triggers a solve, so nothing self-heals on a user request. With `SHAPLEY_SERVICE_URL` unset every one of the three answers `503`. The formulas and sources are published for external auditors in `/api/methodology` (`app/api/methodology/route.ts`).
 
 ## Security posture (summary)
 

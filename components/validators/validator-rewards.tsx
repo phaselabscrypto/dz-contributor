@@ -350,7 +350,7 @@ export function ValidatorRewards({
               {filtered.length === 0 && (
                 <p className="text-center text-sm text-cream-40 py-8">
                   {suppressEmptyMessage
-                    ? "Not a connected validator — see the estimate above."
+                    ? "Not a connected validator. See the estimate above."
                     : "No validators match your search."}
                 </p>
               )}
@@ -367,7 +367,7 @@ export function ValidatorRewards({
         {filtered.length === 0 && (
           <p className="text-center text-sm text-cream-40 py-8">
             {suppressEmptyMessage
-              ? "Not a connected validator — see the estimate above."
+              ? "Not a connected validator. See the estimate above."
               : "No validators match your search."}
           </p>
         )}

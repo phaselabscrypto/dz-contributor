@@ -126,7 +126,7 @@ export function useLinkEstimate(
       if (pollFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
         cancelJob();
         fail(
-          `polling failed ${pollFailures}x — gave up and cancelled the job (${msg})`,
+          `polling failed ${pollFailures}x. Gave up and cancelled the job (${msg})`,
         );
         return;
       }

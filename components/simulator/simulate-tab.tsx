@@ -130,7 +130,7 @@ const parseAsRunFlag = createParser({
 // turn that dead-end into an actionable hint — re-running recomputes, and a
 // recently-solved scenario returns instantly from the durable result store.
 const EXPIRED_JOB_MESSAGE =
-  "This simulation has expired — Run again to recompute (recent results return instantly).";
+  "This simulation has expired. Run again to recompute (recent results return instantly).";
 
 /** Map the raw job error to friendlier copy for the expired-job case. */
 function displaySimError(error: string | null): string | null {
@@ -846,7 +846,7 @@ export function SimulateTab({
           <span>
             Couldn&apos;t load fee history: {feeHistoryError.message}. Shapley
             share calculations still work, but projected SOL / epoch numbers
-            are hidden until the feed recovers — they would otherwise display
+            are hidden until the feed recovers. They would otherwise display
             as $0 and silently misrepresent rewards.
           </span>
         </div>
@@ -860,7 +860,7 @@ export function SimulateTab({
             ? ` (Solana epochs ${feeHistory.earliestEpoch}–${feeHistory.latestEpoch})`
             : ""}{". "}
           Fees are denominated in SOL on-chain; we display SOL with a live USD
-          conversion from Jupiter. Directional — 2Z payouts are not currently active.
+          conversion from Jupiter. Directional only, because 2Z payouts are not currently active.
         </span>
       </div>
 
@@ -918,7 +918,7 @@ export function SimulateTab({
             <p className="text-xs text-cream-40 flex items-start gap-2">
               <Plus className="size-3 text-green shrink-0 mt-0.5" />
               <span>
-                Starting from 0% share — add the links you&apos;d contribute
+                Starting from 0% share. Add the links you&apos;d contribute
                 below and run the forecast.
               </span>
             </p>
@@ -1442,7 +1442,7 @@ export function SimulateTab({
             <CardContent className="space-y-3">
               {!snapshot.canonicalDemand ? (
                 <p className="text-xs text-cream-30 font-mono">
-                  Demand editing requires a canonical snapshot — not available for this epoch.
+                  Demand editing requires a canonical snapshot, which is not available for this epoch.
                 </p>
               ) : (
                 <>
