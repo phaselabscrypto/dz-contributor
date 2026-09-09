@@ -3,7 +3,7 @@
 Live DoubleZero network state, real on-chain reward distribution, and a
 Shapley-based forecaster for any add/remove/demand-shift scenario.
 
-Live: <https://dzcontributor.xyz>
+Live: <https://dz.phase.cc>
 
 Start here to evaluate or take over this project: [HANDOFF.md](./HANDOFF.md).
 
