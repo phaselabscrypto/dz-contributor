@@ -1,17 +1,19 @@
 /**
- * Borsh-backed decoder registry.
+ * Borsh-backed decoder registry for Metro, Device and Link accounts.
  *
- * Uses raw borsh (not @coral-xyz/anchor) because we only need decode, not
- * transaction signing or RPC plumbing. Anchor would add ~200KB for two
- * features we won't use.
+ * Uses raw borsh rather than @coral-xyz/anchor because only decode is
+ * needed, not transaction signing or RPC plumbing. Anchor would add
+ * ~200KB for features this app does not use.
  *
- * Activation:
- *   1. Drop the canonical schemas at `lib/onchain/idl/schemas.ts` (see
- *      template at the bottom of this file).
- *   2. In decoders.ts, swap `stubRegistry` for `borshRegistry`.
+ * To finish it:
+ *   1. Verify each account layout against a live account, the way
+ *      `contributor-directory.ts` verified the contributor layout.
+ *   2. Write the schemas in `lib/onchain/idl/schemas.ts` and set
+ *      `haveSchemas = true`.
+ *   3. In decoders.ts, swap `stubRegistry` for `borshRegistry`.
  *
- * Until step 1 lands, the schemas are best-guesses. The decoder swap to
- * the real schemas should be a search-and-replace, not a rewrite.
+ * The schemas are unverified placeholders until step 1 is done, so
+ * every call throws rather than returning wrong data.
  */
 
 import { deserialize } from "borsh";
@@ -36,11 +38,12 @@ import {
 } from "./idl/schemas";
 
 /**
- * Strip Anchor's 8-byte account discriminator if present. Most Anchor
- * accounts ship with a leading 8-byte discriminator that is NOT part of
- * the borsh struct. We trim it before deserialization. If the canonical
- * IDL turns out to be raw borsh (no discriminator), set
- * `DZ_ACCOUNT_HAS_DISCRIMINATOR=0` in env.
+ * Strip Anchor's 8-byte account discriminator if present. Anchor
+ * accounts carry a leading 8-byte discriminator that is not part of the
+ * borsh struct, so trim it before deserialization. Set
+ * `DZ_ACCOUNT_HAS_DISCRIMINATOR=0` for raw borsh structs. The
+ * serviceability accounts verified so far use a single account-type
+ * byte instead, so check the real layout before trusting this default.
  */
 function payload(data: Buffer): Uint8Array {
   if (process.env.DZ_ACCOUNT_HAS_DISCRIMINATOR === "0") {

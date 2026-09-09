@@ -1,31 +1,42 @@
 /**
- * DoubleZero on-chain program IDs.
+ * DoubleZero on-chain program IDs for the unimplemented registry reader.
  *
- * These are placeholders pending DZ's response on Question #6
- * ("Which Solana program(s) and accounts should we read directly?").
+ * The ids and discriminators below are unverified. They are NOT the
+ * blocker for reading DoubleZero accounts, and nothing here waits on a
+ * program IDL. The serviceability program that owns Metro, Device, Link
+ * and Contributor accounts is known: see `DZ_SERVICEABILITY_PROGRAM_ID`
+ * in `contributor-directory.ts`, which decodes contributor accounts from
+ * it using byte offsets verified against every live account.
  *
- * Once DZ ships an IDL, we drop the program ID + account discriminator
- * here and `decoders.ts` can decode the raw account data.
- *
- * Source-of-truth target: a publicly-published `dz-programs.idl.json`
- * we can pin via git submodule or fetch at build time.
+ * To read the other account types, verify their layouts the same way.
+ * See `lib/onchain/README.md`.
  */
 
 /** Set by env so we can test alternate endpoints without code changes. */
 export const SOLANA_RPC_URL =
   process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
 
-/** Master program that owns Metro/Device/Link/Contributor accounts. TBD. */
+/**
+ * Program the unimplemented registry reader would query. Unset, which
+ * keeps `topology.ts` dark. The real program id is known: see
+ * `DZ_SERVICEABILITY_PROGRAM_ID` in `contributor-directory.ts`.
+ */
 export const DZ_REGISTRY_PROGRAM_ID = process.env.DZ_REGISTRY_PROGRAM_ID || "";
 
-/** Program that emits per-epoch reward distribution events. TBD. */
+/** Program that emits per-epoch reward distribution events. */
 export const DZ_REWARDS_PROGRAM_ID = process.env.DZ_REWARDS_PROGRAM_ID || "";
 
 /** Whether direct on-chain reads are wired. Toggles A/B routes in the app. */
 export const ONCHAIN_ENABLED =
   Boolean(DZ_REGISTRY_PROGRAM_ID) || process.env.ONCHAIN_ENABLED === "1";
 
-/** First-byte discriminators for account types — placeholders. */
+/**
+ * First-byte account-type discriminators. Every value here is an
+ * unverified guess made before any layout was checked on chain, and at
+ * least one is wrong: the verified Contributor discriminant is 10, not
+ * 0x04 (`contributor-directory.ts`). Verify against a live account
+ * before relying on any entry.
+ */
 export const ACCOUNT_DISCRIMINATORS = {
   metro: 0x01,
   device: 0x02,

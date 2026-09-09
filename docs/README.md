@@ -1,21 +1,26 @@
 # Documentation
 
-Architecture and operations documentation for DZ Contributor Rewards — a Next.js 16 frontend plus a Rust Shapley microservice presenting live DoubleZero network state, reward distribution, and what-if forecasting. For the project overview, route table, and quick start, see the [root README](../README.md).
+Architecture and operations documentation for DZ Contributor Rewards: a Next.js 16 frontend plus a Rust Shapley microservice presenting live DoubleZero network state, reward distribution, and what-if forecasting. For the project overview, route table, and quick start, see the [root README](../README.md).
 
 ## Reading order
 
 | Doc | Read it for |
 |---|---|
-| [architecture.md](./architecture.md) | **Start here.** System diagram, layer tour (pages → hooks → API routes → Rust service), the three main request flows, the caching matrix, data ownership, method labels, and the security posture summary. |
-| [data-sources.md](./data-sources.md) | Every upstream feed in detail — malbec, the economic hub, Foundation S3 snapshots and exports, the fees CSV, Jupiter prices, Solana/DZ-ledger RPC — with URLs, cadences, consuming routes, and failure semantics. |
-| [shapley-pipeline.md](./shapley-pipeline.md) | The computation core: the input-builder priority chain, solver dispatch and the no-silent-fallback policy, method labels, the dev-only TS solver, the per-city canonical engine, the per-link retag method, and correctness pinning. |
-| [shapley-service.md](./shapley-service.md) | Rust microservice internals: binary roles, fail-closed auth, endpoints and input limits, the async job lifecycle on Redis Streams, the keyspace contract, the S3 result cache, and the concurrency model. |
+| [../HANDOFF.md](../HANDOFF.md) | **Start here.** What's deployed, how the numbers are produced, what's tested, the limits and why, and what's intentionally left out. |
+| [architecture.md](./architecture.md) | System diagram, layer tour (pages → hooks → API routes → Rust service), the three main request flows, the caching matrix, data ownership, method labels, and the security posture summary. |
+| [data-sources.md](./data-sources.md) | Every upstream feed in detail: malbec, the economic hub, Foundation S3 snapshots and exports, the fees CSV, Jupiter prices, Solana/DZ-ledger RPC. Includes URLs, cadences, consuming routes, and failure semantics. |
+| [shapley-pipeline.md](./shapley-pipeline.md) | The computation core: input construction and the epoch tag, solver dispatch and the cache-only read contract, method labels, the per-city canonical engine, the per-link retag method, the caps and why each exists, and correctness pinning. |
+| [shapley-service.md](./shapley-service.md) | Rust microservice internals: binary roles, fail-closed auth and the ingest token, endpoints and input limits, the async job lifecycle on Redis Streams, the keyspace contract, the S3 result cache and alias publication, the snapshot diff index, and the concurrency model. |
 | [development.md](./development.md) | Local setup (frontend-only and full-stack), the scripts inventory, the test matrix, and repo conventions. |
 | [operations.md](./operations.md) | Deployment (Vercel + platform-generic container), the full environment-variable reference for both sides, CI workflows, rate limiting, security headers, and queue admin tooling. |
-| [adr/0001-async-compute-queue.md](./adr/0001-async-compute-queue.md) | Why long Shapley solves run as queued jobs on Redis Streams with an always-warm worker pool, and the delivery/cancel/idempotency contract that decision committed to. |
+| [adr/0001-async-compute-queue.md](./adr/0001-async-compute-queue.md) | Why long Shapley solves run as queued jobs on Redis Streams with an always-warm worker pool, and the delivery, cancel, and idempotency contract that decision committed to. |
+| [adr/0002-snapshot-diff-index.md](./adr/0002-snapshot-diff-index.md) | Why the epoch diff is served from immutable per-epoch records rather than snapshot downloads or a database. Its ingest half is superseded by ADR 0003. |
+| [adr/0003-cron-side-snapshot-extraction.md](./adr/0003-cron-side-snapshot-extraction.md) | Why the cron extracts each epoch's diff shape from the snapshot it already downloads, so the service needs no egress to the public bucket. |
+| [adr/0004-cache-only-baseline-reads.md](./adr/0004-cache-only-baseline-reads.md) | Why browser-driven Shapley reads never compute, and why baselines are addressed by an epoch tag. |
+| [../services/shapley-rs/README.md](../services/shapley-rs/README.md) | Service local dev and testing: endpoints, the epoch precompute sweep, running the async job API and the S3 cache locally, and deploying the container. |
 
 ## Conventions
 
-- Code is referenced by file path (e.g. `lib/utils/shapley-remote.ts`), never line numbers — paths stay greppable as the code moves.
+- Code is referenced by file path (e.g. `lib/utils/shapley-remote.ts`), never line numbers. Paths stay greppable as the code moves.
 - Diagrams are [Mermaid](https://mermaid.js.org/) and render natively on GitHub.
 - Where a source comment and the shipped code disagree, these docs document the **code** and call out the stale comment.

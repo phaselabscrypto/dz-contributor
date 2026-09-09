@@ -1,15 +1,17 @@
 /**
  * Borsh schemas for DoubleZero on-chain accounts.
  *
- * These are best-guess placeholders pending the canonical IDL from DZ
- * Foundation (Q6). The shapes follow standard registry-program patterns
- * — fixed-size enums encoded as u8, strings as length-prefixed UTF-8,
- * pubkeys as 32-byte arrays formatted to base58 strings during decode.
+ * These are unverified placeholders. The shapes assume standard
+ * registry-program patterns: fixed-size enums as u8, strings as
+ * length-prefixed UTF-8, pubkeys as 32-byte arrays formatted to base58
+ * during decode. No field has been checked against a live account.
  *
- * Activation: when DZ ships `dz-registry.idl.json`:
- *   1. Replace the schemas below with ones derived from the real IDL.
+ * No IDL is needed to finish them. Read a live account and confirm each
+ * offset, the way `contributor-directory.ts` did for the contributor
+ * layout. Then:
+ *   1. Replace the schemas below with the verified shapes.
  *   2. Set `haveSchemas = true`.
- *   3. Verify with the unit tests in `borsh-registry.test.ts`.
+ *   3. Check them with `pnpm test:borsh`.
  *   4. In `decoders.ts` swap `stubRegistry` for `borshRegistry`.
  *
  * Each `Raw*` type is what borsh emits — snake_case fields. The registry
@@ -19,7 +21,7 @@
 
 import type { Schema } from "borsh";
 
-/** Flip to true once schemas reflect the canonical IDL. */
+/** Flip to true once every schema is verified against a live account. */
 export const haveSchemas = false;
 
 // ---------------------------------------------------------------------------

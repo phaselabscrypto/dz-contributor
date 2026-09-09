@@ -1,27 +1,19 @@
 /**
- * ⚠️ SCAFFOLDING — NOT LIVE
+ * NOT IMPLEMENTED
  *
- * Decoder registry for the DZ registry program (Metro / Device / Link /
- * Contributor). Currently exports `stubRegistry`, which throws on every
- * call.
+ * Decoder registry for the Metro, Device and Link accounts. Exports
+ * `stubRegistry`, which throws on every call.
  *
- * Activation (single-line swap):
+ * `anchorRegistry` below was written on the assumption that an Anchor
+ * IDL was needed. It is not: those accounts sit on the serviceability
+ * program that `contributor-directory.ts` already reads by verified
+ * byte offsets. `borsh-registry.ts` is the closer starting point.
  *
- *   1. Drop `dz-registry.idl.json` into `./idl/`
- *   2. Build `anchorRegistry` here using the IDL + a borsh layout per
- *      account type
- *   3. In `decoders.ts`, change:
- *        import { stubRegistry as registry } from "./idl-registry";
- *      to:
- *        import { anchorRegistry as registry } from "./idl-registry";
+ * The `Registry` interface is the single point of coupling, so swapping
+ * an implementation in leaves every call site unchanged.
  *
- * The `Registry` interface is the single point of coupling — every
- * consumer call site stays unchanged.
- *
- * NOTE: this does NOT gate contributor-rewards or contributor-directory
- * reads. Those have their own bit-verified decoders in
- * `dz-rewards-record.ts` and `contributor-directory.ts`. See
- * `lib/onchain/README.md` for the live-vs-stub matrix.
+ * This does not gate contributor-rewards or contributor-directory
+ * reads, which have their own verified decoders.
  */
 
 import type {
@@ -39,7 +31,7 @@ export interface Registry {
   decodeContributor(pubkey: string, data: Buffer): OnchainContributor;
 }
 
-/** Throws on every call. Active until the IDL drops. */
+/** Throws on every call. Active until a real registry is implemented. */
 export const stubRegistry: Registry = {
   decodeMetro: () => {
     throw new OnchainNotConfigured("Metro");
@@ -56,17 +48,10 @@ export const stubRegistry: Registry = {
 };
 
 /**
- * Anchor-backed registry. Wired up but not exported as the active
- * registry until the IDL files exist in ./idl/.
- *
- * To activate after IDL drop:
- *   1. Drop ./idl/dz-registry.idl.json
- *   2. `npm install @coral-xyz/anchor` (or `borsh` for raw decoding)
- *   3. Uncomment the implementation below
- *   4. In decoders.ts, swap `stubRegistry` for `anchorRegistry`
- *
- * The shape below is best-guess based on standard Anchor account layouts;
- * adjust field names once the canonical IDL is in hand.
+ * Anchor-backed registry, never wired. Kept only as a record of the
+ * earlier approach. Reading these accounts needs no IDL and no Anchor
+ * dependency, so prefer `borsh-registry.ts` or a direct byte-offset
+ * decoder modelled on `contributor-directory.ts`.
  */
 export const anchorRegistry: Registry = {
   decodeMetro: (pubkey, _data) => {

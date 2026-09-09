@@ -17,7 +17,7 @@ per-process `HashMap`. Two problems drove this decision:
 
 1. **A semaphore is a concurrency *limiter*, not a scaling primitive.** It is
    bounded to one process's cores. It can shed or queue work *within* a single
-   process, but it cannot absorb demand by adding capacity — there is no knob
+   process, but it cannot absorb demand by adding capacity: there is no knob
    that turns "more load" into "more compute."
 2. **Per-process job state breaks under ≥ 2 replicas.** A job created on replica
    A is invisible to replica B, so a poll or cancel routed to the wrong replica
@@ -30,7 +30,7 @@ poll/cancel. Two workloads pull in opposite directions:
 | | Cold per-epoch batch precompute | Interactive what-if |
 |---|---|---|
 | Cadence | once per ~2–3 days (per epoch) | frequent, bursty |
-| Duration | minutes (~2,500 LPs) | seconds to a minute |
+| Duration | minutes (`cities × 2^operators` coalition LPs) | seconds to a minute |
 | Latency need | none (background) | snappy |
 | Best fit | **a scheduled job** | **always-warm worker pool + queue** |
 
@@ -47,25 +47,24 @@ separate batch path:
   input, persists the request payload, `XADD`s a tiny reference entry, and
   returns `202 { job_id }`. `GET /jobs/{id}` and `DELETE /jobs/{id}` read/write
   Redis state, so **any replica serves any job**. The tokio `Semaphore` and the
-  in-process `JobRegistry` are removed — concurrency is now the worker count.
+  in-process `JobRegistry` are removed. Concurrency is now the worker count.
 - **Redis as both the queue *and* the live state store.** One Stream + consumer
   group is the durable queue; the same Redis instance holds per-job
   state/progress and the cancel flag. Using one dependency for both is the
-  low-lift choice — no second system to run, secure, and monitor.
+  low-lift choice: no second system to run, secure, and monitor.
 - **Always-warm worker pool.** A separate process (same binary, `--role=worker`)
   consumes the Stream via `XREADGROUP`, runs the existing cancellable solver,
   bridges progress + cancellation through Redis, persists the result, and
   `XACK`s. The pool is kept warm (a minimum of one worker) so there is no
   cold-start penalty on the interactive path.
-- **Scale the worker pool on stream backlog.** Use a queue-depth autoscaler
-  (e.g. KEDA's `redis-streams` trigger) so the worker count tracks the
-  never-delivered backlog. Always-warm is the floor; the deploy-time maximum is
-  the budget ceiling.
+- **Scale the worker pool on stream backlog.** Use an autoscaler driven by
+  stream lag so the worker count tracks the never-delivered backlog.
+  Always-warm is the floor; the deploy-time maximum is the budget ceiling.
 - **Batch precompute is a scheduled job.** Baseline precompute runs on a
   schedule against `POST /precompute`, off the interactive queue entirely.
 
 What we **reuse unchanged**: the solver crate's `ComputeControl` (cancel +
-progress) — only its *transport* changes from in-process atomics to Redis; the
+progress; only its *transport* changes from in-process atomics to Redis); the
 warm-start solver; and the S3 result cache keyed by the topology `input_hash`,
 which gives idempotency for free under at-least-once delivery.
 
@@ -131,7 +130,7 @@ shapley:linkest:inflight:{hash}  STRING  job_id; SET NX EX 86400s (in-flight ded
 - **State hash, heartbeat-refreshed.** `state:{id}` carries the whole job
   snapshot with a **1800s** whole-key TTL, re-set on every progress/phase
   heartbeat and on each terminal write. *(Amended in implementation: the
-  original ADR specified 600s; that was too low — a job queued behind a couple
+  original ADR specified 600s; that was too low: a job queued behind a couple
   of ~15-minute solves expired before a worker first heartbeated. The code
   ships 1800s and the code wins.)*
 - **Separate cancel key.** `DELETE /jobs/{id}` does `SET cancel:{id} 1 EX …`.
@@ -140,17 +139,17 @@ shapley:linkest:inflight:{hash}  STRING  job_id; SET NX EX 86400s (in-flight ded
   concurrent cancel via last-writer-wins. State transitions are written only by
   the worker at claim and at terminal; progress writes touch counters only.
   *(The original ADR set the cancel-key TTL to 600s; the shipped code re-uses
-  the job TTL, 1800s — code wins.)*
+  the job TTL, 1800s; code wins.)*
 - **Idempotency cache.** Before computing, the worker checks `result:{hash}`
   (~3600s TTL) and the S3 result cache; on a hit it republishes the cached
   result verbatim and `XACK`s without recomputing. This is what makes
-  at-least-once delivery safe — no separate dedup table, just the input hash.
+  at-least-once delivery safe: no separate dedup table, only the input hash.
 - **Consumer group + long-poll.** Group `whatif-workers`, created idempotently
   via `XGROUP CREATE … $ MKSTREAM` (a `BUSYGROUP` on re-create is expected and
   ignored). Each worker reads one job at a time (`COUNT 1`) with `BLOCK 5000ms`,
   so an idle worker parks cheaply.
 - **Dead-worker recovery (at-least-once).** A periodic `XAUTOCLAIM` sweep
-  reclaims entries idle longer than **30s** — only entries left pending by a
+  reclaims entries idle longer than **30s**: only entries left pending by a
   *dead* worker cross that threshold, because a live worker heartbeats its claim
   (an `XCLAIM … JUSTID`, which does not advance the delivery counter) well under
   the 30s window. The reclaim path does not use `JUSTID`, so the delivery
@@ -159,7 +158,7 @@ shapley:linkest:inflight:{hash}  STRING  job_id; SET NX EX 86400s (in-flight ded
   `XPENDING`), or one whose schema the running binary does not recognize, is
   moved to `shapley:whatif:dead` and `XACK`'d off the work stream
   (alert-and-drop; retained for inspection).
-- **Schema version tags.** Each entry is stamped with a per-kind schema tag —
+- **Schema version tags.** Each entry is stamped with a per-kind schema tag:
   `whatif/v1`, `linkest/v1`, `sweep/v1`, `baseline/v1`. A worker that reads a tag
   it does not understand dead-letters the entry immediately rather than
   mis-deserializing a payload from a newer or older producer. So a mixed-version
@@ -193,10 +192,10 @@ interrupted is recovered by the reclaim sweep.
   store. Redis Streams + a consumer group cover the queue needs (capped backlog,
   consumer groups, pending-list reclaim, dead-lettering) at no extra operational
   surface.
-- **One pod per job.** Rejected: per-job pods pay a cold-start cost on every
-  request, which loses against an always-warm pool for an interactive,
-  latency-sensitive workload. A long-lived pool also keeps process state and
-  caches hot.
+- **One process per job.** Rejected: a per-job process pays a cold-start cost
+  on every request, which loses against an always-warm pool for an
+  interactive, latency-sensitive workload. A long-lived pool also keeps
+  process state and caches hot.
 
 ## 5. Consequences
 
@@ -222,8 +221,8 @@ interrupted is recovered by the reclaim sweep.
 ## 6. Amendments (2026-06-12)
 
 The precompute path (the last heavy-compute surface still running API-side) was
-moved onto this queue, with the following changes — each grounded in the current
-code:
+moved onto this queue, with the following changes (each grounded in the current
+code):
 
 - **Payload store-and-reference.** Stream entries carry references, not bodies;
   the heavy request lives in a TTL'd `payload:{id}` String. A sweep stores the
@@ -235,11 +234,37 @@ code:
   `sweep/v1`, `baseline/v1`) make mixed-version rollouts fail accurately instead
   of mis-deserializing.
 - **Reclaim tuning matched to termination grace.** The `XAUTOCLAIM` min-idle
-  window (30s) is aligned to the worker's termination grace period and sits
-  comfortably above a normal solve, so only genuinely abandoned entries are
+  window (30s) agrees with the worker's termination grace period and sits
+  comfortably above a normal solve, so only abandoned entries are
   reclaimed; live workers heartbeat their claim to stay under it.
 - **Result-cache republication for duplicate submissions.** A redelivery (or a
   duplicate submit) that finds a cached result republishes it verbatim and
   `XACK`s, and link-estimate solves additionally take an in-flight dedup claim
   (`shapley:linkest:inflight:{hash}`) so the same multi-minute solve never runs
   twice.
+
+## 7. Amendments (2026-09)
+
+Further corrections, each grounded in the current code. Sections 1-6 stand as
+originally written except where noted below.
+
+- **Batch precompute shares the interactive queue.** Section 2 and the
+  architecture sketch describe batch precompute as a path separate from the
+  interactive queue. The code enqueues it as `JobKind::Baseline` on the same
+  stream and the same consumer group as every other job kind (the
+  `/precompute` handler in `src/routes.rs`, `src/queue.rs`). Section 6 already
+  moved precompute onto this queue; this note makes section 2 agree with that
+  change.
+- **Cold per-epoch cost corrected.** Section 1's duration estimate for batch
+  precompute is corrected in the table above. The actual cost is
+  `cities × 2^operators` coalition LPs. Epoch 149 (28 cities, 14 operators)
+  costs 28 × 2^14, about 459,000 LPs.
+- **The state hash does not store `percent`.** The Redis keyspace sketch in
+  section 3 lists `percent` as a field on `state:{id}`. The worker never
+  writes it. `jobs.rs::snapshot` derives it at read time from `samples_done`,
+  `max_samples`, and the in-flight batch counters (`running_percent`).
+- **Redelivery caps are per job kind.** Section 3 states that an entry
+  dead-letters after more than 3 deliveries. That cap (`MAX_DELIVERIES`) is 3
+  for every job kind except link-estimate, which dead-letters after more than
+  1 delivery (`MAX_DELIVERIES_LINK_ESTIMATE`, `src/queue.rs`, applied in
+  `src/worker.rs::reclaim`).

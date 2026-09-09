@@ -1,28 +1,24 @@
-# DZ on-chain IDL drop point
+# Registry account schemas
 
-When DZ Foundation publishes the program IDL (Q6), drop the file here as
-`dz-registry.idl.json` and `dz-rewards.idl.json`. Then in
-`lib/onchain/decoders.ts`:
+This directory holds `schemas.ts`, the borsh schemas that
+`../borsh-registry.ts` uses to decode Metro, Device, and Link accounts.
+The schemas are placeholders and `haveSchemas` is `false`, so the
+registry throws instead of returning wrong data.
 
-```ts
-// Replace the stub registry import:
-//   import { stubRegistry as registry } from "./idl-registry";
-// with the anchor-backed one:
-import { anchorRegistry as registry } from "./idl-registry";
-```
+The directory name is historical. Reading these accounts does not need
+a program IDL. The live readers in `../contributor-directory.ts` and
+`../dz-rewards-record.ts` decode verified byte offsets from known
+programs, and that is the approach to follow here. `../README.md` lists
+what each stub still needs.
 
-That's the entire swap. Every consumer of `decodeMetro`, `decodeDevice`,
-etc. lights up automatically.
+## Placeholder shapes
 
-Until then this directory stays empty (except this README) and the
-decoders throw `OnchainNotConfigured`, which the routes turn into 503s
-with stable shapes the frontend already handles.
-
-## Expected schema (best guess)
+The schemas in `schemas.ts` assume length-prefixed strings and standard
+borsh scalars. No field below has been checked against a live account:
 
 ```idl
 account Metro {
-  code: string,           // "FRA", "SIN", etc. — 3-letter
+  code: string,           // "FRA", "SIN", etc. 3-letter
   name: string,
   latitude: f64,
   longitude: f64,
@@ -32,8 +28,8 @@ account Device {
   code: string,           // "FRA1", "SIN2", etc.
   status: string,
   device_type: string,
-  metro: Pubkey,          // → Metro account
-  contributor: Pubkey,    // → Contributor account
+  metro: Pubkey,          // Metro account
+  contributor: Pubkey,    // Contributor account
 }
 
 account Link {
@@ -41,10 +37,10 @@ account Link {
   status: string,
   link_type: string,      // "WAN" | "DZX" | ...
   bandwidth: u64,         // bps
-  side_a: Pubkey,         // → Device
-  side_z: Pubkey,         // → Device
+  side_a: Pubkey,         // Device
+  side_z: Pubkey,         // Device
   latency_us: u64,
-  contributor: Pubkey,    // → Contributor
+  contributor: Pubkey,    // Contributor
 }
 
 account Contributor {
@@ -54,4 +50,10 @@ account Contributor {
 }
 ```
 
-Update `lib/onchain/decoders.ts` types if the actual IDL diverges.
+The Contributor shape above is superseded. `../contributor-directory.ts`
+carries the verified layout for that account type. Use it as the model:
+read a live account, confirm each offset, then write the schema.
+
+Verify every field against a live account before setting `haveSchemas`
+to `true`, and update the `Onchain*` types in `../decoders.ts` if the
+real layout differs.
