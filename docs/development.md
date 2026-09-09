@@ -1,6 +1,6 @@
 # Development
 
-Local setup guide for the DZ Contributor Rewards tool — a Next.js 16 frontend and a Rust axum microservice (`services/shapley-rs/`).
+Local setup for DZ Contributor Rewards: a Next.js 16 frontend and a Rust axum microservice (`services/shapley-rs/`).
 
 ## Prerequisites
 
@@ -9,7 +9,7 @@ Local setup guide for the DZ Contributor Rewards tool — a Next.js 16 frontend 
 | Node.js | 20 | `.github/workflows/web.yml` `setup-node` step |
 | pnpm | 9.13.0 | `package.json` `packageManager` field |
 | Rust nightly | `nightly-2026-05-26` | `services/shapley-rs/rust-toolchain.toml` and `.github/workflows/shapley-rs.yml` |
-| Docker | any recent | optional — runs the local Redis (async `/jobs/*`) and MinIO (S3 result cache, aliases, diff shapes) from `services/shapley-rs/docker-compose.yml`; a native `minio` binary works too |
+| Docker | any recent | Optional. Runs the local Redis (async `/jobs/*`) and MinIO (S3 result cache, aliases, diff shapes) from `services/shapley-rs/docker-compose.yml`; a native `minio` binary works too |
 
 Install the Rust toolchain with:
 
@@ -35,16 +35,16 @@ The app opens at `http://localhost:3000`. Without the Shapley microservice the S
 
 Running both the frontend and the Rust microservice together gives production-equivalent Shapley results.
 
-**Terminal 1 — start the service:**
+**Terminal 1, start the service:**
 
 ```sh
 cd services/shapley-rs
 SHAPLEY_ALLOW_UNAUTHENTICATED=1 cargo run
 ```
 
-Without either `SHAPLEY_API_TOKEN` or `SHAPLEY_ALLOW_UNAUTHENTICATED=1`, the service starts but compute endpoints (`/shapley`, `/simulate`, `/link-estimate`, etc.) are **not served** — only `/health` is available. This is intentional fail-closed behaviour documented in `src/main.rs`. `SHAPLEY_ALLOW_UNAUTHENTICATED=1` is the local-dev opt-in; production sets `SHAPLEY_API_TOKEN` via a secret.
+Without either `SHAPLEY_API_TOKEN` or `SHAPLEY_ALLOW_UNAUTHENTICATED=1`, the service starts but compute endpoints (`/shapley`, `/simulate`, `/link-estimate`, etc.) are **not served**, so only `/health` is available. This is intentional fail-closed behaviour documented in `src/main.rs`. `SHAPLEY_ALLOW_UNAUTHENTICATED=1` is the local-dev opt-in; production sets `SHAPLEY_API_TOKEN` via a secret.
 
-**Terminal 2 — start the frontend pointed at the service:**
+**Terminal 2, start the frontend pointed at the service:**
 
 ```sh
 SHAPLEY_SERVICE_URL=http://localhost:8080 pnpm dev
@@ -62,7 +62,7 @@ Returns `{"status":"ok","service":"dz-shapley-service","version":"<semver>"}` (f
 
 The `/jobs/*` and `/precompute*` endpoints require Redis. Without `REDIS_URL`, the submit endpoints return `503 {"error":"async jobs disabled (REDIS_URL not configured)"}` and the poll/cancel endpoints return `503 {"error":"async jobs disabled"}`. Synchronous compute endpoints are unaffected.
 
-`services/shapley-rs/docker-compose.yml` provides a Redis 7.4.1 instance and a MinIO instance for local testing. It does not build the service itself (the Cargo workspace uses a path dependency on a sibling repo that is outside the Docker build context — see the compose file header comment).
+`services/shapley-rs/docker-compose.yml` provides a Redis 7.4.1 instance and a MinIO instance for local testing. It does not build the service itself, because the Cargo workspace uses a path dependency on a sibling repo outside the Docker build context. The compose file header explains this.
 
 ```sh
 cd services/shapley-rs
@@ -72,11 +72,11 @@ docker compose up -d          # Redis on host port 6390 (password "devpass") + M
 Then run the API and worker roles on the host, each in its own terminal:
 
 ```sh
-# Terminal 1 — API role (port 8099 avoids a conflict with a plain `cargo run`)
+# Terminal 1: API role (port 8099 avoids a conflict with a plain `cargo run`)
 PORT=8099 REDIS_URL=redis://:devpass@127.0.0.1:6390 \
   SHAPLEY_ALLOW_UNAUTHENTICATED=1 cargo run -- api
 
-# Terminal 2 — worker role (required; without it jobs stay in state=running)
+# Terminal 2: worker role (required; without it jobs stay in state=running)
 PORT=8098 REDIS_URL=redis://:devpass@127.0.0.1:6390 cargo run -- worker
 ```
 
@@ -94,7 +94,7 @@ docker compose down
 
 ### S3 cache, baselines, and diff shapes (MinIO)
 
-Everything the site reads from the service on a page load lives in the S3-compatible bucket: published epoch baselines (`GET /shapley/baseline?tag=`), precomputed link estimates, simulate results, and the diff shapes behind `/changelog`. Without `S3_CACHE_BUCKET` the service still solves, but every baseline read is `404 not-cached`, `PUT /diff/shape` answers 503, and nothing survives a restart. To exercise those paths locally, create a bucket in MinIO once and start both roles with the S3 env; the exact commands are in `services/shapley-rs/README.md` under "Local S3 testing".
+Everything the site reads from the service on a page load lives in the S3-compatible bucket: published epoch baselines (`GET /shapley/baseline?tag=`), precomputed link estimates, simulate results, and the diff shapes behind `/changelog`. Without `S3_CACHE_BUCKET` the service solves, but every baseline read is `404 not-cached`, sweep status is always incomplete, `PUT /diff/shape` answers 503, and nothing survives a restart. To exercise those paths locally, create a bucket in MinIO once and start both roles with the S3 env; the exact commands are in `services/shapley-rs/README.md` under "Local S3 testing".
 
 To populate it the way production does, run the cron route against your local stack with a manual epoch:
 
@@ -177,7 +177,7 @@ Scripts live in `scripts/`. Run those with `.ts` extensions through their `packa
 | `scripts/test-diff-shape.ts` | `pnpm test:diff-shape` | Regenerates or checks the epoch 204–211 shapes under `services/shapley-rs/tests/fixtures/diff/shapes/` that `diff_parity.rs` pins; `-- --write` rewrites them; needs the snapshots |
 | `scripts/backfill-diff-shapes.ts` | `pnpm backfill:diff` | One-off deep-history fill of the diff index, newest first, one epoch at a time; `--dry-run` reports gaps; needs `SHAPLEY_SERVICE_URL`, `SHAPLEY_API_TOKEN`, `SHAPLEY_INGEST_TOKEN` |
 | `scripts/test-baseline-tag.ts` | `pnpm test:baseline-tag` | Pure check of `baselineTag(epoch)`: shape, determinism, epoch-distinctness, query-string round trip |
-| `scripts/test-baseline-probe.ts` | `pnpm test:baseline-probe` | Drives `/api/shapley/baseline` and `/api/shapley?epoch=N` against a stubbed service: hit, miss, upstream failure, legacy 404, probe timeout |
+| `scripts/test-baseline-probe.ts` | `pnpm test:baseline-probe` | Drives `/api/shapley/baseline` and `/api/shapley?epoch=N` against a stubbed service: hit, miss, upstream failure, a 404 without a `not-cached` body, probe timeout |
 | `scripts/test-baseline-route.ts` | `pnpm test:baseline` | HTTP contract of a running `/api/shapley/baseline`: 200 published shape or 404 `not-cached`, never a compute |
 | `scripts/test-tracking-route.ts` | `pnpm test:tracking-route` | Drives `/api/shapley/tracking` and the pure `pivotTracking` against a stubbed service: partial cache, too few hits, probe failure, count clamping |
 | `scripts/test-validator-stake.ts` | `pnpm test:stake` | Pubkey validation, vote-account stake resolution (filtered lookup, identity index), and the `/api/validators/stake` route contract |
@@ -207,10 +207,10 @@ The pure scripts (`precompute-ingest`, `diff-repair-schedule`, `diff-window`, `d
 | What | Command | Notes |
 |------|---------|-------|
 | Unit + integration tests | `TEST_REDIS_URL=redis://127.0.0.1:6390/13 cargo test --locked` | Covers `upstream_simple`, `dedup_devices`, `link_estimate_http`, `link_estimate_alias`, `baseline_alias_http`, `shapley_single_flight`, `diff_parity`, `diff_persistence`, the in-crate unit tests, and `alias_publication`, which needs an **empty** Redis database at `TEST_REDIS_URL` on `127.0.0.1`/`localhost` (the test panics when the variable is unset, refuses an occupied database, and cleans up after itself). The S3 tests run against the in-process `MockS3` in `tests/support/mod.rs`; no bucket needed. CI runs with `--release` against a Redis service container |
-| Three-operator structural test | `cargo test --test three_operator` | Currently `#[ignore]` pending fixture reshape; see `tests/three_operator.rs` |
+| Three-operator structural test | `cargo test --test three_operator` | `#[ignore]`; see `tests/three_operator.rs` |
 | Gateway conditional-write acceptance | `cargo test --locked --test diff_persistence gateway_conditional_contract -- --ignored --nocapture` | Needs `TEST_S3_ENDPOINT` + a disposable `TEST_S3_BUCKET`; run before deploying against a new object gateway (see [operations.md](./operations.md#alias-publication-rollout)) |
 | Timing probe (link-estimate at production scale) | `cargo test --release --test linkest_timing -- --ignored --nocapture` | Requires `tests/fixtures/epoch149/input.json`; prints timing per operator |
-| Full epoch-149 reward-leaf parity | `cargo test --test parity_epoch149 -- --ignored --nocapture` | `#[ignore]` — heavy per-city LP solve; skips gracefully when fixture is absent. Generate the fixture first with `DZ_LEDGER_RPC_URL=... npx tsx scripts/gen-epoch149-parity-fixture.ts` |
+| Full epoch-149 reward-leaf parity | `cargo test --test parity_epoch149 -- --ignored --nocapture` | `#[ignore]`, a heavy per-city LP solve. Skips when the fixture is absent. Generate the fixture first with `DZ_LEDGER_RPC_URL=... npx tsx scripts/gen-epoch149-parity-fixture.ts` |
 | E2E smoke against a running service | `cd services/shapley-rs && SHAPLEY_API_TOKEN=… ./tests/smoke.sh [url]` | Defaults to `http://localhost:8080`; checks `/health`, `/shapley` (simple + three-operator fixtures), `/link-estimate`, `/diff` and `/diff/contributor/tsw` over epochs 204–211 (needs those shapes in the bucket), the `/shapley/baseline` miss contract, and a latency budget; requires `curl`, `jq`, `python3` |
 
 ### Frontend

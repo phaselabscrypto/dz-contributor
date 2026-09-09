@@ -77,10 +77,10 @@ when the result lands, the worker writes
 full `ShapleyResponse` plus `tag` and `input_hash`. The alias is
 written after the result object, so it never points at nothing. The route
 answers `200 already-cached` only when an alias for the tag names this input's
-hash; a cached result with no alias still enqueues, and the worker aliases it
+hash; a cached result with no alias enqueues, and the worker aliases it
 without solving. `GET /shapley/baseline?tag=` reads that one object and answers
-`404 {status:"not-cached"}` on a miss. It is the only surface user-facing
-requests hit, so a browser can never start a solve.
+`404 {status:"not-cached"}` on a miss. It is the only route user-facing
+requests reach, so a browser can never start a solve.
 
 The same alias pattern serves link values: the sweep writes
 `shapley/v3/publication/v1/link-estimate-alias-{hash(tag + "\0" + focus)}.json`
@@ -134,12 +134,12 @@ before running `smoke.sh`.
 check; a `/health` latency budget; `/diff?from=204&to=211` and
 `/diff/contributor/tsw` (these need the epoch 204–211 shapes in the bucket, see
 `tests/fixtures/diff/shapes/`); and the `/shapley/baseline` miss contract. Step
-8 still calls `POST /diff/precompute`, a route that was removed with ADR 0003,
-so expect that step to fail until the script is updated.
+8 calls `POST /diff/precompute`, which the service does not serve, so that step
+fails.
 
 ### Local async testing (`/jobs/*`)
 
-The async path needs Redis plus **both** roles — the `api` role enqueues onto a
+The async path needs Redis plus **both** roles. The `api` role enqueues onto a
 Redis Stream and a `worker` role drains it. Run only `api` and jobs sit at
 `running` forever (nothing consumes the stream).
 
@@ -160,15 +160,15 @@ JOB=$(curl -fsS -X POST localhost:8099/jobs/simulate \
   -H 'content-type: application/json' --data @sim.json \
   | sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p')
 curl -fsS localhost:8099/jobs/$JOB            # poll: running (progress %) → done (result)
-curl -fsS -X DELETE localhost:8099/jobs/$JOB  # cancel — cooperative, takes effect at the next city / coalition boundary
+curl -fsS -X DELETE localhost:8099/jobs/$JOB  # cancel: cooperative, takes effect at the next city / coalition boundary
 ```
 
 Inspect the queue with `redis-cli -p 6390 -a devpass keys 'shapley:whatif:*'`;
-tear down with `docker compose down`. To test just the compute (no Redis/queue),
+tear down with `docker compose down`. To test the compute alone (no Redis or queue),
 hit the synchronous `POST /simulate` on the `api` process instead.
 
 > **Pitfall:** `redis-cli flushall` deletes the Stream **consumer group**, and
-> the worker only creates it at startup — after a flush it spins on
+> the worker only creates it at startup. After a flush it spins on
 > `xreadgroup failed; backing off` until restarted. Prefer
 > `scripts/queue-clear.sh --surgical` (recreates the group in place), or
 > restart the worker after a flush.
@@ -176,8 +176,8 @@ hit the synchronous `POST /simulate` on the `api` process instead.
 ### Local S3 testing (durable result cache)
 
 The S3 layer (baseline cache and epoch aliases, link-estimate results and
-aliases, sweep markers, simulate results — the persistence behind shareable
-forecast URLs — and the `diff/v1/` shape index) targets any S3-compatible
+aliases, sweep markers, simulate results (the persistence behind shareable
+forecast URLs), and the `diff/v1/` shape index) targets any S3-compatible
 endpoint via `S3_CACHE_ENDPOINT` (path-style), so MinIO models production
 faithfully. Without it every `GET /shapley/baseline` is `404 not-cached` and
 `PUT /diff/shape` is 503, so the site's baseline, link-value, and changelog
@@ -202,15 +202,15 @@ exported before `minio server`.)
 
 Durable-result loop to verify end-to-end persistence:
 
-1. Submit a `/jobs/simulate` job and poll to `done` — the worker logs
+1. Submit a `/jobs/simulate` job and poll to `done`. The worker logs
    `stored simulate to S3` and `shapley/v3/simulate-{hash}.json` appears in the
    bucket (`aws --endpoint-url http://127.0.0.1:9000 s3 ls s3://shapley-cache/shapley/v3/`).
 2. Delete every `shapley:whatif:state/result/payload` key in Redis (simulates
-   the 24 h terminal TTL + 1 h result-cache expiry — keep the stream/group,
+   the 24 h terminal TTL + 1 h result-cache expiry; keep the stream/group,
    see the flushall pitfall above).
 3. Resubmit the identical payload: the API logs
-   `what-if job completed from S3` and the **first** poll returns `done` —
-   the submit-time short-circuit, no worker involvement.
+   `what-if job completed from S3` and the **first** poll returns `done`
+   through the submit-time short-circuit, with no worker involvement.
 
 A corrupt object is treated as a miss (`failed to deserialize S3 simulate`),
 recomputed fresh, and re-stored.
@@ -256,7 +256,7 @@ docker push ghcr.io/<owner>/dz-shapley-service:<tag>
 ### Secrets (out-of-band, kept out of git)
 
 The service reads these from its environment (full table in
-[`docs/operations.md`](../../docs/operations.md#4-environment-variables--shapley-service)):
+[`docs/operations.md`](../../docs/operations.md#4-environment-variables-shapley-service)):
 
 | Variable | Purpose |
 |---|---|
@@ -277,7 +277,7 @@ REDIS_URL="redis://:${REDIS_PW}@<your-redis-host>:6379"
 ```
 
 The frontend needs the same `SHAPLEY_API_TOKEN` and `SHAPLEY_INGEST_TOKEN`.
-Omit `REDIS_URL` to run without the async job API — the synchronous compute
+Omit `REDIS_URL` to run without the async job API. The synchronous compute
 endpoints still work and `/jobs/*` and `/precompute*` return 503, which also
 means no baseline can be published.
 
@@ -287,7 +287,7 @@ the service can be reached safely:
 | `SHAPLEY_API_TOKEN` | `SHAPLEY_ALLOW_UNAUTHENTICATED` | Result |
 |---|---|---|
 | set | (ignored) | Bearer auth enforced on all compute routes |
-| unset | `1` | compute routes open — **local dev only**, logs a warning |
+| unset | `1` | compute routes open, **local dev only**; logs a warning |
 | unset | unset | compute routes **not served** (only `/health`); logs an error |
 
 This means forgetting to set a token on an internet-reachable deploy fails
@@ -311,11 +311,11 @@ reachable by both, and an S3-compatible bucket reachable by both.
 
 The same image runs in two roles, selected by the first arg (or `--role=`):
 
-- **`api`** (default) — the HTTP server. `POST /jobs/simulate` validates,
+- **`api`** (default): the HTTP server. `POST /jobs/simulate` validates,
   persists the request payload to Redis, and `XADD`s a tiny entry onto the work
   Stream (`shapley:whatif:stream`), returning `202 {job_id}`. `GET/DELETE
   /jobs/{id}` read/write Redis state, so any replica serves any job.
-- **`worker`** — `args: ["worker"]`. No compute HTTP routes (just `/health`).
+- **`worker`**: `args: ["worker"]`. No compute HTTP routes, only `/health`.
   `XREADGROUP`s jobs, runs the cancellable solver (bridging progress/cancel
   through Redis), writes the result + state, and `XACK`s. Crash recovery is an
   `XAUTOCLAIM` reclaim sweep; poison entries (or > 3 deliveries; > 1 for
@@ -332,7 +332,7 @@ The same image runs in two roles, selected by the first arg (or `--role=`):
 `/diff*` is served from per-epoch records under `diff/v1/` in the result-cache
 bucket. Records arrive over `PUT /diff/shape/:epoch` from the Vercel cron, gated
 by `SHAPLEY_INGEST_TOKEN` on top of the compute token, and
-`GET /diff/missing?latest=N&depth=D` tells the cron which epochs it still owes.
+`GET /diff/missing?latest=N&depth=D` tells the cron which epochs it lacks.
 
 The service reads no public bucket, so the pods reach only Redis and the object
 gateway. That is deliberate: the cron already downloads each snapshot for the
@@ -363,7 +363,7 @@ focus-owned link as its own pseudo-operator (collapsing every other operator to
 `"Others"` and on/off-ramp helper edges to `"Private"`) and runs ONE exact 2^n
 coalition Shapley over those link-players, reusing the warm-start solver. Each
 link's `value` is its Shapley value; `percent` is its share of the positive total
-(a 0–1 fraction). Single-shot over the whole demand set — NOT the per-city reward
+(a 0–1 fraction). Single-shot over the whole demand set, not the per-city reward
 methodology. Capped at 20 link-players (mirrors Python's `n_ops < 21`); above that
 the endpoint returns 422.
 

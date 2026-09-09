@@ -58,7 +58,7 @@ The DoubleZero Foundation publishes immutable per-epoch JSON snapshots to a publ
 | CDN headers | `public, max-age=3600, s-maxage=3600, stale-while-revalidate=86400` |
 | Fetch timeout | 30 s on `/api/snapshot`; 120 s in the cron and the job routes |
 | Consumers | `app/api/link-value/precompute/route.ts` via `lib/utils/precompute-ingest.ts` (one download per epoch → sweep input, baseline alias, diff shape); `app/api/snapshot/route.ts` (raw proxy for the simulate page); `app/api/epochs/route.ts` (HEAD discovery only); `app/api/shapley/simulate/route.ts`, `app/api/shapley/jobs/route.ts`, and `app/api/link-value/jobs/route.ts` on an alias miss (solver input) |
-| Not a consumer | The Rust service. It never reads this bucket; the cron pushes diff shapes to it over `PUT /diff/shape/:epoch` ([ADR 0003](adr/0003-cron-side-snapshot-extraction.md)). `app/api/diff*` and the three cache-only Shapley read routes never download a snapshot |
+| Not consumers | The Rust service, `app/api/diff*`, and the three cache-only Shapley read routes. The cron pushes diff shapes to the service over `PUT /diff/shape/:epoch` ([ADR 0003](adr/0003-cron-side-snapshot-extraction.md)) |
 | Failure | 404 propagated when epoch not found; other S3 errors forwarded as 502 (or the upstream status on `/api/snapshot`) |
 
 Snapshots for completed epochs are immutable; the aggressive CDN TTL (1 h fresh, 24 h stale-while-revalidate) reflects this. Epoch discovery avoids a hard-coded ceiling by probing S3 directly; see `lib/utils/epoch-discovery.ts` for the algorithm.
@@ -132,16 +132,16 @@ Direct on-chain reads use two RPC endpoints: a standard Solana RPC for mainnet q
 | Solana RPC env var | `SOLANA_RPC_URL` |
 | Solana RPC default | `https://api.mainnet-beta.solana.com` (public, rate-limited) |
 | Solana RPC consumers (live) | `app/api/validators/stake/route.ts` (`getVoteAccounts` via `lib/onchain/vote-stake.ts`: filtered lookup by vote pubkey first, a 5-min identity index on a miss; hits cached 60 s, misses 5 min); `app/api/epoch-rate/route.ts` and `app/api/methodology/route.ts` (measured epoch cadence via `lib/utils/epoch-rate.ts`, 1 h); `app/api/health/route.ts` (`getHealth` probe) |
-| DZ ledger RPC env var | `DZ_LEDGER_RPC_URL` (required for the ledger reads; no default — see note) |
+| DZ ledger RPC env var | `DZ_LEDGER_RPC_URL` (required for the ledger reads; no default, see the note below) |
 | DZ ledger consumers (live) | `app/api/onchain/contributors/route.ts` (contributor directory), `app/api/onchain/rewards/route.ts` and `app/api/onchain/contributor-rewards/route.ts` (decoded contributor-rewards records, 5-min cache) |
 | Feature gate (stubs only) | `ONCHAIN_ENABLED` (true when `DZ_REGISTRY_PROGRAM_ID` is set, or `ONCHAIN_ENABLED=1`) gates `app/api/onchain/topology/route.ts` and `app/api/onchain/validators/route.ts` |
-| Program ID env vars | `DZ_REGISTRY_PROGRAM_ID`, `DZ_REWARDS_PROGRAM_ID` (pending the Foundation IDL) |
+| Program ID env vars | `DZ_REGISTRY_PROGRAM_ID`, `DZ_REWARDS_PROGRAM_ID` (unset until the Foundation publishes the IDL) |
 | Record program ID | `dzrecxigtaZQ3gPmt2X5mDkYigaruFR1rHCqztFTvx7` (constant in `lib/onchain/dz-rewards-record.ts`, not env-overridable) |
 | Relevant files | `lib/onchain/program-ids.ts`, `lib/onchain/client.ts`, `lib/onchain/vote-stake.ts`, `lib/onchain/dz-rewards-record.ts`, `lib/onchain/rewards.ts`, `lib/onchain/contributor-directory.ts` |
-| Failure (unconfigured) | `topology` and `validators` return 503 with a stable `{ ready: false, reason: "…" }` shape; the ledger routes surface a missing `DZ_LEDGER_RPC_URL` as a 502; `validators/stake` answers `{ status: "unavailable" }` at 502 `no-store` when RPC fails |
+| Failure (unconfigured) | `topology` and `validators` return 503 with a stable `{ ready: false, reason: "…" }` shape; the ledger routes report a missing `DZ_LEDGER_RPC_URL` as a 502; `validators/stake` answers `{ status: "unavailable" }` at 502 `no-store` when RPC fails |
 | Failure (configured, RPC error) | 502 |
 
-`DZ_LEDGER_RPC_URL` has no built-in default because baking an endpoint value into source would expose a paid API key in the deployed JS bundle. Set it in `.env.local` for development; see `.env.example` for the recommended public endpoint. `DZ_REGISTRY_PROGRAM_ID` and `DZ_REWARDS_PROGRAM_ID` are currently placeholders pending the Foundation publishing the on-chain IDL. Which `lib/onchain` modules are live and which are scaffolding is tracked in `lib/onchain/README.md`.
+`DZ_LEDGER_RPC_URL` has no built-in default because baking an endpoint value into source would expose a paid API key in the deployed JS bundle. Set it in `.env.local` for development; see `.env.example` for the recommended public endpoint. `DZ_REGISTRY_PROGRAM_ID` and `DZ_REWARDS_PROGRAM_ID` stay unset until the Foundation publishes the on-chain IDL. `lib/onchain/README.md` lists which modules are live and which are stubs.
 
 ---
 
@@ -156,12 +156,12 @@ Direct on-chain reads use two RPC endpoints: a standard Solana RPC for mainnet q
 | Probe timeout | 8 s per source |
 | CDN headers | `public, max-age=15, s-maxage=15, stale-while-revalidate=60` |
 | Response shape | `{ overall, checkedAt, sources: [{ name, host, status, latencyMs, httpStatus?, errorCode? }] }` |
-| `host` field | Hostname only for the public feeds; `(internal)` for the env-configured Shapley service and RPC — never a path, query string, or credential |
+| `host` field | Hostname only for the public feeds; `(internal)` for the env-configured Shapley service and RPC. Never a path, query string, or credential |
 | `errorCode` values | `timeout` \| `network` \| `parse` \| `unknown` (raw error text is discarded) |
 | Status values | `ok` when latency ≤ 3 s and HTTP 2xx; `degraded` when latency > 3 s or HTTP 4xx; `down` on HTTP 5xx or network failure; `disabled` for sources that are not configured (e.g. `shapley-service` without `SHAPLEY_SERVICE_URL`, `solana-rpc` without `SOLANA_RPC_URL`) |
 | UI consumers | `/status` page (`app/status/page.tsx`), sidebar NetworkPulse component |
 
-Response hardening (security fix H17): full URLs, paths, and auth tokens stay inside the probe closure on the server and are never echoed to the client.
+Full URLs, paths, and auth tokens stay inside the probe closure on the server and never reach the client.
 
 ---
 

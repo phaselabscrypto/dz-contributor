@@ -8,7 +8,7 @@ For local development setup see [development.md](development.md). For service in
 
 ## 1. Frontend (Vercel)
 
-The frontend auto-deploys on every push to `main` via Vercel's GitHub integration. No additional deploy configuration is needed beyond setting environment variables (see [Section 3](#3-environment-variables--frontend-nextjs)).
+The frontend auto-deploys on every push to `main` via Vercel's GitHub integration. No additional deploy configuration is needed beyond setting environment variables (see [Section 3](#3-environment-variables-frontend-nextjs)).
 
 ### Cron jobs
 
@@ -50,7 +50,7 @@ docker run --env-file .env dz-shapley-service worker
 
 Run one or more `api` replicas behind a load balancer and one or more `worker` replicas consuming from the shared Redis stream. The job queue design and horizontal scaling rationale are documented in [adr/0001-async-compute-queue.md](adr/0001-async-compute-queue.md).
 
-The `worker` role no longer ingests snapshots. Diff records are written by the Vercel cron (`/api/link-value/precompute`), which already downloads each epoch's snapshot for the Shapley sweep, and arrive over `PUT /diff/shape/:epoch`. The service therefore needs NO egress to the public snapshot bucket; it reaches only Redis and the object gateway. See [shapley-service.md](shapley-service.md#snapshot-diff-index) and [adr/0003-cron-side-snapshot-extraction.md](adr/0003-cron-side-snapshot-extraction.md).
+Neither role reads the public snapshot bucket. The Vercel cron (`/api/link-value/precompute`) downloads each epoch's snapshot for the Shapley sweep and writes the diff record over `PUT /diff/shape/:epoch`. The service reaches only Redis and the object gateway. See [shapley-service.md](shapley-service.md#snapshot-diff-index) and [adr/0003-cron-side-snapshot-extraction.md](adr/0003-cron-side-snapshot-extraction.md).
 
 ### Backfilling the diff index
 
@@ -116,34 +116,34 @@ The frontend's `/api/diff` and `/api/diff/contributor/[code]` routes are thin pr
 
 ---
 
-## 3. Environment variables — frontend (Next.js)
+## 3. Environment variables: frontend (Next.js)
 
-Consumed by the Next.js server-side code. Set via `vercel env add <NAME> production` (or in `.env.local` for development). Source: `.env.example` and the consuming modules noted below. (`PYTHON_SHAPLEY_URL` is a legacy alias consumed by code but deliberately not listed in `.env.example`.) A production deploy needs `SHAPLEY_SERVICE_URL`, `SHAPLEY_API_TOKEN`, `SHAPLEY_INGEST_TOKEN`, and `CRON_SECRET`; everything else degrades gracefully.
+Consumed by the Next.js server-side code. Set via `vercel env add <NAME> production` (or in `.env.local` for development). Source: `.env.example` and the consuming modules noted below. (`PYTHON_SHAPLEY_URL`, an alias for `SHAPLEY_SERVICE_URL`, is read by code and not listed in `.env.example`.) A production deploy needs `SHAPLEY_SERVICE_URL`, `SHAPLEY_API_TOKEN`, `SHAPLEY_INGEST_TOKEN`, and `CRON_SECRET`; everything else degrades gracefully.
 
 | Variable | Default | Effect | Behavior when unset |
 |---|---|---|---|
 | `SHAPLEY_SERVICE_URL` | — | Base URL of the Rust Shapley microservice. Validated at module load (`lib/constants/config.ts`); must be `http://` or `https://`. Trailing slashes and known endpoint suffixes are stripped. | Every Shapley route and every `/api/diff*` route returns `503`. There is no in-process fallback solver. |
-| `PYTHON_SHAPLEY_URL` | — | Legacy alias for `SHAPLEY_SERVICE_URL` (previous Python deployment). Checked in `lib/constants/config.ts` only when `SHAPLEY_SERVICE_URL` is unset. | Same as `SHAPLEY_SERVICE_URL` unset. |
+| `PYTHON_SHAPLEY_URL` | — | Alias for `SHAPLEY_SERVICE_URL`. Checked in `lib/constants/config.ts` only when `SHAPLEY_SERVICE_URL` is unset. | Same as `SHAPLEY_SERVICE_URL` unset. |
 | `SHAPLEY_API_TOKEN` | — | Bearer token sent by the frontend to the Rust service (`lib/utils/shapley-remote.ts`). Never exposed to the browser. | Requests to the Rust service are sent without an `Authorization` header. If the service is configured fail-closed (no `SHAPLEY_ALLOW_UNAUTHENTICATED=1`), all compute calls return `401`. |
 | `SHAPLEY_INGEST_TOKEN` | — | Second token the cron sends as `X-Ingest-Token` when writing a diff record, publishing a baseline, or submitting a sweep. Must match the service's value. Never exposed to the browser. | Shape writes, baseline publishes and sweep submissions fail locally with `503` and are reported per fire. |
-| `DZ_IBRL_PRIORITY` | `20.0` | Objective weight of unicast (validator↔validator) demands in the canonical Shapley input (`CANONICAL_SHAPLEY_PARAMS` in `lib/constants/config.ts`). Part of the epoch tag fingerprint (`sweepTag` in `lib/utils/sweep-tag.ts`), so changing it makes every published alias and sweep marker miss until the cron republishes. | DoubleZero-current default (post-PR #369). |
+| `DZ_IBRL_PRIORITY` | `20.0` | Objective weight of unicast (validator↔validator) demands in the canonical Shapley input (`CANONICAL_SHAPLEY_PARAMS` in `lib/constants/config.ts`). Part of the epoch tag fingerprint (`sweepTag` in `lib/utils/sweep-tag.ts`), so changing it makes every published alias and sweep marker miss until the cron republishes. | DoubleZero's current default. |
 | `DZ_PUBLIC_LATENCY_MULTIPLIER` | `1.25` | Scale applied to public-internet link latency in the canonical input. Also part of the epoch tag fingerprint. | DoubleZero-current default. |
 | `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana mainnet RPC endpoint used by on-chain routes (`lib/onchain/program-ids.ts`). The public default is rate-limited; a dedicated provider (e.g. Helius) is recommended for production. | Uses the public Solana mainnet RPC. |
-| `DZ_LEDGER_RPC_URL` | — | RPC endpoint for the DoubleZero ledger (a Solana sidechain). Required for any `/api/onchain/*` route. No default in code — a previous default embedded a paid API key in source. | On-chain routes that need the DZ ledger will fail; `ONCHAIN_ENABLED` gates whether they are attempted. |
-| `DZ_REGISTRY_PROGRAM_ID` | `""` | DZ master registry program (Metro/Device/Link/Contributor accounts). Pending DZ Foundation IDL. Setting this implicitly enables `ONCHAIN_ENABLED` (`lib/onchain/program-ids.ts`). | On-chain routes return 503. |
+| `DZ_LEDGER_RPC_URL` | — | RPC endpoint for the DoubleZero ledger (a Solana sidechain). Required for the ledger reads under `/api/onchain/*`. No default in code, so no API key can reach the deployed bundle. | On-chain routes that need the DZ ledger will fail; `ONCHAIN_ENABLED` gates whether they are attempted. |
+| `DZ_REGISTRY_PROGRAM_ID` | `""` | DZ master registry program (Metro/Device/Link/Contributor accounts). Unset until the Foundation publishes the IDL. Setting this implicitly enables `ONCHAIN_ENABLED` (`lib/onchain/program-ids.ts`). | On-chain routes return 503. |
 | `DZ_REWARDS_PROGRAM_ID` | `""` | DZ revenue-distribution program on Solana mainnet. Known address: `dzrevZC94tBLwuHw1dyynZxaXTWyp7yocsinyEVPtt4`. | On-chain rewards routes are unavailable. |
 | `DZ_RECORD_PROGRAM_ID` | `dzrecxigtaZQ3gPmt2X5mDkYigaruFR1rHCqztFTvx7` | Listed in `.env.example` for reference only. The DZ record program ID is a constant in `lib/onchain/dz-rewards-record.ts`; **the code does not read this variable**. Change the constant to target a fork. | n/a |
 | `DZ_REWARDS_ACCOUNTANT` | `acCSLNUiAECGPGayZgBHHDuZW4hLkM7L6hxphXbogBR` | Reference only. The rewards-accountant pubkey (the `create_with_seed` base) is a constant in the record module; **not read from env**. | n/a |
-| `DZ_CONTRIBUTOR_REWARDS_PREFIX` | `dz_contributor_rewards` | Reference only. The seed prefix (confirmed by DZ Foundation 2026-05-14) is a constant in the record module; **not read from env**. | n/a |
-| `ONCHAIN_ENABLED` | unset (effectively disabled) | Master switch for `/api/onchain/*` routes. Derived in `lib/onchain/program-ids.ts` as `Boolean(DZ_REGISTRY_PROGRAM_ID) \|\| process.env.ONCHAIN_ENABLED === "1"` — only the literal string `"1"` enables it; setting `DZ_REGISTRY_PROGRAM_ID` enables it implicitly. | On-chain routes return 503 with a stable error shape. |
+| `DZ_CONTRIBUTOR_REWARDS_PREFIX` | `dz_contributor_rewards` | Reference only. The seed prefix is a constant in the record module; **not read from env**. | n/a |
+| `ONCHAIN_ENABLED` | unset (effectively disabled) | Master switch for `/api/onchain/*` routes. Derived in `lib/onchain/program-ids.ts` as `Boolean(DZ_REGISTRY_PROGRAM_ID) \|\| process.env.ONCHAIN_ENABLED === "1"`. Only the literal string `"1"` enables it. Setting `DZ_REGISTRY_PROGRAM_ID` enables it implicitly. | On-chain routes return 503 with a stable error shape. |
 | `DZ_ACCOUNT_HAS_DISCRIMINATOR` | `"1"` | Whether on-chain accounts carry an 8-byte Anchor discriminator prefix before the borsh payload. Set to `"0"` for raw borsh structs. | Assumes discriminator present (strip 8 bytes before decode). |
 | `CRON_SECRET` | — | Secret Vercel injects into cron invocations as `Authorization: Bearer ${CRON_SECRET}`. Required for the precompute cron (`/api/link-value/precompute`); checked with the shared constant-time helper in `lib/utils/cron-auth.ts`. | The precompute route returns `503 { "error": "CRON_SECRET not configured" }` on every invocation, so no epoch is ever swept or published, and the baseline route answers `404 not-cached` until a manual backfill. |
 | `NEXT_PUBLIC_SITE_URL` | `https://dz-contributor.vercel.app` | Used by `app/layout.tsx` for `metadataBase` and OG image canonical URLs. | Falls back to the Vercel project default URL. |
-| `NEXT_PUBLIC_SENTRY_DSN` | — | Reserved for Sentry. `lib/observability.ts` names it in a comment but does not read it; wiring `@sentry/nextjs` is a follow-up. | Errors and events log to console in dev; swallowed in production. |
+| `NEXT_PUBLIC_SENTRY_DSN` | — | Reserved for Sentry. `lib/observability.ts` names it in a comment and does not read it. | Errors and events log to console in dev; swallowed in production. |
 
 ---
 
-## 4. Environment variables — shapley service
+## 4. Environment variables: shapley service
 
 Consumed by `services/shapley-rs/src/main.rs`, `src/cache.rs`, `src/jobs.rs`, and `src/diff_store.rs`.
 
@@ -169,7 +169,7 @@ Test-only variables: `TEST_REDIS_URL` (an empty Redis database for `tests/alias_
 
 ## 5. CI
 
-### `web.yml` — frontend CI
+### `web.yml`: frontend CI
 
 Triggers on push to `main` and on pull requests, with `paths-ignore: ["services/**", ".github/workflows/shapley-rs.yml"]`. Concurrency group `web-${{ github.ref }}` with `cancel-in-progress: true`.
 
@@ -181,9 +181,9 @@ Triggers on push to `main` and on pull requests, with `paths-ignore: ["services/
 | Install | `pnpm install --frozen-lockfile` |
 | Lint | `pnpm run lint` |
 | Precompute regressions | `pnpm exec tsc --noEmit --incremental false`, then `pnpm run test:diff-window`, `test:diff-repair-schedule`, `test:precompute-ingest`, `test:diff-shape-offline`, `test:baseline-probe`, `test:tracking-route`, `test:baseline-tag`, `test:sort-state` |
-| Build | `pnpm run build` with `NODE_ENV=production` — prevents prerender from calling upstream sources during CI |
+| Build | `pnpm run build` with `NODE_ENV=production`, which stops prerender from calling upstream sources during CI |
 
-### `shapley-rs.yml` — Rust service CI
+### `shapley-rs.yml`: Rust service CI
 
 Triggers on push to `main` and on pull requests, path-filtered to `services/shapley-rs/**` and `.github/workflows/shapley-rs.yml`. Concurrency group `shapley-rs-${{ github.ref }}` with `cancel-in-progress: true`.
 
@@ -194,13 +194,13 @@ Triggers on push to `main` and on pull requests, path-filtered to `services/shap
 | Checkout | `actions/checkout` SHA-pinned (`34e114876b0b11c390a56381ad16ebd13914f8d5`) |
 | Toolchain | `dtolnay/rust-toolchain` SHA-pinned; toolchain `nightly-2026-05-26` with `rustfmt` + `clippy` components |
 | Cargo cache | `actions/cache` SHA-pinned; keys on `Cargo.toml` hash; caches `~/.cargo/registry`, `~/.cargo/git`, and `services/shapley-rs/target` |
-| fmt (advisory) | `cargo fmt --all -- --check` with `continue-on-error: true` — advisory until a local pre-commit hook is in place |
-| clippy | `cargo clippy --all-targets -- -D warnings` — hard fail on warnings |
+| fmt (advisory) | `cargo fmt --all -- --check` with `continue-on-error: true`, so a formatting miss does not fail the run |
+| clippy | `cargo clippy --all-targets -- -D warnings`, which fails the run on any warning |
 | test | `cargo test --release` |
 
 **`docker` job** (requires `test`):
 
-Builds the image via `docker/build-push-action` SHA-pinned (`10e90e3645eae34f1e60eeb005ba3a3d33f178e8`) with `push: false` and `cache-from/to: type=gha`. Tags the image `dz-shapley-service:ci`. This is a smoke test only — no image is pushed.
+Builds the image via `docker/build-push-action` SHA-pinned (`10e90e3645eae34f1e60eeb005ba3a3d33f178e8`) with `push: false` and `cache-from/to: type=gha`. Tags the image `dz-shapley-service:ci`. This is a smoke test only. No image is pushed.
 
 ---
 
@@ -216,7 +216,7 @@ Per-instance, in-memory rate limiting is implemented in `lib/utils/rate-limit.ts
 | `RATE_LIMIT_STANDARD` | 60 req | 60 s | **Wired** to `shapley`, `shapley/baseline`, `shapley/tracking`, `diff`, `diff/contributor/[code]` and `validators/stake`. The baseline and diff routes are cache-read proxies: no CPU-bound work here |
 | `RATE_LIMIT_LOOSE` | 120 req | 60 s | Defined for read-mostly cached endpoints; **not currently wired to any route** |
 
-Limits are keyed by caller IP (`x-real-ip` preferred on Vercel; `x-forwarded-for` as fallback). Requests without resolvable IP headers proceed untracked by design — rate-limiting is advisory. Because state is per-instance, the effective fleet-wide limit is `N × limit` where N is the number of Vercel replicas. For fleet-wide enforcement, replace the implementation with a shared Redis-backed limiter (the consumer API `checkRateLimit(req, opts)` does not change).
+Limits are keyed by caller IP (`x-real-ip` preferred on Vercel; `x-forwarded-for` as fallback). Requests without resolvable IP headers proceed untracked by design, because rate limiting is advisory. Because state is per-instance, the effective fleet-wide limit is `N × limit` where N is the number of Vercel replicas. For fleet-wide enforcement, replace the implementation with a shared Redis-backed limiter (the consumer API `checkRateLimit(req, opts)` does not change).
 
 ### Security headers
 
@@ -238,9 +238,9 @@ Applied to all routes via `next.config.ts`:
 
 ### Health endpoint and status page
 
-`GET /api/health` runs parallel probes against all upstreams (malbec topology/stats/status, DZ economic-hub, Shapley service `/health`, Solana RPC) with an 8 s timeout per probe. Responses include only `name`, `host` (hostname only — never full URLs or tokens), `status`, `latencyMs`, and a categorized `errorCode` when failing. Raw error text is discarded to avoid leaking internal addresses. The response is cached for 15 s (`Cache-Control: public, max-age=15, s-maxage=15, stale-while-revalidate=60`).
+`GET /api/health` runs parallel probes against all upstreams (malbec topology/stats/status, DZ economic-hub, Shapley service `/health`, Solana RPC) with an 8 s timeout per probe. Responses include only `name`, `host` (the hostname, never a full URL or token), `status`, `latencyMs`, and a categorized `errorCode` when failing. Raw error text is discarded to avoid leaking internal addresses. The response is cached for 15 s (`Cache-Control: public, max-age=15, s-maxage=15, stale-while-revalidate=60`).
 
-The `/status` page (`app/status/page.tsx`) surfaces the same data for operators. The `/api/health` cron (every 15 min, see `vercel.json`) keeps the function instance warm and doubles as an uptime ping.
+The `/status` page (`app/status/page.tsx`) shows the same data for operators. The `/api/health` cron (every 15 min, see `vercel.json`) keeps the function instance warm and doubles as an uptime ping.
 
 ### Queue admin script
 
@@ -251,7 +251,7 @@ The `/status` page (`app/status/page.tsx`) surfaces the same data for operators.
 | Flag | Action | Notes |
 |---|---|---|
 | `--surgical` | Drops queued entries and the pending-entries list (PEL); recreates the consumer group in place | Stops the backlog without bouncing the worker. Keeps result cache, job state, and the dead-letter stream. |
-| `--nuke` | Deletes every `shapley:whatif:*` key | Prompts for confirmation unless `--force` (or `--dry-run`) is passed. **Requires a worker restart** after — the consumer group is gone until the worker's startup `ensure_group` recreates it. |
+| `--nuke` | Deletes every `shapley:whatif:*` key | Prompts for confirmation unless `--force` (or `--dry-run`) is passed. **Requires a worker restart** after, because the consumer group is gone until the worker's startup `ensure_group` recreates it. |
 
 **Options:** `--cancel-running` first sets the cancel flag for every `state=running` job (stops in-flight sampling solves via the worker bridge); `--dry-run` prints what would happen without making changes; `--force` skips the `--nuke` confirmation.
 
@@ -279,7 +279,7 @@ Poll `GET {shapley-service}/jobs/{sweep_job_id}` for the sweep summary.
 
 ### Alias publication rollout
 
-This runbook records the September 2026 rollout of trusted alias publication (PR 24) and doubles as the procedure for the next publication-contract change or object-gateway migration.
+Follow this runbook when the publication contract changes or the object gateway moves.
 
 Before deployment, verify conditional writes on the actual gateway. Provision a disposable bucket named `pr24-canary-<UUID>` and set `TEST_S3_ENDPOINT` and `TEST_S3_BUCKET`. Use test credentials through the environment. From `services/shapley-rs`, run:
 
@@ -300,4 +300,4 @@ The trusted metadata namespace is `shapley/v3/publication/v1/`. Solver results k
 
 The cron reserves current-epoch work before historical repairs. Work stops at 270 seconds inside its 300-second runtime. Historical repairs have 90 seconds, 40 seconds per attempt, and at most three total shape attempts per fire. One history slot selects the newest gap and remaining slots rotate every six hours. The response records failed and deferred epochs separately. Measure snapshot parse time and memory in staging before rollout.
 
-If rollback is needed, keep alias publication disabled until an API and worker pair with the fixed authorization contract is available. Preserve stored results and metadata; do not restore a reader that trusts legacy aliases.
+If rollback is needed, keep alias publication disabled until an API and worker pair with the fixed authorization contract is available. Preserve stored results and metadata. Readers must trust only aliases under `shapley/v3/publication/v1/`.

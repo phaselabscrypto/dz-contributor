@@ -30,7 +30,7 @@ One binary, `dz-shapley-service`, serves two roles selected by the first CLI arg
 | `api` (default) | no arg, `api`, or `--role=api` | Full HTTP server: all sync compute endpoints plus the `/jobs/*` enqueue/poll/cancel surface |
 | `worker` | `worker` or `--role=worker` | Minimal `/health`-only HTTP listener plus the Redis Stream consume loop |
 
-Both roles share the same `AppState` (in-memory epoch cache, S3 cache handle, API and ingest tokens, job store, diff store, single-flight table) and the same graceful-shutdown handler. Startup is lazy: there is no warm-up, S3 backfill, or background poller; the diff store fills on read or `PUT`, and the epoch cache on the first solve or S3 rehydrate. SIGTERM or Ctrl-C stops the server; an in-flight worker solve winds down within the `terminationGracePeriod`, and any interrupted entry is recovered by the worker's `XAUTOCLAIM` sweep under at-least-once delivery.
+Both roles share the same `AppState` (in-memory epoch cache, S3 cache handle, API and ingest tokens, job store, diff store, single-flight table) and the same graceful-shutdown handler. Startup is lazy. The diff store fills on read or `PUT`, and the epoch cache fills on the first solve or S3 rehydrate. SIGTERM or Ctrl-C stops the server; an in-flight worker solve winds down within the `terminationGracePeriod`, and any interrupted entry is recovered by the worker's `XAUTOCLAIM` sweep under at-least-once delivery.
 
 The split is described in [ADR 0001](adr/0001-async-compute-queue.md): heavy compute must run on workers, not on API replicas.
 
@@ -40,9 +40,9 @@ The split is described in [ADR 0001](adr/0001-async-compute-queue.md): heavy com
 
 Compute endpoints are gated at startup, not per-request, by the logic in `src/main.rs`:
 
-- **Token set** (`SHAPLEY_API_TOKEN` non-empty): compute endpoints are mounted and protected by the `require_auth` middleware — `Authorization: Bearer <token>` required. Bearer comparison uses a constant-time XOR-accumulate (`ct_eq`) over equal-length tokens to avoid timing leaks; a length mismatch returns early, which reveals only the token's length, never its content.
+- **Token set** (`SHAPLEY_API_TOKEN` non-empty): compute endpoints are mounted and protected by the `require_auth` middleware, which requires `Authorization: Bearer <token>`. Bearer comparison uses a constant-time XOR-accumulate (`ct_eq`) over equal-length tokens to avoid timing leaks; a length mismatch returns early, which reveals only the token's length, never its content.
 - **No token + `SHAPLEY_ALLOW_UNAUTHENTICATED=1`**: compute endpoints are mounted unauthenticated. Intended for local dev only; the service logs a warning.
-- **No token + flag absent**: compute endpoints are **not mounted at all** — only `/health` is served. An operator cannot accidentally expose an open solver by omitting the token; they must explicitly opt in.
+- **No token + flag absent**: compute endpoints are **not mounted at all**, so only `/health` is served. An operator cannot accidentally expose an open solver by omitting the token; they must explicitly opt in.
 
 CORS is GET + POST only. If `CORS_ORIGIN` is set, that single origin is allowed; if unset, no cross-origin requests are permitted (same-origin only). The frontend reaches the service through a server-side proxy, so CORS policy does not affect it.
 
@@ -86,14 +86,14 @@ Verified from `src/routes.rs`:
 | `MAX_DEVICES` | 500 | `validate_dimensions` |
 | `MAX_LINKS` (private and public, each) | 2,000 | `validate_dimensions` |
 | `MAX_DEMANDS` | 2,000 | `validate_dimensions` |
-| `MAX_OPERATORS` | 20 | `validate_dimensions` — coalition LP cost is 2^N; the exact solver is infeasible past ~20 |
-| Sync `/link-estimate` focus cap (`SYNC_MAX_FOCUS_LINKS`) | 12 | `link_estimate` handler — 12 focus links → 2^13 = 8,192 LPs, the most that fits the 120 s timeout; above this returns 422 with a pointer to `/jobs/link-estimate` |
-| Sweep / async focus cap (`SWEEP_MAX_FOCUS_LINKS`) | 19 | `run_sweep` in `src/worker.rs` — players = links + "Others"; 19 + 1 = 20 = the engine's exact-solve ceiling; 20+ links are reported in the sweep summary's `skipped` list, never enqueued |
+| `MAX_OPERATORS` | 20 | `validate_dimensions`. Coalition LP cost is 2^N, so the exact solver is infeasible past ~20 |
+| Sync `/link-estimate` focus cap (`SYNC_MAX_FOCUS_LINKS`) | 12 | `link_estimate` handler. 12 focus links give 2^13 = 8,192 LPs, the most that fits the 120 s timeout. Above this the handler returns 422 with a pointer to `/jobs/link-estimate` |
+| Sweep / async focus cap (`SWEEP_MAX_FOCUS_LINKS`) | 19 | `run_sweep` in `src/worker.rs`. Players are the focus links plus "Others", so 19 + 1 = 20, the engine's exact-solve ceiling. Operators above it appear in the sweep summary's `skipped` list and are never enqueued |
 | Request body limit | 2 MB | `DefaultBodyLimit::max(2 * 1024 * 1024)` in `src/main.rs` |
 | Request timeout | 120 s | `TimeoutLayer::new(Duration::from_secs(120))` in `src/main.rs` |
 | Tag length (`MAX_TAG_BYTES`) | 256 bytes, no NUL | `/shapley/baseline`, `/precompute/baseline`, `/jobs/link-estimate/by-tag` |
 | Diff shape (`MAX_SHAPE_LINKS`, `MAX_SHAPE_CONTRIBUTORS`, `MAX_SHAPE_BYTES`) | 10,000 links · 1,000 contributors · 2 MB persisted; duplicate pubkeys or contributor codes rejected | `PUT /diff/shape/{epoch}` in `src/diff_routes.rs` / `src/diff_store.rs` |
-| Baseline probe bound (`BASELINE_PROBE_TIMEOUT`) | 8 s | `GET /shapley/baseline` — one S3 GET, `502` when it elapses |
+| Baseline probe bound (`BASELINE_PROBE_TIMEOUT`) | 8 s | `GET /shapley/baseline`, one S3 GET; `502` when it elapses |
 
 ---
 
@@ -172,7 +172,7 @@ sequenceDiagram
                 W->>R: HSET state:{id} state=failed error=...  EXPIRE 86400s
                 W->>R: XACK
             else transient failure (spawn_blocking panic)
-                Note over W: NO XACK — entry stays pending<br/>for XAUTOCLAIM reclaim
+                Note over W: NO XACK. Entry stays pending<br/>for XAUTOCLAIM reclaim
             end
         end
     end
@@ -180,7 +180,7 @@ sequenceDiagram
     Note over W: Periodic XAUTOCLAIM (every 30s, min-idle 30s):<br/>delivery_count > 3 (link-estimate: > 1) → XADD dead-letter + XACK<br/>(poison-pill / schema-mismatch entries)
 ```
 
-Keys in the diagram are shown without their `shapley:whatif:` / `shapley:linkest:` prefixes for readability — the full patterns are in the [Redis keyspace](#redis-keyspace) table.
+Keys in the diagram are shown without their `shapley:whatif:` / `shapley:linkest:` prefixes for readability. The full patterns are in the [Redis keyspace](#redis-keyspace) table.
 
 **Schema versioning and mixed-version rollouts**: every stream entry carries a `schema` field (`whatif/v1`, `linkest/v1`, `sweep/v1`, `baseline/v1`, defined in `src/queue.rs`). A worker that reads an entry with an unrecognized schema dead-letters it immediately instead of mis-decoding a newer payload. Alias publication also checks the stored authorization field. Roll workers before APIs so the new producer and trusted readers share the same publication contract.
 
@@ -196,10 +196,10 @@ Source of truth: the **constants** in `src/queue.rs` and `src/jobs.rs` (`JOB_TTL
 | `shapley:whatif:dead` | Stream | — | Dead-letter; poison entries (schema mismatch, or delivery count > `MAX_DELIVERIES` = 3; link-estimate entries dead-letter after `MAX_DELIVERIES_LINK_ESTIMATE` = 1 delivery, because an OOM-killed breakdown would re-kill every worker it lands on) |
 | `shapley:whatif:payload:{job_id}` | String | 3600 s (sweep payloads: 86400 s) | Serialized request body (store-and-reference; never inlined into the stream). Sweep payloads use a 24 h TTL and are refreshed by the worker on every child pickup so a deep queue cannot outlast the payload. |
 | `shapley:whatif:result:{hash}` | String | 3600 s | Idempotency cache keyed by the whole-request payload hash (hex); prevents recompute on redelivery. `sweep` and `baseline-publish` jobs neither read nor write it |
-| `shapley:whatif:state:{job_id}` | Hash | 1800 s (running) · 86400 s (terminal) | Fields: `state`, `coalitions_solved`, `samples_done`, `max_samples`, `batch_samples`, `batch_total`, `batch_solved`, `phase`, `result` (done), `error` (failed). Running state TTL is heartbeat-refreshed. Terminal states (done/failed/cancelled) expire at 86400 s so completed results stay pollable for 24 h (PSYS-557); for longer-lived retrieval, load from the S3 result store (see below). |
+| `shapley:whatif:state:{job_id}` | Hash | 1800 s (running) · 86400 s (terminal) | Fields: `state`, `coalitions_solved`, `samples_done`, `max_samples`, `batch_samples`, `batch_total`, `batch_solved`, `phase`, `result` (done), `error` (failed). Running state TTL is heartbeat-refreshed. Terminal states (done/failed/cancelled) expire at 86400 s so completed results stay pollable for 24 h; for longer-lived retrieval, load from the S3 result store (see below). |
 | `shapley:whatif:cancel:{job_id}` | String | 1800 s | Cancel flag (`"1"`); a separate key so progress flushes can never clobber a concurrent cancel (ADR C4 note in `src/queue.rs`); only meaningful while a job is running |
 | `shapley:linkest:inflight:{hash}` | String | 86400 s | In-flight dedup claim for link-estimate solves; `SET NX EX`; cleared by the worker on terminal states; TTL is a crash backstop only |
-| `shapley/v3/simulate-{hash}.json` (S3) | JSON | — | Cached simulate result, persisted forever by input hash (hex). Re-running any previously-solved scenario completes at submit time (PSYS-557). Keyed by the whole-request payload hash, identical to the queue entry's `input_hash`. An optional out-of-repo S3 lifecycle rule can expire old results. |
+| `shapley/v3/simulate-{hash}.json` (S3) | JSON | — | Cached simulate result, persisted forever by input hash (hex). Re-running any previously-solved scenario completes at submit time. Keyed by the whole-request payload hash, identical to the queue entry's `input_hash`. An optional out-of-repo S3 lifecycle rule can expire old results. |
 
 **Stream entry fields** (flat key/value pairs on the stream entry, defined in `src/queue.rs` `field` module):
 
@@ -241,17 +241,21 @@ When `S3_CACHE_ENDPOINT` is set, the AWS SDK client is configured with that URL 
 |---|---|---|
 | `shapley/v3/cache-{hash:016x}.bin` | `shapley/v3/cache-0000abcd1234ef56.bin` | bincode-serialized `EpochCache` (per-city Shapley values + aggregated baseline) |
 | `shapley/v3/link-estimate-{hash:016x}.bin` | `shapley/v3/link-estimate-0000abcd1234ef56.bin` | bincode-serialized `LinkEstimateResponse` |
-| `shapley/v3/simulate-{hash:016x}.json` | `shapley/v3/simulate-0000abcd1234ef56.json` | JSON-serialized `SimulateResponse` (what-if result, persisted forever by whole-request payload hash; PSYS-557) |
+| `shapley/v3/simulate-{hash:016x}.json` | `shapley/v3/simulate-0000abcd1234ef56.json` | JSON-serialized `SimulateResponse` (what-if result, persisted forever by whole-request payload hash) |
 | `shapley/v3/publication/v1/sweep-marker-{hash:016x}.json` | `shapley/v3/publication/v1/sweep-marker-0000abcd1234ef56.json` | JSON `{"tag": "..."}` marker indicating a fully swept epoch; tag is hashed before use as the key suffix |
 | `shapley/v3/publication/v1/baseline-alias-{hash:016x}.json` | `shapley/v3/publication/v1/baseline-alias-0000abcd1234ef56.json` | JSON `BaselineAlias` (`tag`, `input_hash`, plus the `ShapleyResponse` fields); the key hash is `hash_payload("baseline\0" + tag)`; written only after `cache-{hash}.bin` |
 | `shapley/v3/publication/v1/link-estimate-alias-{hash:016x}.json` | `shapley/v3/publication/v1/link-estimate-alias-0000abcd1234ef56.json` | JSON `{"payloadHash": "<16 hex>"}` pointing at a `link-estimate-{hash}.bin`; the key hash is `hash_payload(tag + "\0" + focus)`; written only after the result object; read by `POST /jobs/link-estimate/by-tag` |
 | `diff/v1/shape-{epoch:06}.json` | `diff/v1/shape-000211.json` | JSON-serialized `DiffShape` (lean links and contributors for one epoch); its own version prefix (`DIFF_SHAPE_VERSION_PREFIX` in `src/diff_store.rs`), see [Snapshot diff index](#snapshot-diff-index) |
 
-The `v3` prefix (`CACHE_VERSION_PREFIX`) must be bumped on any change to the serialized shape or the engine that produced the values, so results from an older engine are never served for the same input hash. Hashes come from `std::hash::DefaultHasher` over the canonical JSON, so a Rust toolchain bump can rotate the keyspace; that costs a recompute, never a wrong result. S3 objects carry no TTL: epoch inputs are immutable and the version prefix is the only staleness guard. Client timeouts are 5 s connect, 20 s read, 30 s per attempt, 90 s per operation.
+The `v3` prefix (`CACHE_VERSION_PREFIX`) must be bumped on any change to the serialized shape or the engine that produced the values, so results from an older engine are never served for the same input hash. Hashes come from `std::hash::DefaultHasher` over the canonical JSON, so a Rust toolchain bump can rotate the keyspace at the cost of a recompute. S3 objects carry no TTL: epoch inputs are immutable and the version prefix is the only staleness guard. Client timeouts are 5 s connect, 20 s read, 30 s per attempt, 90 s per operation.
 
-**Reads fail open, alias reads fail closed.** A result read (`load`, `load_link_estimate`, `load_simulate`) that errors or deserializes badly is a miss and the value is recomputed. An alias read distinguishes a miss (`NoSuchKey` → `not-cached`) from a storage failure or malformed body, which handlers report as `502` so that "not published" is never confused with "store down". The user-visible message is the generic `alias store unavailable` / `alias is malformed`; detail stays in logs.
+**Result reads and alias reads differ on failure.** A result read (`load`, `load_link_estimate`, `load_simulate`) that errors or deserializes badly is a miss and the value is recomputed. An alias read distinguishes a miss (`NoSuchKey` → `not-cached`) from a storage failure or malformed body, which handlers report as `502` so that "not published" is never confused with "store down". The user-visible message is the generic `alias store unavailable` / `alias is malformed`; detail stays in logs.
 
-**Publication ordering.** Alias publication awaits the result object write, then the alias write; the baseline path re-puts the result even on a memory hit, because a memory hit does not prove the detached store ever landed. A worker publishes link-estimate aliases and the sweep marker only for an ingest-authorized sweep whose operator set was derived by the service (an explicit `operators` subset never writes a marker). Completion markers require every alias write to succeed; a failed alias withholds the marker so a later sweep retries from cached results. Old, pre-`publication/v1` aliases and markers are not read. Ordinary synchronous cache writes remain best-effort (spawned, log-only). Without S3, the service is stateless across restarts (cold start on every pod recycle) and every alias read is a miss; the precompute cron is what warms the cache before the first client request of an epoch.
+**Publication ordering.** Alias publication awaits the result object write, then the alias write, so an alias never points at nothing. The baseline path re-puts the result even on a memory hit, because a memory hit does not prove the detached store ever landed.
+
+A worker publishes link-estimate aliases and the sweep marker only for an ingest-authorized sweep whose operator set the service derived. An explicit `operators` subset warms the cache and writes no marker. The marker requires every alias write to succeed, so a failed alias withholds it and a later sweep retries from the cached results. Readers accept only aliases and markers under `publication/v1/`.
+
+Ordinary synchronous cache writes stay best-effort: spawned, log-only. Without S3 the service is stateless across restarts and every alias read is a miss, so the precompute cron is what warms the cache before the first client request of an epoch.
 
 ---
 
@@ -282,7 +286,7 @@ Error responses: 400 for invalid windows; 404 for absent or corrupt endpoint rec
 - The HiGHS LP solver is parallelized internally using rayon. Each coalition in the 2^N exact solve runs as a rayon parallel task.
 - Link-estimate solves (sync and worker) run on a scoped rayon pool of `LINK_ESTIMATE_SOLVE_THREADS` threads (default 4, clamped to the machine's parallelism) rather than the global pool: each rayon worker keeps a resident HiGHS model, and the global default of 16 exhausted a 16 GiB worker pod. Worker-level job concurrency is one job per worker process (`XREADGROUP COUNT 1`); scale by replica count.
 - Cold `POST /shapley` requests for one input hash are single-flighted per process (`src/inflight.rs`): the leader solves in a detached task so a dropped request still lands the result, followers await a `watch` channel, and a leader panic wakes followers with `LeaderGone` rather than wedging them. The table is per process, not per fleet.
-- **Cities are solved sequentially**, not with `par_iter` over the city loop. The rationale is documented in `src/routes.rs` (`compute_per_city`): the engine's warm-start solver state is per-rayon-worker and keyed by a problem epoch. Running cities in parallel would nest the city loop over the engine's coalition `par_iter`; a rayon worker stealing coalitions across cities would have to rebuild its full HiGHS LP model on every city boundary — negating the warm-start benefit and, with full-size models, potentially making parallel cities slower than sequential. Sequential cities let each city's coalition loop own the full rayon pool with a warm model; the only cross-city cost is one model rebuild per worker at each city boundary, which is negligible.
+- **Cities are solved sequentially**, not with `par_iter` over the city loop. The rationale is documented in `src/routes.rs` (`compute_per_city`): the engine's warm-start solver state is per-rayon-worker and keyed by a problem epoch. Running cities in parallel would nest the city loop over the engine's coalition `par_iter`, and a rayon worker stealing coalitions across cities would rebuild its full HiGHS LP model at every city boundary. That loses the warm start and, with full-size models, can make parallel cities slower than sequential ones. Sequential cities let each city's coalition loop own the full rayon pool with a warm model. The only cross-city cost is one model rebuild per worker at each city boundary, which is small.
 - The link-estimate solve is a single coalition loop (no outer city loop), so it satisfies the same warm-start contract.
 - The cancel flag in `ComputeControl` is an atomic bool checked between cities (or within the engine's coalition loop for the engine-cancellable variant), bounding cancel latency to at most one city's solve time.
 
@@ -294,11 +298,11 @@ Source: `services/shapley-rs/Dockerfile` and `services/shapley-rs/Cargo.toml`.
 
 **Build stages**:
 
-1. **Builder** — `rustlang/rust:nightly-slim` (nightly required for edition 2024 let-chains). Installs `cmake`, `clang`, `libclang-dev`, and `build-essential` to compile HiGHS C++ from source (the `highs-sys` crate) and generate FFI bindings via bindgen. Also installs `pkg-config`, `libssl-dev`, and `ca-certificates` for the AWS SDK's TLS. Dependency layer is cached separately from source for faster rebuilds.
+1. **Builder**: `rustlang/rust:nightly-slim` (nightly required for edition 2024 let-chains). Installs `cmake`, `clang`, `libclang-dev`, and `build-essential` to compile HiGHS C++ from source (the `highs-sys` crate) and generate FFI bindings via bindgen. Also installs `pkg-config`, `libssl-dev`, and `ca-certificates` for the AWS SDK's TLS. Dependency layer is cached separately from source for faster rebuilds.
 
-2. **Runtime** — `debian:trixie-slim`. Trixie is required (not bookworm) because the binary dynamically links `libstdc++` (HiGHS C++) and needs GLIBC 2.39 and CXXABI 1.3.15 from the builder's toolchain. Adds `libstdc++6` and `libgcc-s1`.
+2. **Runtime**: `debian:trixie-slim`. Trixie is required (not bookworm) because the binary dynamically links `libstdc++` (HiGHS C++) and needs GLIBC 2.39 and CXXABI 1.3.15 from the builder's toolchain. Adds `libstdc++6` and `libgcc-s1`.
 
-**Non-root user**: a non-root `shapley` user is created (primary group `shapley`), and the `/app` directory is `chown`'d `shapley:0` — group 0 — with `chmod g=u`. This is the standard OpenShift-compatible random-UID pattern: such platforms inject a random non-root UID (group 0) at runtime, and giving group 0 the same permissions as the owner ensures the binary stays accessible regardless of which UID is injected.
+**Non-root user**: a non-root `shapley` user is created (primary group `shapley`), and the `/app` directory is `chown`'d `shapley:0` (group 0) with `chmod g=u`. This is the standard OpenShift-compatible random-UID pattern: such platforms inject a random non-root UID (group 0) at runtime, and giving group 0 the same permissions as the owner ensures the binary stays accessible regardless of which UID is injected.
 
 **Entrypoint**: `["/app/dz-shapley-service"]`; the container `args` field passes `api` or `worker` to select the role.
 
@@ -329,13 +333,13 @@ HTTP status codes follow standard conventions: 400 for validation failures, 422 
 
 ## See also
 
-- [README](../README.md) — project index
-- [architecture.md](architecture.md) — system-level component map
-- [data-sources.md](data-sources.md) — upstream data inputs
-- [shapley-pipeline.md](shapley-pipeline.md) — algorithm semantics (per-city LP, stake-weighted aggregation)
-- [development.md](development.md) — local setup, running the service
-- [operations.md](operations.md) — environment variable reference, deployment topology
-- [ADR 0001](adr/0001-async-compute-queue.md) — rationale for the async compute queue
-- [ADR 0002](adr/0002-snapshot-diff-index.md) — rationale for the snapshot diff index
-- [ADR 0003](adr/0003-cron-side-snapshot-extraction.md) — why the cron extracts shapes and the service has no snapshot egress
-- [ADR 0004](adr/0004-cache-only-baseline-reads.md) — why reads never compute and baselines are addressed by epoch tag
+- [README](../README.md): project index
+- [architecture.md](architecture.md): system-level component map
+- [data-sources.md](data-sources.md): upstream data inputs
+- [shapley-pipeline.md](shapley-pipeline.md): algorithm semantics (per-city LP, stake-weighted aggregation)
+- [development.md](development.md): local setup, running the service
+- [operations.md](operations.md): environment variable reference, deployment topology
+- [ADR 0001](adr/0001-async-compute-queue.md): rationale for the async compute queue
+- [ADR 0002](adr/0002-snapshot-diff-index.md): rationale for the snapshot diff index
+- [ADR 0003](adr/0003-cron-side-snapshot-extraction.md): why the cron extracts shapes and the service has no snapshot egress
+- [ADR 0004](adr/0004-cache-only-baseline-reads.md): why reads never compute and baselines are addressed by epoch tag

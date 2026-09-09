@@ -1,9 +1,8 @@
 # On-chain reader status
 
-This directory contains DZ ledger / Solana mainnet readers. **Not all
-files are live** — the pieces below describe which paths are bit-
-verified against on-chain data and which are scaffolding awaiting
-DZ Foundation work.
+This directory holds the DZ ledger and Solana mainnet readers. The tables
+below say which paths are bit-verified against on-chain data and which are
+scaffolding that waits on DZ Foundation work.
 
 ## ✅ Live (verified end-to-end)
 
@@ -19,7 +18,7 @@ into production API routes and the site UI depends on them.
 | `client.ts` | Hand-rolled Solana JSON-RPC client with retries, timeouts, error categorization, and a small TTL cache (`getVoteAccounts`, `getEpochInfo`, `getSlot`, `getBlockTime`, `getProgramAccounts`, `getAccountInfo`) | Live behind `vote-stake.ts` and the measured epoch cadence in `lib/utils/epoch-rate.ts` (`/api/epoch-rate`, `/api/methodology`). Uses `SOLANA_RPC_URL`. |
 
 The three DZ-ledger modules use `@solana/web3.js Connection` directly, require
-`DZ_LEDGER_RPC_URL` to be set, and surface clear errors when it's not. The
+`DZ_LEDGER_RPC_URL` to be set, and report a clear error when it is not set. The
 mainnet readers use `SOLANA_RPC_URL` (public default, rate-limited).
 
 ## ⚠️ Scaffolding (stubbed, pending DZ IDL)
@@ -31,13 +30,13 @@ Every call currently throws `OnchainNotConfigured` or returns
 
 | Module | What it would read | What's blocking |
 |---|---|---|
-| `decoders.ts` | Metro / Device / Link / Contributor records via Anchor IDL | DZ Q6 — needs the IDL JSON dropped at `lib/onchain/idl/dz-registry.json` and `idl-registry.ts` swapped from `stubRegistry` → `anchorRegistry`. |
-| `topology.ts` | Full network topology from on-chain registry | Same — depends on `decoders.ts`. |
-| `validators.ts` | Per-epoch validator payout history (SOL) | DZ Q6 — needs `DZ_REWARDS_PROGRAM_ID` set + the rewards-program IDL. |
+| `decoders.ts` | Metro / Device / Link / Contributor records via Anchor IDL | DZ Q6. Needs the IDL JSON at `lib/onchain/idl/dz-registry.json` and `idl-registry.ts` swapped from `stubRegistry` to `anchorRegistry`. |
+| `topology.ts` | Full network topology from on-chain registry | Same; depends on `decoders.ts`. |
+| `validators.ts` | Per-epoch validator payout history (SOL) | DZ Q6. Needs `DZ_REWARDS_PROGRAM_ID` set plus the rewards-program IDL. |
 
 API routes that consume these modules (`/api/onchain/topology`,
 `/api/onchain/validators`) are gated behind `ONCHAIN_ENABLED` env var
-and return **503 with a stable shape** when the flag is off — frontend
+and return **503 with a stable shape** when the flag is off. The frontend
 treats them as soft-disabled.
 
 ## Activation checklist (when DZ ships the IDL)
