@@ -395,7 +395,7 @@ export function ShapleyJobModal({
                   <div className="flex items-center gap-2 rounded-lg bg-amber/10 border border-amber/20 px-3 py-2 text-xs text-amber">
                     <Loader2 className="size-3.5 animate-spin shrink-0" />
                     <span>
-                      Connection interrupted — reconnecting&hellip; your
+                      Connection interrupted. Reconnecting&hellip; your
                       calculation is still running.
                     </span>
                   </div>

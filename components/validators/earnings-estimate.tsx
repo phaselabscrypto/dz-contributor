@@ -160,10 +160,7 @@ export function EarningsEstimate({
       <p className="text-xs text-cream-30 leading-relaxed">
         {isCounterfactual &&
           `Existing validators' shares fall ${sharePct}%. Assumes no other joiner and an unchanged pool. `}
-        Operators take 29.25% of total fees, split by activated stake.{" "}
-        <Link href="/methodology" className="underline decoration-dotted">
-          How this works
-        </Link>
+        Operators take 29.25% of total fees, split by activated stake.
         {publisher && (
           <>
             {" · "}

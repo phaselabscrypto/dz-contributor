@@ -14,7 +14,6 @@ const NAV: Record<string, { href: string; label: string }> = {
   r: { href: "/rewards", label: "Rewards" },
   d: { href: "/changelog", label: "Changelog" },
   s: { href: "/status", label: "Status" },
-  m: { href: "/methodology", label: "Methodology" },
   h: { href: "/", label: "Home" },
 };
 

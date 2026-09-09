@@ -213,14 +213,7 @@ export default function StatusPage() {
 
         <p className="text-xs text-muted-foreground font-mono">
           Auto-refreshes every 30s. Source-level &ldquo;down&rdquo; trumps link
-          health for the overall status. See{" "}
-          <a
-            href="/methodology"
-            className="underline decoration-dotted hover:text-foreground"
-          >
-            /methodology
-          </a>{" "}
-          for what each source feeds.
+          health for the overall status.
         </p>
       </div>
     </>

@@ -26,7 +26,6 @@ const NAV: SidebarItem[] = [
   { href: "/rewards", label: "Rewards", group: "Analysis" },
   { href: "/changelog", label: "Changelog", group: "Analysis" },
   { href: "/status", label: "Status", group: "Reference" },
-  { href: "/methodology", label: "Methodology", group: "Reference" },
 ];
 
 /**

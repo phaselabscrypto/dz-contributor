@@ -74,12 +74,12 @@ flowchart TD
 
 ## Method labels
 
-Every Shapley response carries a `method` string. The table below enumerates the labels the system can emit and where each is set. The label is surfaced through `/methodology` and the UI method badge.
+Every Shapley response carries a `method` string. The table below enumerates the labels the system can emit and where each is set.
 
 | Label | Set by | Meaning |
 |---|---|---|
 | `lp-per-city-stake-weighted-exact` | `compute_per_city` in `services/shapley-rs/src/routes.rs` | Canonical reward path: per-source-city exact Shapley + stake-weighted aggregation. This is what the Rust `/shapley`, `/simulate`, and `/precompute` paths actually return. |
-| `lp-multi-commodity-flow-rs` | `DEFAULT_METHOD` in `lib/utils/shapley-remote.ts` | The default the TS client substitutes if a service response omits `method` — never reached with the current service, which always stamps its own label. `app/methodology/page.tsx` still compares against this string and therefore never matches a live response — known drift, also flagged in [architecture.md](./architecture.md). |
+| `lp-multi-commodity-flow-rs` | `DEFAULT_METHOD` in `lib/utils/shapley-remote.ts` | The default the TS client substitutes if a service response omits `method` — never reached with the current service, which always stamps its own label. |
 | `retag-shapley-rs` | `run_link_estimate` in `services/shapley-rs/src/routes.rs` | Per-link value (retag method) — see below. |
 
 ## Canonical engine (per-city)

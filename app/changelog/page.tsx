@@ -64,7 +64,7 @@ export default function ChangelogPage() {
     <>
       <PageHeader
         title="Changelog"
-        description="What changed between any two snapshots — links added, removed, bandwidth changes, and per-contributor footprint deltas."
+        description="What changed between any two snapshots: links added, removed, bandwidth changes, and per-contributor footprint deltas."
       />
       <div className="flex-1 px-4 sm:px-6 py-4 sm:py-6 space-y-6">
         {/* Epoch selectors */}
