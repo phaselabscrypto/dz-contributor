@@ -6,7 +6,7 @@ Start here to evaluate or take over DZ Contributor Rewards. This page says what 
 
 | Part | Where | Source |
 |---|---|---|
-| Frontend | <https://dzcontributor.xyz> | `main` of this repository, deployed by Vercel's GitHub integration |
+| Frontend | https://dz.phase.cc| `main` of this repository, deployed by Vercel's GitHub integration |
 | Shapley service | Reachable by the frontend only, over `SHAPLEY_SERVICE_URL` with a bearer token | `services/shapley-rs`, one container image, two processes (`--role=api`, `--role=worker`) |
 | Solver engine | Compiled into the service | Fork of `doublezerofoundation/network-shapley-rs` at rev `bb5a24e0`, upstream base v0.6.0 |
 | Job queue and result cache | Redis with streams, plus an S3-compatible bucket | Configured by the env vars in `docs/operations.md` sections 2 and 4 |
