@@ -231,9 +231,14 @@ focus-owned link as its own pseudo-operator (collapsing every other operator to
 `"Others"` and on/off-ramp helper edges to `"Private"`) and runs ONE exact 2^n
 coalition Shapley over those link-players, reusing the warm-start solver. Each
 link's `value` is its Shapley value; `percent` is its share of the positive total
-(a 0–1 fraction). Single-shot over the whole demand set (NOT the per-city reward
-methodology). Capped at 20 link-players (mirrors Python's `n_ops < 21`); above that
-the endpoint returns 422.
+(a 0–1 fraction). Single-shot over the whole demand set, not the per-city reward
+methodology.
+
+Cost is `2^(links+1)` coalitions, so each extra focus link doubles the work. The
+caps come from that, not from the Python reference: the sync endpoint takes 12
+focus links and returns 422 above it, the async and sweep paths take 19. The
+engine's own ceiling is `MAX_LINK_PLAYERS = 31`, the `u32` coalition-mask limit,
+which deliberately diverges from the Python reference's `n_ops < 21` assert.
 
 Parity is verified against the Python reference in the engine crate
 (`tests/link_estimate_test.rs`, value ≤ 0.01 / percent ≤ 1e-4). Large operators
