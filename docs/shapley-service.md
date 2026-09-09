@@ -1,6 +1,6 @@
 # Shapley Service
 
-HTTP microservice wrapping the `network-shapley` Rust crate: synchronous Shapley value compute with an in-memory + S3 cache, and an async Redis Streams job queue for long-running what-if and link-estimate solves.
+HTTP microservice wrapping the `network-shapley` Rust crate: synchronous Shapley value compute with an in-memory + S3 cache, an async Redis Streams job queue for long-running what-if and link-estimate solves, ingest-gated publication of per-epoch baseline aliases and sweep markers, and the per-epoch diff index behind `/changelog`. It never reads the public snapshot bucket; the Next.js cron pushes everything epoch-specific to it.
 
 ---
 
@@ -30,7 +30,7 @@ One binary, `dz-shapley-service`, serves two roles selected by the first CLI arg
 | `api` (default) | no arg, `api`, or `--role=api` | Full HTTP server: all sync compute endpoints plus the `/jobs/*` enqueue/poll/cancel surface |
 | `worker` | `worker` or `--role=worker` | Minimal `/health`-only HTTP listener plus the Redis Stream consume loop |
 
-Both roles share the same `AppState` (in-memory epoch cache, S3 cache handle, API token, job store) and the same graceful-shutdown handler. SIGTERM or Ctrl-C stops the server; an in-flight worker solve winds down within the `terminationGracePeriod`, and any interrupted entry is recovered by the worker's `XAUTOCLAIM` sweep under at-least-once delivery.
+Both roles share the same `AppState` (in-memory epoch cache, S3 cache handle, API and ingest tokens, job store, diff store, single-flight table) and the same graceful-shutdown handler. Startup is lazy: there is no warm-up, S3 backfill, or background poller; the diff store fills on read or `PUT`, and the epoch cache on the first solve or S3 rehydrate. SIGTERM or Ctrl-C stops the server; an in-flight worker solve winds down within the `terminationGracePeriod`, and any interrupted entry is recovered by the worker's `XAUTOCLAIM` sweep under at-least-once delivery.
 
 The split is described in [ADR 0001](adr/0001-async-compute-queue.md): heavy compute must run on workers, not on API replicas.
 
@@ -57,18 +57,21 @@ All compute endpoints require auth (see above). `/health` is always open.
 | `GET` | `/health` | None | Liveness probe; returns `{status, service, version}` | — |
 | `POST` | `/shapley` | Required | Synchronous per-city exact Shapley values for an epoch input; reads from in-memory / S3 cache, computes on miss. Concurrent cold requests for one input hash share a single in-process solve (`src/inflight.rs`) | Body ≤ 2 MB, timeout 120 s |
 | `POST` | `/simulate` | Required | Synchronous what-if: baseline + modified Shapley in one shot, reusing unchanged source cities from the cache | Body ≤ 2 MB, timeout 120 s |
-| `POST` | `/link-estimate` | Required | Synchronous per-link value-add (retag-Shapley) for a focus operator; S3 read-through; 422 if focus owns > 12 links | Body ≤ 2 MB, timeout 120 s |
+| `POST` | `/link-estimate` | Required | Synchronous per-link value-add (retag-Shapley) for a focus operator; S3 read-through before the cap check; 422 if focus owns > 12 links; solves on a scoped rayon pool (`LINK_ESTIMATE_SOLVE_THREADS`, default 4) and is cancelled when the client disconnects | Body ≤ 2 MB, timeout 120 s |
 | `GET` | `/shapley/baseline?tag=` | Required | Cache-only read of the published baseline for `tag`: 200 alias body (`method`, `operator_count`, `values`, `tag`, `input_hash`), `404 {status:"not-cached", tag}` on a miss or when S3 is unset, 400 for an empty/oversized/NUL tag, 502 when the store fails or the 8 s read bound elapses; never computes or enqueues | tag ≤ 256 bytes |
 | `POST` | `/precompute` | Required | Enqueue a `JobKind::Baseline` job; short-circuits with `200 already-cached` on a cache hit; `503` if Redis is absent | — |
 | `POST` | `/precompute/baseline` | Compute + ingest tokens | Body `{input, tag}`; `200 already-cached` only when an alias for `tag` names this input's hash; otherwise enqueues a `baseline-publish` job (`202 {job_id, input_hash, tag}`) whose worker loads or solves the baseline, persists it, then writes the alias; `503` without S3 or Redis | tag ≤ 256 bytes |
 | `POST` | `/jobs/simulate` | Required | Enqueue a what-if simulation; returns `202 {job_id}` | — |
-| `POST` | `/jobs/link-estimate` | Required | Enqueue a per-link value-add; in-flight dedup via `SET NX`; S3 short-circuit at submit time; returns `202 {job_id}` | — |
+| `POST` | `/jobs/link-estimate` | Required | Enqueue a per-link value-add; in-flight dedup via `SET NX` (an attach returns the existing `job_id`); S3 short-circuit at submit time; `422` above 19 focus links; returns `202 {job_id}` | — |
+| `POST` | `/jobs/link-estimate/by-tag` | Required | Body `{tag, operator_focus}`; completes a job from the published link-estimate alias without any input (no snapshot download on the caller's side): `202 {job_id}` already `done`, `404` when no alias exists or it dangles, `502` on alias-read failure, `503` without Redis. The Next.js link-value route tries this first | tag ≤ 256 bytes |
 | `GET` | `/jobs/{id}` | Required | Poll job state, progress, and result | — |
 | `DELETE` | `/jobs/{id}` | Required | Request cooperative cancellation; `202 {state: cancelling}` or `404` | — |
 | `POST` | `/precompute/link-estimates` | Compute + ingest tokens | Enqueue a sweep job that fans out one link-estimate child per operator (epoch-cron warm-up); returns `202 {job_id}` | — |
 | `GET` | `/precompute/link-estimates/status` | Required | Check whether the S3 "fully swept" marker exists for `?tag=`; the cron route uses this to skip the snapshot build on a warm epoch | — |
 | `GET` | `/diff?from&to` | Required | Network topology diff between two epochs: summary, per-contributor rollup, `added`, `removed`, `changed` links with first-observed attribution; served from the diff index | `from` and `to` each in `[48, 100000]`, `from != to`, `abs(to - from) <= 200`; the order is not enforced, so `from > to` returns a backward diff |
 | `GET` | `/diff/contributor/{code}?from&to` | Required | Per-contributor diff between two epochs: footprint before and after, added, removed, and changed links (no display `name`; the Next.js proxy adds it) | same window rules |
+| `GET` | `/diff/missing?latest=N&depth=D` | Required | `{missing: [epoch…]}` for `[max(latest-depth+1, 48), latest]`, probing durable records directly (corrupt bodies count as missing); the cron's repair discovery | `depth` default 31, max 200; ≤ 8 concurrent reads, 2 s each, 10 s overall |
+| `PUT` | `/diff/shape/{epoch}` | Compute + ingest tokens | Body is a `DiffShape` (`{epoch, links, contributors}`) extracted by the cron; `201` created, `409` when a readable record exists, `400` malformed, `422` invalid shape, `502` store failure, `503` without durable persistence or ingest token; create-only, with a repair path for proven-corrupt bytes | ≤ 10,000 links, ≤ 1,000 contributors, body-epoch must equal path-epoch, ≤ 2 MB persisted |
 
 Router source: `src/main.rs` (`run_api`), route handlers in `src/routes.rs`, and the `/diff*` handlers in `src/diff_routes.rs`.
 
@@ -88,6 +91,9 @@ Verified from `src/routes.rs`:
 | Sweep / async focus cap (`SWEEP_MAX_FOCUS_LINKS`) | 19 | `run_sweep` in `src/worker.rs` — players = links + "Others"; 19 + 1 = 20 = the engine's exact-solve ceiling; 20+ links are reported in the sweep summary's `skipped` list, never enqueued |
 | Request body limit | 2 MB | `DefaultBodyLimit::max(2 * 1024 * 1024)` in `src/main.rs` |
 | Request timeout | 120 s | `TimeoutLayer::new(Duration::from_secs(120))` in `src/main.rs` |
+| Tag length (`MAX_TAG_BYTES`) | 256 bytes, no NUL | `/shapley/baseline`, `/precompute/baseline`, `/jobs/link-estimate/by-tag` |
+| Diff shape (`MAX_SHAPE_LINKS`, `MAX_SHAPE_CONTRIBUTORS`, `MAX_SHAPE_BYTES`) | 10,000 links · 1,000 contributors · 2 MB persisted; duplicate pubkeys or contributor codes rejected | `PUT /diff/shape/{epoch}` in `src/diff_routes.rs` / `src/diff_store.rs` |
+| Baseline probe bound (`BASELINE_PROBE_TIMEOUT`) | 8 s | `GET /shapley/baseline` — one S3 GET, `502` when it elapses |
 
 ---
 
@@ -171,7 +177,7 @@ sequenceDiagram
         end
     end
 
-    Note over W: Periodic XAUTOCLAIM (every 30s, min-idle 30s):<br/>delivery_count > 3 → XADD dead-letter + XACK<br/>(poison-pill / schema-mismatch entries)
+    Note over W: Periodic XAUTOCLAIM (every 30s, min-idle 30s):<br/>delivery_count > 3 (link-estimate: > 1) → XADD dead-letter + XACK<br/>(poison-pill / schema-mismatch entries)
 ```
 
 Keys in the diagram are shown without their `shapley:whatif:` / `shapley:linkest:` prefixes for readability — the full patterns are in the [Redis keyspace](#redis-keyspace) table.
@@ -187,9 +193,9 @@ Source of truth: the **constants** in `src/queue.rs` and `src/jobs.rs` (`JOB_TTL
 | Key pattern | Type | TTL | Purpose |
 |---|---|---|---|
 | `shapley:whatif:stream` | Stream | — | Work queue; `XADD MAXLEN ~10000`; consumer group `whatif-workers` |
-| `shapley:whatif:dead` | Stream | — | Dead-letter; poison entries (schema mismatch or delivery count > 3) |
+| `shapley:whatif:dead` | Stream | — | Dead-letter; poison entries (schema mismatch, or delivery count > `MAX_DELIVERIES` = 3; link-estimate entries dead-letter after `MAX_DELIVERIES_LINK_ESTIMATE` = 1 delivery, because an OOM-killed breakdown would re-kill every worker it lands on) |
 | `shapley:whatif:payload:{job_id}` | String | 3600 s (sweep payloads: 86400 s) | Serialized request body (store-and-reference; never inlined into the stream). Sweep payloads use a 24 h TTL and are refreshed by the worker on every child pickup so a deep queue cannot outlast the payload. |
-| `shapley:whatif:result:{hash}` | String | 3600 s | Idempotency cache keyed by the whole-request payload hash (hex); prevents recompute on redelivery |
+| `shapley:whatif:result:{hash}` | String | 3600 s | Idempotency cache keyed by the whole-request payload hash (hex); prevents recompute on redelivery. `sweep` and `baseline-publish` jobs neither read nor write it |
 | `shapley:whatif:state:{job_id}` | Hash | 1800 s (running) · 86400 s (terminal) | Fields: `state`, `coalitions_solved`, `samples_done`, `max_samples`, `batch_samples`, `batch_total`, `batch_solved`, `phase`, `result` (done), `error` (failed). Running state TTL is heartbeat-refreshed. Terminal states (done/failed/cancelled) expire at 86400 s so completed results stay pollable for 24 h (PSYS-557); for longer-lived retrieval, load from the S3 result store (see below). |
 | `shapley:whatif:cancel:{job_id}` | String | 1800 s | Cancel flag (`"1"`); a separate key so progress flushes can never clobber a concurrent cancel (ADR C4 note in `src/queue.rs`); only meaningful while a job is running |
 | `shapley:linkest:inflight:{hash}` | String | 86400 s | In-flight dedup claim for link-estimate solves; `SET NX EX`; cleared by the worker on terminal states; TTL is a crash backstop only |
@@ -238,15 +244,16 @@ When `S3_CACHE_ENDPOINT` is set, the AWS SDK client is configured with that URL 
 | `shapley/v3/simulate-{hash:016x}.json` | `shapley/v3/simulate-0000abcd1234ef56.json` | JSON-serialized `SimulateResponse` (what-if result, persisted forever by whole-request payload hash; PSYS-557) |
 | `shapley/v3/publication/v1/sweep-marker-{hash:016x}.json` | `shapley/v3/publication/v1/sweep-marker-0000abcd1234ef56.json` | JSON `{"tag": "..."}` marker indicating a fully swept epoch; tag is hashed before use as the key suffix |
 | `shapley/v3/publication/v1/baseline-alias-{hash:016x}.json` | `shapley/v3/publication/v1/baseline-alias-0000abcd1234ef56.json` | JSON `BaselineAlias` (`tag`, `input_hash`, plus the `ShapleyResponse` fields); the key hash is `hash_payload("baseline\0" + tag)`; written only after `cache-{hash}.bin` |
-| `diff/v1/shape-{epoch:06}.json` | `diff/v1/shape-000211.json` | JSON-serialized `DiffShape` (lean links and contributors for one epoch); its own version prefix, see [Snapshot diff index](#snapshot-diff-index) |
+| `shapley/v3/publication/v1/link-estimate-alias-{hash:016x}.json` | `shapley/v3/publication/v1/link-estimate-alias-0000abcd1234ef56.json` | JSON `{"payloadHash": "<16 hex>"}` pointing at a `link-estimate-{hash}.bin`; the key hash is `hash_payload(tag + "\0" + focus)`; written only after the result object; read by `POST /jobs/link-estimate/by-tag` |
+| `diff/v1/shape-{epoch:06}.json` | `diff/v1/shape-000211.json` | JSON-serialized `DiffShape` (lean links and contributors for one epoch); its own version prefix (`DIFF_SHAPE_VERSION_PREFIX` in `src/diff_store.rs`), see [Snapshot diff index](#snapshot-diff-index) |
 
-The `v3` prefix must be bumped on any change to the serialized shape or the engine that produced the values, so results from an older engine are never served for the same input hash.
+The `v3` prefix (`CACHE_VERSION_PREFIX`) must be bumped on any change to the serialized shape or the engine that produced the values, so results from an older engine are never served for the same input hash. Hashes come from `std::hash::DefaultHasher` over the canonical JSON, so a Rust toolchain bump can rotate the keyspace; that costs a recompute, never a wrong result. S3 objects carry no TTL: epoch inputs are immutable and the version prefix is the only staleness guard. Client timeouts are 5 s connect, 20 s read, 30 s per attempt, 90 s per operation.
 
-Alias publication awaits result storage, then the alias write. Completion markers require successful alias writes. Ordinary synchronous cache writes remain best-effort. Without S3, the service is stateless across restarts (cold start on every pod recycle); the precompute cron mitigates this by warming the cache before the first client request of an epoch.
+**Reads fail open, alias reads fail closed.** A result read (`load`, `load_link_estimate`, `load_simulate`) that errors or deserializes badly is a miss and the value is recomputed. An alias read distinguishes a miss (`NoSuchKey` → `not-cached`) from a storage failure or malformed body, which handlers report as `502` so that "not published" is never confused with "store down". The user-visible message is the generic `alias store unavailable` / `alias is malformed`; detail stays in logs.
+
+**Publication ordering.** Alias publication awaits the result object write, then the alias write; the baseline path re-puts the result even on a memory hit, because a memory hit does not prove the detached store ever landed. A worker publishes link-estimate aliases and the sweep marker only for an ingest-authorized sweep whose operator set was derived by the service (an explicit `operators` subset never writes a marker). Completion markers require every alias write to succeed; a failed alias withholds the marker so a later sweep retries from cached results. Old, pre-`publication/v1` aliases and markers are not read. Ordinary synchronous cache writes remain best-effort (spawned, log-only). Without S3, the service is stateless across restarts (cold start on every pod recycle) and every alias read is a miss; the precompute cron is what warms the cache before the first client request of an epoch.
 
 ---
-
-Aliases use `shapley/v3/publication/v1/link-estimate-alias-{hash}.json`. A worker publishes only for an ingest-authorized sweep with a derived operator set. Old aliases and markers are not read. S3 and Redis result reuse both retry publication; a failed alias withholds the completion marker.
 
 ## Snapshot diff index
 
@@ -258,7 +265,7 @@ The cron validates the snapshot epoch and writes `diff/v1/shape-{epoch:06}.json`
 
 Creates use `If-None-Match: *`. A readable existing record returns 409 without a write. Proven-corrupt bytes can be repaired with the ETag from their GET response and `If-Match`. Failed GETs, missing ETags, and unresolved conditional conflicts return 502. The deployed gateway must pass the conditional-write acceptance test before rollout.
 
-`GET /diff/missing?latest=N&depth=31` probes durable records directly, including records whose keys exist but whose bodies are corrupt. It uses at most eight concurrent reads, two seconds per read, and ten seconds for the whole query. Failed reads fail the query instead of hiding uncertain gaps. Backfill pages use the same 31-epoch window.
+`GET /diff/missing?latest=N&depth=D` (default depth 31, maximum 200) probes durable records directly, including records whose keys exist but whose bodies are corrupt. It uses at most eight concurrent reads, two seconds per read, and ten seconds for the whole query. Failed reads fail the query instead of hiding uncertain gaps. Backfill pages use the same 31-epoch window. `DiffStore` also tracks the latest persisted epoch, re-listing at most every 5 minutes; a successful `PUT` advances it immediately.
 
 The cron handles the current epoch before history. It reuses one snapshot for the sweep and shape, limits work to 270 seconds, and allows at most three shape attempts. Historical repairs have a 90-second budget and a 40-second attempt limit, with rotating candidates. `pnpm run backfill:diff` fills deeper history.
 
@@ -273,6 +280,8 @@ Error responses: 400 for invalid windows; 404 for absent or corrupt endpoint rec
 - All HTTP handlers run on the tokio multi-thread runtime (`#[tokio::main]`).
 - Heavy LP solves are dispatched via `tokio::task::spawn_blocking`, which places them on a dedicated blocking thread pool and avoids starving the async executor.
 - The HiGHS LP solver is parallelized internally using rayon. Each coalition in the 2^N exact solve runs as a rayon parallel task.
+- Link-estimate solves (sync and worker) run on a scoped rayon pool of `LINK_ESTIMATE_SOLVE_THREADS` threads (default 4, clamped to the machine's parallelism) rather than the global pool: each rayon worker keeps a resident HiGHS model, and the global default of 16 exhausted a 16 GiB worker pod. Worker-level job concurrency is one job per worker process (`XREADGROUP COUNT 1`); scale by replica count.
+- Cold `POST /shapley` requests for one input hash are single-flighted per process (`src/inflight.rs`): the leader solves in a detached task so a dropped request still lands the result, followers await a `watch` channel, and a leader panic wakes followers with `LeaderGone` rather than wedging them. The table is per process, not per fleet.
 - **Cities are solved sequentially**, not with `par_iter` over the city loop. The rationale is documented in `src/routes.rs` (`compute_per_city`): the engine's warm-start solver state is per-rayon-worker and keyed by a problem epoch. Running cities in parallel would nest the city loop over the engine's coalition `par_iter`; a rayon worker stealing coalitions across cities would have to rebuild its full HiGHS LP model on every city boundary — negating the warm-start benefit and, with full-size models, potentially making parallel cities slower than sequential. Sequential cities let each city's coalition loop own the full rayon pool with a warm model; the only cross-city cost is one model rebuild per worker at each city boundary, which is negligible.
 - The link-estimate solve is a single coalition loop (no outer city loop), so it satisfies the same warm-start contract.
 - The cancel flag in `ComputeControl` is an atomic bool checked between cities (or within the engine's coalition loop for the engine-cancellable variant), bounding cancel latency to at most one city's solve time.
@@ -327,4 +336,6 @@ HTTP status codes follow standard conventions: 400 for validation failures, 422 
 - [development.md](development.md) — local setup, running the service
 - [operations.md](operations.md) — environment variable reference, deployment topology
 - [ADR 0001](adr/0001-async-compute-queue.md) — rationale for the async compute queue
-- [ADR 0002](adr/0002-snapshot-diff-index.md): rationale for the snapshot diff index
+- [ADR 0002](adr/0002-snapshot-diff-index.md) — rationale for the snapshot diff index
+- [ADR 0003](adr/0003-cron-side-snapshot-extraction.md) — why the cron extracts shapes and the service has no snapshot egress
+- [ADR 0004](adr/0004-cache-only-baseline-reads.md) — why reads never compute and baselines are addressed by epoch tag

@@ -4,14 +4,15 @@ How reward shares are computed: which inputs feed the solver, how requests are d
 
 ## Contents
 
-1. [Input-builder priority chain](#input-builder-priority-chain)
+1. [Input construction](#input-construction)
 2. [Solver dispatch](#solver-dispatch)
 3. [Method labels](#method-labels)
-4. [The dev-only TS solver](#the-dev-only-ts-solver)
-5. [Canonical engine (per-city)](#canonical-engine-per-city)
-6. [Per-link value (retag method)](#per-link-value-retag-method)
-7. [What-if simulation](#what-if-simulation)
-8. [Correctness pinning](#correctness-pinning)
+4. [Canonical engine (per-city)](#canonical-engine-per-city)
+5. [Per-link value (retag method)](#per-link-value-retag-method)
+6. [What-if simulation](#what-if-simulation)
+7. [Correctness pinning](#correctness-pinning)
+
+There is no TypeScript solver, dev-only or otherwise: `lib/utils/shapley-solver.ts` was removed with PR #23, and every number on the site comes from the Rust service.
 
 ---
 
@@ -24,7 +25,9 @@ The canonical builder returns `{ canonical: false, reason }` when the snapshot i
 - `snapshot missing start_us/end_us epoch window`
 - `snapshot missing metro_prices`
 
-The read routes carry only what the published alias holds (`epoch`, `tag`, `method`, `operatorCount`, `values`, `fetchedAt`). `buildShapleyInput` in `shapley-input-builder.ts` is the older heuristic builder; no route calls it. The simulate, jobs and link-value routes build from the snapshot the same way and answer `422` when the canonical builder cannot use it.
+The read routes carry only what the published alias holds (`epoch`, `tag`, `method`, `operatorCount`, `values`, `fetchedAt`). `buildShapleyInput` in `shapley-input-builder.ts` is the older heuristic builder; no route calls it. The simulate and jobs routes build from the snapshot the same way and answer `422` when the canonical builder cannot use it. The link-value job route first asks the service for the precomputed result by epoch tag (`POST /jobs/link-estimate/by-tag`), and downloads the snapshot only when no alias exists.
+
+The epoch tag that names every published artifact is `sweepTag(epoch)` in `lib/utils/sweep-tag.ts`: `epoch-<N>:canonical-v1:<fnv1a of "ibrl=<DZ_IBRL_PRIORITY>;plm=<DZ_PUBLIC_LATENCY_MULTIPLIER>">`, with `baselineTag(epoch) = "baseline:" + sweepTag(epoch)`. The fingerprint means a change to either reward param makes every existing alias and sweep marker miss, and the next cron fire republishes under the new tag rather than serving numbers built with the old params.
 
 > Tuning constants (`operator_uptime`, `contiguity_bonus`, `demand_multiplier`) are emitted by every builder, but the two builders intentionally differ on `demand_multiplier`: the canonical builder hardcodes the Foundation-faithful `1.2` (`DEMAND_MULTIPLIER` in `canonical-input-builder.ts`), while the heuristic builder uses `SHAPLEY_PARAMS.demandMultiplier = 1.0` from `lib/constants/config.ts`. The divergence is deliberate — the multiplier normalizes out of the final share proportions — and the canonical values are verified against the Foundation reference on a pinned mainnet epoch.
 
@@ -84,7 +87,7 @@ Every Shapley response carries a `method` string. The table below enumerates the
 
 ## Canonical engine (per-city)
 
-The production solver is the Rust microservice in `services/shapley-rs`, which wraps the `network-shapley` crate. The dependency is pinned in `services/shapley-rs/Cargo.toml` to the public fork `github.com/phaselabscrypto/network-shapley-rs` at a fixed rev (`db60fd3b2e62e223cde440f9b2805a337e4142c1`). LP-solver internals live in that crate; this repo's job is the wire translation, the per-city decomposition, and the caps.
+The production solver is the Rust microservice in `services/shapley-rs`, which wraps the `network-shapley` crate. The dependency is pinned in `services/shapley-rs/Cargo.toml` to the public fork `github.com/phaselabscrypto/network-shapley-rs` at a fixed rev (`bb5a24e034daf9ad6680e393df85eaf6f20d987e`; check `Cargo.toml` for the current pin). LP-solver internals live in that crate; this repo's job is the wire translation, the per-city decomposition, and the caps.
 
 **Per-source-city decomposition.** `compute_per_city` in `services/shapley-rs/src/routes.rs` groups demands by their source city (`demand.start`), runs the engine's **exact** coalition Shapley for each city over the shared topology with that city's demands, and then aggregates across cities by stake weight. Cities are solved sequentially so the engine's per-worker warm-start coalition solver isn't thrashed; each city's own coalition solve is internally parallel. The aggregation (`aggregate_per_city`) computes `operator_value[op] += value * weight` across cities, skips zero-weight cities entirely, and reports a **raw** `share = value / Σ value` — which can be negative or exceed 1 (clamping happens only at reward-leaf conversion, not here).
 
@@ -130,7 +133,16 @@ The pipeline is pinned at two layers: the Rust engine wrapper (per-coalition and
 | `services/shapley-rs/tests/three_operator.rs` | Structural correctness for a 3-operator scenario (all operators present, shares sum to ~1, sensible ordering). Currently `#[ignore]`d — its comment cites upstream's demand-uniformity rule pending a fixture reshape. |
 | `services/shapley-rs/tests/parity_epoch149.rs` | Full-epoch reward-leaf parity: runs the real per-city path over the epoch-149 fixture, converts proportions to on-chain `unit_share`s (`MAX_UNIT_SHARE = 1_000_000_000`) and asserts they equal the actual on-chain leaves. Gated `#[ignore]` (long-running per-city exact solve) and skips when the fixture is absent. Ships with a cheap always-on unit test of the leaf-conversion math. |
 | `services/shapley-rs/tests/dedup_devices.rs` | Canonical per-operator device naming over the HTTP `/shapley` endpoint: unique names succeed (200), duplicate device names are rejected by upstream validation (422). |
-| `services/shapley-rs/tests/smoke.sh` | Deployed-service E2E: `/health`, `/shapley` against the `simple` fixture (1% tolerance), `/link-estimate` returns method `retag-shapley-rs`, `/shapley` three-operator structural check, and a `/health` latency budget. |
+| `services/shapley-rs/tests/link_estimate_http.rs` | The `/link-estimate` wire contract the frontend depends on, including the 12-focus-link sync cap. |
+| `services/shapley-rs/tests/shapley_single_flight.rs` | Concurrent cold `/shapley` requests for one input hash produce exactly one solve; followers wait and never start their own. |
+| `services/shapley-rs/tests/baseline_alias_http.rs` | `GET /shapley/baseline?tag=` and `POST /precompute/baseline` over a mock S3 with no Redis: the probe never computes or enqueues; hit, miss, malformed, and store-failure statuses. |
+| `services/shapley-rs/tests/alias_publication.rs` | End-to-end alias and marker publication through a real worker and Redis (`TEST_REDIS_URL`) with a mock S3: result before alias, marker only after every alias, no publication for explicit operator subsets. |
+| `services/shapley-rs/tests/link_estimate_alias.rs` | `load_link_estimate_alias` separates miss from outage from malformed without Redis or HTTP. |
+| `services/shapley-rs/tests/diff_parity.rs` + `diff_persistence.rs` | Frozen wire parity of the two diff bodies over the committed epoch 204–211 shapes (1e-9 tolerance), and the conditional-write semantics of the shape store: create, conflict, corrupt repair, healthy bytes never overwritten. |
+| `services/shapley-rs/tests/smoke.sh` | Deployed-service E2E: `/health`, `/shapley` against the `simple` fixture (1% tolerance), `/link-estimate` returns method `retag-shapley-rs`, `/shapley` three-operator structural check, `/diff` and `/diff/contributor/tsw` over epochs 204–211, the `/shapley/baseline` miss contract, and a `/health` latency budget. |
+| `scripts/test-precompute-ingest.ts` (`pnpm test:precompute-ingest`) | The cron fire against a stubbed service: one snapshot download feeds sweep, baseline alias, and diff shape; already-swept short-circuit; alias-only publish; budget exhaustion; history repair. |
+| `scripts/test-baseline-probe.ts`, `scripts/test-tracking-route.ts`, `scripts/test-baseline-tag.ts` | The cache-only read routes and the epoch tag: hit, miss, upstream failure, probe timeout, count clamping, tag determinism. |
+| `scripts/test-diff-shape.ts` (`pnpm test:diff-shape`) | The TS extractor still produces the shapes the Rust diff tests assert against; `-- --write` regenerates the fixtures. |
 | `scripts/test-canonical-parity.ts` (`pnpm test:canonical`) | Diffs the TS canonical builder (`canonical-input-builder.ts`) against the Foundation Python reference over all four tables (devices, private_links, public_links, demands), with small float tolerances on derived latency/uptime; exits non-zero on any mismatch. |
 | `scripts/validate-shapley.ts` (`pnpm validate`) | Hits `/api/shapley?epoch=N` across epochs and writes `validation-report.md`: methods used, input sources, per-epoch invariants (shares sum to ~1 within 0.001 — exits non-zero if any fail), cross-epoch stability, and informational drift vs the economic-hub all-time shares. |
 
@@ -145,4 +157,5 @@ The pipeline is pinned at two layers: the Rust engine wrapper (per-coalition and
 - [development.md](./development.md) — local setup
 - [operations.md](./operations.md) — deployment and runbooks
 - [adr/0001-async-compute-queue.md](./adr/0001-async-compute-queue.md) — the async compute queue decision
+- [adr/0004-cache-only-baseline-reads.md](./adr/0004-cache-only-baseline-reads.md) — why reads never compute and baselines are keyed by epoch tag
 - Upstream engine fork: [github.com/phaselabscrypto/network-shapley-rs](https://github.com/phaselabscrypto/network-shapley-rs)

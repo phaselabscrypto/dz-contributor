@@ -43,21 +43,23 @@ The fetcher is shared rather than having `projection` self-call `economic-hub` o
 
 ## 3. Foundation snapshot S3
 
-The DoubleZero Foundation publishes immutable per-epoch JSON snapshots to a public S3 bucket. Each snapshot encodes the full network topology, link attributes, validator stake, and demand scores for that epoch and is the primary input to Shapley value computation and epoch-diff routes.
+The DoubleZero Foundation publishes immutable per-epoch JSON snapshots to a public S3 bucket. Each snapshot encodes the full network topology, link attributes, validator stake, telemetry, and demand scores for that epoch. It is the only input to the published Shapley baselines, the link-value sweeps, and the diff shapes, all of which the cron derives from one download per epoch.
 
 | Fact | Value |
 |---|---|
 | URL template | `https://doublezero-contributor-rewards-mn-beta-snapshots.s3.us-east-1.amazonaws.com/mn-epoch-{N}-snapshot.json` |
-| Constant | `S3_SNAPSHOT_URL_TEMPLATE` in `lib/constants/config.ts` |
+| Constant | `S3_SNAPSHOT_URL_TEMPLATE` in `lib/constants/config.ts` (hardcoded; there is no env override) |
 | Epoch floor | `MIN_DZ_EPOCH = 48` (earliest published epoch) |
-| Epoch discovery | Exponential probe + binary-search via HEAD requests; see `lib/utils/epoch-discovery.ts` |
+| Epoch discovery | HEAD probes doubling from epoch 100 to a 10,000 ceiling, then binary search; returns the latest epoch and the 31 most recent (`getEpochAvailability` in `lib/utils/epoch-discovery.ts`) |
 | Discovery cache | 5 min (`CACHE_TTL = 5 * 60 * 1000` in `epoch-discovery.ts`) |
-| Snapshot size | 68 to 110 MB per epoch (about 90 MB is `dz_telemetry`); the Rust service's diff index streams only the first 3.7 MB, see [shapley-service.md](shapley-service.md#snapshot-diff-index) |
-| Server LRU cache | 8 entries, TTL 5 min (`snapshotCache` in `app/api/snapshot/route.ts`) |
+| Snapshot size | 68 to 115 MB per epoch (about 90 MB is `dz_telemetry`). The canonical Shapley input needs both ends of the file, so there is no partial read; the cron downloads the whole file once per epoch |
+| Download helper | `fetchEpochSnapshot` in `lib/utils/epoch-snapshot.ts`: 120 s timeout (`SNAPSHOT_FETCH_TIMEOUT_MS`), validates the envelope and that `dz_epoch` names the requested epoch; failures map to 404 / 422 / 502 / 504 without echoing the URL |
+| Server LRU cache | 2 entries, TTL 5 min (`snapshotCache` in `app/api/snapshot/route.ts`) |
 | CDN headers | `public, max-age=3600, s-maxage=3600, stale-while-revalidate=86400` |
-| Fetch timeout | 30 s |
-| Consuming routes | `app/api/snapshot/route.ts`, `app/api/epochs/route.ts`; `app/api/diff/route.ts` and `app/api/diff/contributor/[code]/route.ts` proxy to the Rust service, which reads the bucket itself |
-| Failure | 404 propagated when epoch not found; other S3 errors forwarded verbatim |
+| Fetch timeout | 30 s on `/api/snapshot`; 120 s in the cron and the job routes |
+| Consumers | `app/api/link-value/precompute/route.ts` via `lib/utils/precompute-ingest.ts` (one download per epoch → sweep input, baseline alias, diff shape); `app/api/snapshot/route.ts` (raw proxy for the simulate page); `app/api/epochs/route.ts` (HEAD discovery only); `app/api/shapley/simulate/route.ts`, `app/api/shapley/jobs/route.ts`, and `app/api/link-value/jobs/route.ts` on an alias miss (solver input) |
+| Not a consumer | The Rust service. It never reads this bucket; the cron pushes diff shapes to it over `PUT /diff/shape/:epoch` ([ADR 0003](adr/0003-cron-side-snapshot-extraction.md)). `app/api/diff*` and the three cache-only Shapley read routes never download a snapshot |
+| Failure | 404 propagated when epoch not found; other S3 errors forwarded as 502 (or the upstream status on `/api/snapshot`) |
 
 Snapshots for completed epochs are immutable; the aggressive CDN TTL (1 h fresh, 24 h stale-while-revalidate) reflects this. Epoch discovery avoids a hard-coded ceiling by probing S3 directly; see `lib/utils/epoch-discovery.ts` for the algorithm.
 
@@ -123,22 +125,23 @@ Token prices for SOL and 2Z are fetched from the Jupiter Price API v3 to denomin
 
 ## 7. Solana RPC and DZ ledger RPC
 
-Direct on-chain reads require two RPC endpoints: a standard Solana RPC for mainnet account queries, and a separate DZ ledger RPC for reading contributor-rewards records stored on the DZ cluster.
+Direct on-chain reads use two RPC endpoints: a standard Solana RPC for mainnet queries, and a separate DZ ledger RPC for reading contributor-rewards records stored on the DZ cluster.
 
 | Fact | Value |
 |---|---|
 | Solana RPC env var | `SOLANA_RPC_URL` |
-| Solana RPC default | `https://api.mainnet-beta.solana.com` |
-| DZ ledger RPC env var | `DZ_LEDGER_RPC_URL` (required; no default — see note) |
-| Feature gate | `ONCHAIN_ENABLED` (true when `DZ_REGISTRY_PROGRAM_ID` is set, or `ONCHAIN_ENABLED=1`) |
-| Program ID env vars | `DZ_REGISTRY_PROGRAM_ID`, `DZ_REWARDS_PROGRAM_ID` |
-| Record program ID | `dzrecxigtaZQ3gPmt2X5mDkYigaruFR1rHCqztFTvx7` (constant in `lib/onchain/dz-rewards-record.ts`) |
-| Relevant files | `lib/onchain/program-ids.ts`, `lib/onchain/dz-rewards-record.ts` |
-| Consuming routes | `app/api/onchain/topology/route.ts`, `app/api/onchain/validators/route.ts`, `app/api/onchain/contributors/route.ts`, `app/api/onchain/rewards/route.ts`, `app/api/onchain/contributor-rewards/route.ts` |
-| Failure (unconfigured) | `topology` and `validators` pre-flight-check configuration and return 503 with a stable `{ ready: false, reason: "…" }` shape; `contributors`, `rewards`, and `contributor-rewards` attempt the read directly and surface the failure as a 502 |
+| Solana RPC default | `https://api.mainnet-beta.solana.com` (public, rate-limited) |
+| Solana RPC consumers (live) | `app/api/validators/stake/route.ts` (`getVoteAccounts` via `lib/onchain/vote-stake.ts`: filtered lookup by vote pubkey first, a 5-min identity index on a miss; hits cached 60 s, misses 5 min); `app/api/epoch-rate/route.ts` and `app/api/methodology/route.ts` (measured epoch cadence via `lib/utils/epoch-rate.ts`, 1 h); `app/api/health/route.ts` (`getHealth` probe) |
+| DZ ledger RPC env var | `DZ_LEDGER_RPC_URL` (required for the ledger reads; no default — see note) |
+| DZ ledger consumers (live) | `app/api/onchain/contributors/route.ts` (contributor directory), `app/api/onchain/rewards/route.ts` and `app/api/onchain/contributor-rewards/route.ts` (decoded contributor-rewards records, 5-min cache) |
+| Feature gate (stubs only) | `ONCHAIN_ENABLED` (true when `DZ_REGISTRY_PROGRAM_ID` is set, or `ONCHAIN_ENABLED=1`) gates `app/api/onchain/topology/route.ts` and `app/api/onchain/validators/route.ts` |
+| Program ID env vars | `DZ_REGISTRY_PROGRAM_ID`, `DZ_REWARDS_PROGRAM_ID` (pending the Foundation IDL) |
+| Record program ID | `dzrecxigtaZQ3gPmt2X5mDkYigaruFR1rHCqztFTvx7` (constant in `lib/onchain/dz-rewards-record.ts`, not env-overridable) |
+| Relevant files | `lib/onchain/program-ids.ts`, `lib/onchain/client.ts`, `lib/onchain/vote-stake.ts`, `lib/onchain/dz-rewards-record.ts`, `lib/onchain/rewards.ts`, `lib/onchain/contributor-directory.ts` |
+| Failure (unconfigured) | `topology` and `validators` return 503 with a stable `{ ready: false, reason: "…" }` shape; the ledger routes surface a missing `DZ_LEDGER_RPC_URL` as a 502; `validators/stake` answers `{ status: "unavailable" }` at 502 `no-store` when RPC fails |
 | Failure (configured, RPC error) | 502 |
 
-`DZ_LEDGER_RPC_URL` has no built-in default because baking an endpoint value into source would expose a paid API key in the deployed JS bundle. Set it in `.env.local` for development; see `.env.example` for the recommended public endpoint. `DZ_REGISTRY_PROGRAM_ID` and `DZ_REWARDS_PROGRAM_ID` are currently placeholders pending the Foundation publishing the on-chain IDL.
+`DZ_LEDGER_RPC_URL` has no built-in default because baking an endpoint value into source would expose a paid API key in the deployed JS bundle. Set it in `.env.local` for development; see `.env.example` for the recommended public endpoint. `DZ_REGISTRY_PROGRAM_ID` and `DZ_REWARDS_PROGRAM_ID` are currently placeholders pending the Foundation publishing the on-chain IDL. Which `lib/onchain` modules are live and which are scaffolding is tracked in `lib/onchain/README.md`.
 
 ---
 
@@ -149,11 +152,11 @@ Direct on-chain reads require two RPC endpoints: a standard Solana RPC for mainn
 | Fact | Value |
 |---|---|
 | Route | `app/api/health/route.ts` |
-| Probed sources | `malbec/topology`, `malbec/stats`, `malbec/status`, `dz/economic-hub`; conditionally `shapley-service` and `solana-rpc` |
+| Probed sources | `malbec/topology`, `malbec/stats`, `malbec/status`, `dz/economic-hub`; conditionally `shapley-service` (`GET /health`) and `solana-rpc` (JSON-RPC `getHealth`) |
 | Probe timeout | 8 s per source |
 | CDN headers | `public, max-age=15, s-maxage=15, stale-while-revalidate=60` |
 | Response shape | `{ overall, checkedAt, sources: [{ name, host, status, latencyMs, httpStatus?, errorCode? }] }` |
-| `host` field | Hostname only — never includes path, query string, or credentials |
+| `host` field | Hostname only for the public feeds; `(internal)` for the env-configured Shapley service and RPC — never a path, query string, or credential |
 | `errorCode` values | `timeout` \| `network` \| `parse` \| `unknown` (raw error text is discarded) |
 | Status values | `ok` when latency ≤ 3 s and HTTP 2xx; `degraded` when latency > 3 s or HTTP 4xx; `down` on HTTP 5xx or network failure; `disabled` for sources that are not configured (e.g. `shapley-service` without `SHAPLEY_SERVICE_URL`, `solana-rpc` without `SOLANA_RPC_URL`) |
 | UI consumers | `/status` page (`app/status/page.tsx`), sidebar NetworkPulse component |
@@ -171,10 +174,10 @@ Response hardening (security fix H17): full URLs, paths, and auth tokens stay in
 | Malbec status | `https://data.malbeclabs.com/api/status` | 60 s | `app/api/live/status/route.ts` | 502 |
 | Malbec publisher-check | `https://data.malbeclabs.com/api/dz/publisher-check` | 5 min | `app/api/publishers/route.ts` (enrichment only) | Silently omitted; Foundation feed used instead |
 | DZ economic hub | `https://doublezero.xyz/api/economic-hub` | 5 min | `app/api/live/economic-hub/route.ts`, `app/api/economics/projection/route.ts` | 502 |
-| Foundation snapshot S3 | `S3_SNAPSHOT_URL_TEMPLATE` (config.ts) | Immutable per epoch; discovery 5 min | `app/api/snapshot/route.ts`, shapley + diff routes | 404 / upstream status |
+| Foundation snapshot S3 | `S3_SNAPSHOT_URL_TEMPLATE` (config.ts) | Immutable per epoch; discovery 5 min; one cron download per epoch | `app/api/link-value/precompute/route.ts` (cron), `app/api/snapshot/route.ts`, `app/api/epochs/route.ts`, simulate/job routes | 404 / 502 |
 | Foundation multicast validators | `doublezero-foundation-public.s3.us-east-2.amazonaws.com/…/mulitcast_validators/latest.json` | 5 min | `app/api/publishers/route.ts` | 502 if both Foundation + Malbec unreachable |
 | Foundation leader slots | `doublezero-foundation-public.s3.us-east-2.amazonaws.com/…/multicast_validator_leader_slots/{epoch}.json` | 5 min | `app/api/publishers/route.ts` | Best-effort; omitted fields default to Malbec values |
 | Historical fees CSV | `FEE_CONSOLIDATED_URL` (config.ts) | 10 min | `app/api/fees/route.ts` | Upstream status / 500 |
 | Jupiter prices | `https://lite-api.jup.ag/price/v3` | 60 s | `app/api/prices/route.ts`, `lib/utils/fee-parser.ts` | 502 |
-| Solana RPC | `SOLANA_RPC_URL` | On-demand | `app/api/onchain/*` | 503 unconfigured (`topology`/`validators` only) / 502 |
-| DZ ledger RPC | `DZ_LEDGER_RPC_URL` | On-demand | `app/api/onchain/*` | 503 unconfigured (`topology`/`validators` only) / 502 |
+| Solana RPC | `SOLANA_RPC_URL` | 60 s (stake) / 1 h (epoch rate) | `app/api/validators/stake/route.ts`, `app/api/epoch-rate/route.ts`, `app/api/methodology/route.ts`, `app/api/health/route.ts`; stubs `app/api/onchain/{topology,validators}` | 502; 503 for the unconfigured stubs |
+| DZ ledger RPC | `DZ_LEDGER_RPC_URL` | 5 min | `app/api/onchain/{contributors,rewards,contributor-rewards}` | 502 |

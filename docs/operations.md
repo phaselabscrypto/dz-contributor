@@ -61,7 +61,7 @@ pnpm run backfill:diff -- --dry-run     # report what is missing
 pnpm run backfill:diff                  # fill it, newest first
 ```
 
-It needs `SHAPLEY_SERVICE_URL`, `SHAPLEY_API_TOKEN` and `SHAPLEY_INGEST_TOKEN`. Each epoch is a ~110 MB download, so the full history is a few hours. Safe to interrupt and re-run: writes are create-only, so an epoch already stored answers `409` and is counted as done. Run it after the first deploy and after any `DIFF_SHAPE_VERSION_PREFIX` bump.
+It needs `SHAPLEY_SERVICE_URL`, `SHAPLEY_API_TOKEN` and `SHAPLEY_INGEST_TOKEN`. Each epoch is a ~110 MB download, so the full history is a few hours. Safe to interrupt and re-run: writes are create-only, so an epoch already stored answers `409` and is counted as done. Run it after the first deploy and after any bump of `DIFF_SHAPE_VERSION_PREFIX` (a constant in `src/diff_store.rs`, currently `diff/v1`, not an env var).
 
 ### Backfilling baseline aliases
 
@@ -85,12 +85,12 @@ A persisted shape is trusted for the life of the process: `DiffStore` keeps
 every shape it has read in memory with no TTL, so deleting
 `diff/v1/shape-{epoch:06}.json` from the result-cache bucket does not clear it
 from a running `api` pod. To retire a shape, delete the object and restart the
-pods that hold it, or bump `DIFF_SHAPE_VERSION_PREFIX` and refill when every
-shape is suspect.
+pods that hold it, or bump the `DIFF_SHAPE_VERSION_PREFIX` constant and refill
+when every shape is suspect.
 
 ### REDIS_URL
 
-`REDIS_URL` is optional for the `api` role. Without it, `/jobs/*` endpoints return `503 { "error": "async jobs disabled" }`. Synchronous compute endpoints (`/shapley`, `/simulate`, `/link-estimate`) are unaffected.
+`REDIS_URL` is optional for the `api` role. Without it, the `/jobs/*` and `/precompute*` endpoints return `503 { "error": "async jobs disabled" }`, so the cron cannot publish baselines or sweep link values. Synchronous compute endpoints (`/shapley`, `/simulate`, `/link-estimate`) and the reads (`/shapley/baseline`, `/diff*`) are unaffected.
 
 For the `worker` role `REDIS_URL` is required: the worker calls `worker::run` which calls `.ok_or_else(|| anyhow!("worker role requires REDIS_URL"))` and exits immediately on startup if the store is absent.
 
@@ -106,7 +106,7 @@ For the `worker` role `REDIS_URL` is required: the worker calls `worker::run` wh
 
 ### S3-compatible result cache
 
-Set `S3_CACHE_BUCKET` to enable. When `S3_CACHE_ENDPOINT` is also set, the client uses that URL with path-style addressing (virtual-host `<bucket>.<host>` is not used). Credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` via the standard AWS SDK credential chain.
+Set `S3_CACHE_BUCKET` to enable. When `S3_CACHE_ENDPOINT` is also set, the client uses that URL with path-style addressing (virtual-host `<bucket>.<host>` is not used). Credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` via the standard AWS SDK credential chain. In production this bucket is not optional: it holds the solver results, the epoch baseline aliases and sweep markers (`shapley/v3/publication/v1/`) that every user-facing Shapley read depends on, and the diff shapes (`diff/v1/`) behind `/changelog`. Without it every baseline read is `404 not-cached`, diff writes answer 503, and results do not survive a pod restart. Client timeouts are fixed in `src/cache.rs`: 5 s connect, 20 s read, 30 s per attempt, 90 s per operation.
 
 ### Connecting the frontend
 
@@ -118,7 +118,7 @@ The frontend's `/api/diff` and `/api/diff/contributor/[code]` routes are thin pr
 
 ## 3. Environment variables — frontend (Next.js)
 
-Consumed by the Next.js server-side code. Set via `vercel env add <NAME> production` (or in `.env.local` for development). Source: `.env.example` and the consuming modules noted below. (`SHAPLEY_API_TOKEN`, `PYTHON_SHAPLEY_URL`, and `CRON_SECRET` are consumed by code but not listed in `.env.example`.)
+Consumed by the Next.js server-side code. Set via `vercel env add <NAME> production` (or in `.env.local` for development). Source: `.env.example` and the consuming modules noted below. (`PYTHON_SHAPLEY_URL` is a legacy alias consumed by code but deliberately not listed in `.env.example`.) A production deploy needs `SHAPLEY_SERVICE_URL`, `SHAPLEY_API_TOKEN`, `SHAPLEY_INGEST_TOKEN`, and `CRON_SECRET`; everything else degrades gracefully.
 
 | Variable | Default | Effect | Behavior when unset |
 |---|---|---|---|
@@ -126,18 +126,20 @@ Consumed by the Next.js server-side code. Set via `vercel env add <NAME> product
 | `PYTHON_SHAPLEY_URL` | — | Legacy alias for `SHAPLEY_SERVICE_URL` (previous Python deployment). Checked in `lib/constants/config.ts` only when `SHAPLEY_SERVICE_URL` is unset. | Same as `SHAPLEY_SERVICE_URL` unset. |
 | `SHAPLEY_API_TOKEN` | — | Bearer token sent by the frontend to the Rust service (`lib/utils/shapley-remote.ts`). Never exposed to the browser. | Requests to the Rust service are sent without an `Authorization` header. If the service is configured fail-closed (no `SHAPLEY_ALLOW_UNAUTHENTICATED=1`), all compute calls return `401`. |
 | `SHAPLEY_INGEST_TOKEN` | — | Second token the cron sends as `X-Ingest-Token` when writing a diff record, publishing a baseline, or submitting a sweep. Must match the service's value. Never exposed to the browser. | Shape writes, baseline publishes and sweep submissions fail locally with `503` and are reported per fire. |
+| `DZ_IBRL_PRIORITY` | `20.0` | Objective weight of unicast (validator↔validator) demands in the canonical Shapley input (`CANONICAL_SHAPLEY_PARAMS` in `lib/constants/config.ts`). Part of the epoch tag fingerprint (`sweepTag` in `lib/utils/sweep-tag.ts`), so changing it makes every published alias and sweep marker miss until the cron republishes. | DoubleZero-current default (post-PR #369). |
+| `DZ_PUBLIC_LATENCY_MULTIPLIER` | `1.25` | Scale applied to public-internet link latency in the canonical input. Also part of the epoch tag fingerprint. | DoubleZero-current default. |
 | `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana mainnet RPC endpoint used by on-chain routes (`lib/onchain/program-ids.ts`). The public default is rate-limited; a dedicated provider (e.g. Helius) is recommended for production. | Uses the public Solana mainnet RPC. |
 | `DZ_LEDGER_RPC_URL` | — | RPC endpoint for the DoubleZero ledger (a Solana sidechain). Required for any `/api/onchain/*` route. No default in code — a previous default embedded a paid API key in source. | On-chain routes that need the DZ ledger will fail; `ONCHAIN_ENABLED` gates whether they are attempted. |
 | `DZ_REGISTRY_PROGRAM_ID` | `""` | DZ master registry program (Metro/Device/Link/Contributor accounts). Pending DZ Foundation IDL. Setting this implicitly enables `ONCHAIN_ENABLED` (`lib/onchain/program-ids.ts`). | On-chain routes return 503. |
 | `DZ_REWARDS_PROGRAM_ID` | `""` | DZ revenue-distribution program on Solana mainnet. Known address: `dzrevZC94tBLwuHw1dyynZxaXTWyp7yocsinyEVPtt4`. | On-chain rewards routes are unavailable. |
-| `DZ_RECORD_PROGRAM_ID` | `dzrecxigtaZQ3gPmt2X5mDkYigaruFR1rHCqztFTvx7` | DZ record program on the DZ ledger (contributor-rewards records). Default is hardcoded in `lib/onchain/dz-rewards-record.ts`. Override only if targeting a fork or test deployment. | Uses the hardcoded production default. |
-| `DZ_REWARDS_ACCOUNTANT` | `acCSLNUiAECGPGayZgBHHDuZW4hLkM7L6hxphXbogBR` | On-chain authority that writes contributor-rewards records; also the base for `create_with_seed` derivation. Default hardcoded in the record module. | Uses the hardcoded production default. |
-| `DZ_CONTRIBUTOR_REWARDS_PREFIX` | `dz_contributor_rewards` | Seed prefix for deriving each epoch's reward record address. Confirmed by DZ Foundation 2026-05-14. Default hardcoded in the record module. | Uses the hardcoded default. |
+| `DZ_RECORD_PROGRAM_ID` | `dzrecxigtaZQ3gPmt2X5mDkYigaruFR1rHCqztFTvx7` | Listed in `.env.example` for reference only. The DZ record program ID is a constant in `lib/onchain/dz-rewards-record.ts`; **the code does not read this variable**. Change the constant to target a fork. | n/a |
+| `DZ_REWARDS_ACCOUNTANT` | `acCSLNUiAECGPGayZgBHHDuZW4hLkM7L6hxphXbogBR` | Reference only. The rewards-accountant pubkey (the `create_with_seed` base) is a constant in the record module; **not read from env**. | n/a |
+| `DZ_CONTRIBUTOR_REWARDS_PREFIX` | `dz_contributor_rewards` | Reference only. The seed prefix (confirmed by DZ Foundation 2026-05-14) is a constant in the record module; **not read from env**. | n/a |
 | `ONCHAIN_ENABLED` | unset (effectively disabled) | Master switch for `/api/onchain/*` routes. Derived in `lib/onchain/program-ids.ts` as `Boolean(DZ_REGISTRY_PROGRAM_ID) \|\| process.env.ONCHAIN_ENABLED === "1"` — only the literal string `"1"` enables it; setting `DZ_REGISTRY_PROGRAM_ID` enables it implicitly. | On-chain routes return 503 with a stable error shape. |
 | `DZ_ACCOUNT_HAS_DISCRIMINATOR` | `"1"` | Whether on-chain accounts carry an 8-byte Anchor discriminator prefix before the borsh payload. Set to `"0"` for raw borsh structs. | Assumes discriminator present (strip 8 bytes before decode). |
 | `CRON_SECRET` | — | Secret Vercel injects into cron invocations as `Authorization: Bearer ${CRON_SECRET}`. Required for the precompute cron (`/api/link-value/precompute`); checked with the shared constant-time helper in `lib/utils/cron-auth.ts`. | The precompute route returns `503 { "error": "CRON_SECRET not configured" }` on every invocation, so no epoch is ever swept or published, and the baseline route answers `404 not-cached` until a manual backfill. |
 | `NEXT_PUBLIC_SITE_URL` | `https://dz-contributor.vercel.app` | Used by `app/layout.tsx` for `metadataBase` and OG image canonical URLs. | Falls back to the Vercel project default URL. |
-| `NEXT_PUBLIC_SENTRY_DSN` | — | Sentry DSN for error tracking. The SDK calls in `lib/observability.ts` are no-ops until activated. | Errors log to console in dev; swallowed in production. |
+| `NEXT_PUBLIC_SENTRY_DSN` | — | Reserved for Sentry. `lib/observability.ts` names it in a comment but does not read it; wiring `@sentry/nextjs` is a follow-up. | Errors and events log to console in dev; swallowed in production. |
 
 ---
 
@@ -151,14 +153,17 @@ Consumed by `services/shapley-rs/src/main.rs`, `src/cache.rs`, `src/jobs.rs`, an
 | `RUST_LOG` | `info` (set in the Dockerfile) | Tracing filter for `tracing_subscriber::EnvFilter`. JSON-formatted output. | When the variable is entirely absent (e.g. running outside the container), the code falls back to `info,tower_http=debug` (`main.rs`). |
 | `SHAPLEY_API_TOKEN` | — | Bearer token required on compute endpoints. Constant-time comparison in `main.rs` `require_auth`. | Compute endpoints are not served unless `SHAPLEY_ALLOW_UNAUTHENTICATED=1` is also set (fail-closed). |
 | `SHAPLEY_ALLOW_UNAUTHENTICATED` | — | Set to `"1"` to serve compute endpoints without a token. Intended for local development only; a warning is logged at startup. | Compute endpoints require `SHAPLEY_API_TOKEN` (or are not mounted if neither is set). |
-| `CORS_ORIGIN` | — | Restrict cross-origin requests to a single allowed origin (e.g. `https://your-app.example.com`). `main.rs` `build_cors()`. | No cross-origin requests are allowed (same-origin only). The frontend reaches the service server-side so CORS does not affect it. |
-| `REDIS_URL` | — | Connection URL for the Redis job store (`jobs::store_from_env()`). Pool size 16, 5 s wait timeout. | `/jobs/*` endpoints return `503`. Worker role exits immediately on startup. |
-| `S3_CACHE_BUCKET` | — | Bucket name for the S3-compatible result cache (`cache::S3Cache::new()`). Also holds the `diff/v1/` snapshot diff index. | Cache layer is a no-op; results are not persisted across restarts. Diff writes and repair discovery return 503; no public-bucket rebuild runs. |
+| `CORS_ORIGIN` | — | Restrict cross-origin requests to a single allowed origin (e.g. `https://your-app.example.com`). `main.rs` `build_cors()`. An unparseable value panics at startup. | No cross-origin requests are allowed (same-origin only). The frontend reaches the service server-side so CORS does not affect it. |
+| `REDIS_URL` | — | Connection URL for the Redis job store (`jobs::store_from_env()`). Pool size 16, 5 s wait timeout. Empty string counts as unset. | `/jobs/*` and `/precompute*` endpoints return `503`, so no baseline can be published. Worker role exits immediately on startup. |
+| `S3_CACHE_BUCKET` | — | Bucket name for the S3-compatible result cache (`cache::S3Cache::new()`): solver results, baseline and link-estimate aliases, sweep markers, and the `diff/v1/` diff index. | Cache layer is a no-op; results are not persisted across restarts. `GET /shapley/baseline` always answers `404 not-cached`, sweep status is always incomplete, and `PUT /diff/shape` / `GET /diff/missing` return 503. |
+| `LINK_ESTIMATE_SOLVE_THREADS` | `4` | Size of the scoped rayon pool used by `/link-estimate` solves (sync and worker), clamped to `1..=available_parallelism()`. Each rayon worker holds a resident HiGHS model; the global default of 16 threads exhausted a 16 GiB worker pod. | Four solver threads. |
 | `S3_CACHE_ENDPOINT` | — | Custom endpoint URL for an S3-compatible object store. When set, the client uses path-style addressing (`force_path_style = true`). | AWS S3 is used with virtual-host addressing (standard back-compat mode). |
 | `AWS_REGION` | `us-east-1` | AWS region for the S3 client (`cache.rs`). | Defaults to `us-east-1`. |
 | `AWS_ACCESS_KEY_ID` | — | S3 credentials via the standard AWS SDK credential chain. | SDK falls back to IAM role / instance metadata / env chain. Required when not running on AWS infrastructure with attached roles. |
 | `AWS_SECRET_ACCESS_KEY` | — | Paired with `AWS_ACCESS_KEY_ID`. | See above. |
-| `SHAPLEY_INGEST_TOKEN` | — | Second bearer token, required ON TOP of `SHAPLEY_API_TOKEN` on `PUT /diff/shape/:epoch`, `POST /precompute/link-estimates` and `POST /precompute/baseline`, sent as `X-Ingest-Token`. Constant-time comparison in `main.rs` `require_ingest_auth`. | Ingest and trusted-sweep routes answer `503`. Reads keep working. Unlike the compute token, unset does NOT mean open. |
+| `SHAPLEY_INGEST_TOKEN` | — | Second bearer token, required ON TOP of `SHAPLEY_API_TOKEN` on `PUT /diff/shape/:epoch`, `POST /precompute/link-estimates` and `POST /precompute/baseline`, sent as `X-Ingest-Token`. Constant-time comparison in `main.rs` `require_ingest_auth`. Empty string counts as unset. | Ingest and trusted-sweep routes answer `503` and a warning is logged at startup. Reads keep working. Unlike the compute token, unset does NOT mean open. |
+
+Test-only variables: `TEST_REDIS_URL` (an empty Redis database for `tests/alias_publication.rs`; CI sets `redis://127.0.0.1:6379/13`) and `TEST_S3_ENDPOINT` / `TEST_S3_BUCKET` (the ignored gateway acceptance test in `tests/diff_persistence.rs`).
 
 ---
 
@@ -263,7 +268,7 @@ REDIS_URL=redis://:<password>@redis.example.com:6379 scripts/queue-clear.sh --su
 
 ### Cache warming
 
-The `/api/link-value/precompute` cron (every 6 hours) is the primary cache-warming mechanism. After each new epoch appears, the sweep enqueues per-contributor link-estimate jobs; once all are S3-cached, a cron fire can skip snapshots when its marker is present and its shape window has no gaps. To trigger a manual backfill for a specific epoch:
+The `/api/link-value/precompute` cron (every 6 hours) is the only cache-warming mechanism; no user request ever computes a baseline or a link estimate. After each new epoch appears, one fire downloads the snapshot, enqueues the sweep (per-contributor link-estimate jobs), publishes the epoch baseline alias, and writes the diff shape. Once the sweep marker, the alias, and the shape all exist, a fire returns `already-swept` without a download. The fire's JSON body reports each phase (`sweep`, `baseline`, `shape`, `repairs`, `errors`), so a failing phase shows up in the Vercel cron logs. To trigger a manual backfill for a specific epoch:
 
 ```bash
 curl -H "Authorization: Bearer <CRON_SECRET>" \
@@ -273,6 +278,8 @@ curl -H "Authorization: Bearer <CRON_SECRET>" \
 Poll `GET {shapley-service}/jobs/{sweep_job_id}` for the sweep summary.
 
 ### Alias publication rollout
+
+This runbook records the September 2026 rollout of trusted alias publication (PR 24) and doubles as the procedure for the next publication-contract change or object-gateway migration.
 
 Before deployment, verify conditional writes on the actual gateway. Provision a disposable bucket named `pr24-canary-<UUID>` and set `TEST_S3_ENDPOINT` and `TEST_S3_BUCKET`. Use test credentials through the environment. From `services/shapley-rs`, run:
 

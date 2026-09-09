@@ -15,9 +15,12 @@ into production API routes and the site UI depends on them.
 | `dz-rewards-record.ts` | `RecordData` header + borsh `ShapleyOutputStorage` payload | Decoded against live epoch 117; matches Foundation CLI bit-for-bit. See `scripts/verify-derive-and-decode.ts`. |
 | `rewards.ts` | All contributor-rewards records on the DZ ledger (`getProgramAccounts` + memcmp filter on authority) | Discovery + decode verified for 3+ epochs. See `scripts/decode-live-rewards.ts`. |
 | `contributor-directory.ts` | All `AccountType::Contributor` accounts from the DZ serviceability program | Cross-checked against the gist's known reward keys. All 14 contributors resolve correctly. |
+| `vote-stake.ts` | Activated stake for any Solana vote account or node identity (`getVoteAccounts`, filtered lookup first, a 5-min identity index on a miss) | Drives `/api/validators/stake` and the earnings estimate on `/validators`; covered by `scripts/test-validator-stake.ts` (`pnpm test:stake`). |
+| `client.ts` | Hand-rolled Solana JSON-RPC client with retries, timeouts, error categorization, and a small TTL cache (`getVoteAccounts`, `getEpochInfo`, `getSlot`, `getBlockTime`, `getProgramAccounts`, `getAccountInfo`) | Live behind `vote-stake.ts` and the measured epoch cadence in `lib/utils/epoch-rate.ts` (`/api/epoch-rate`, `/api/methodology`). Uses `SOLANA_RPC_URL`. |
 
-These modules use `@solana/web3.js Connection` directly, require
-`DZ_LEDGER_RPC_URL` to be set, and surface clear errors when it's not.
+The three DZ-ledger modules use `@solana/web3.js Connection` directly, require
+`DZ_LEDGER_RPC_URL` to be set, and surface clear errors when it's not. The
+mainnet readers use `SOLANA_RPC_URL` (public default, rate-limited).
 
 ## ⚠️ Scaffolding (stubbed, pending DZ IDL)
 
@@ -31,7 +34,6 @@ Every call currently throws `OnchainNotConfigured` or returns
 | `decoders.ts` | Metro / Device / Link / Contributor records via Anchor IDL | DZ Q6 — needs the IDL JSON dropped at `lib/onchain/idl/dz-registry.json` and `idl-registry.ts` swapped from `stubRegistry` → `anchorRegistry`. |
 | `topology.ts` | Full network topology from on-chain registry | Same — depends on `decoders.ts`. |
 | `validators.ts` | Per-epoch validator payout history (SOL) | DZ Q6 — needs `DZ_REWARDS_PROGRAM_ID` set + the rewards-program IDL. |
-| `client.ts` | Hand-rolled JSON-RPC client used only by `topology.ts` | Kept thin until the IDL lands; will likely be replaced by `@solana/web3.js` at that point. |
 
 API routes that consume these modules (`/api/onchain/topology`,
 `/api/onchain/validators`) are gated behind `ONCHAIN_ENABLED` env var

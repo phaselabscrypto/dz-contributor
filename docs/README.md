@@ -13,9 +13,13 @@ Architecture and operations documentation for DZ Contributor Rewards — a Next.
 | [development.md](./development.md) | Local setup (frontend-only and full-stack), the scripts inventory, the test matrix, and repo conventions. |
 | [operations.md](./operations.md) | Deployment (Vercel + platform-generic container), the full environment-variable reference for both sides, CI workflows, rate limiting, security headers, and queue admin tooling. |
 | [adr/0001-async-compute-queue.md](./adr/0001-async-compute-queue.md) | Why long Shapley solves run as queued jobs on Redis Streams with an always-warm worker pool, and the delivery/cancel/idempotency contract that decision committed to. |
+| [adr/0002-snapshot-diff-index.md](./adr/0002-snapshot-diff-index.md) | Why the epoch diff is served from immutable per-epoch records in the Rust service's bucket rather than from snapshot downloads or a database. The ingest half is superseded by ADR 0003. |
+| [adr/0003-cron-side-snapshot-extraction.md](./adr/0003-cron-side-snapshot-extraction.md) | Why the Vercel cron extracts each epoch's diff shape from the snapshot it already downloads and pushes it over `PUT /diff/shape`, so the service needs no egress to the public bucket. |
+| [adr/0004-cache-only-baseline-reads.md](./adr/0004-cache-only-baseline-reads.md) | Why browser-driven Shapley reads never compute: baselines are published by the cron under an epoch tag and the read routes answer `not-cached` on a miss. |
 
 ## Conventions
 
 - Code is referenced by file path (e.g. `lib/utils/shapley-remote.ts`), never line numbers — paths stay greppable as the code moves.
 - Diagrams are [Mermaid](https://mermaid.js.org/) and render natively on GitHub.
 - Where a source comment and the shipped code disagree, these docs document the **code** and call out the stale comment.
+- Other documentation in the repo: the [Rust service README](../services/shapley-rs/README.md) (endpoints, local Redis/MinIO setup, deploy), the [on-chain reader status](../lib/onchain/README.md) (which `lib/onchain` modules are live), and [`.env.example`](../.env.example) (every frontend variable with its fallback).
