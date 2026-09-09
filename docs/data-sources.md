@@ -53,10 +53,11 @@ The DoubleZero Foundation publishes immutable per-epoch JSON snapshots to a publ
 | Epoch discovery | Exponential probe + binary-search via HEAD requests; see `lib/utils/epoch-discovery.ts` |
 | Discovery cache | 5 min (`CACHE_TTL = 5 * 60 * 1000` in `epoch-discovery.ts`) |
 | Snapshot size | 70-110 MB per epoch, measured (`lib/constants/config.ts`) |
-| Server LRU cache | 8 entries, TTL 5 min (`snapshotCache` in `app/api/snapshot/route.ts`) |
+| Server LRU cache | 2 entries, TTL 5 min (`snapshotCache` in `app/api/snapshot/route.ts`); each entry is a ~110 MB parse |
 | CDN headers | `public, max-age=3600, s-maxage=3600, stale-while-revalidate=86400` |
-| Fetch timeout | 30 s in `app/api/snapshot/route.ts`; 120 s elsewhere (`SNAPSHOT_FETCH_TIMEOUT_MS`, `lib/constants/config.ts`), used by `lib/utils/epoch-shapley.ts`, `app/api/shapley/simulate/route.ts`, `app/api/shapley/jobs/route.ts`, and `app/api/link-value/precompute/route.ts` |
-| Consuming routes | `app/api/snapshot/route.ts`, `app/api/epochs/route.ts`, `app/api/shapley/route.ts` (via `lib/utils/epoch-shapley.ts`), `app/api/shapley/baseline/route.ts` (via `lib/utils/epoch-shapley.ts`), `app/api/shapley/precompute/route.ts` (via `lib/utils/epoch-shapley.ts`), `app/api/shapley/simulate/route.ts`, `app/api/shapley/jobs/route.ts`, `app/api/link-value/precompute/route.ts`, `app/api/diff/route.ts`, `app/api/diff/contributor/[code]/route.ts` |
+| Fetch timeout | 30 s in `app/api/snapshot/route.ts`; 120 s elsewhere (`SNAPSHOT_FETCH_TIMEOUT_MS`, `lib/constants/config.ts`), used by `lib/utils/epoch-snapshot.ts`, `app/api/shapley/simulate/route.ts`, `app/api/shapley/jobs/route.ts`, and `app/api/link-value/precompute/route.ts` |
+| Consuming routes | `app/api/link-value/precompute/route.ts` via `lib/utils/precompute-ingest.ts` (one download per epoch, feeding the sweep input, the baseline alias, and the diff shape), `app/api/snapshot/route.ts`, `app/api/epochs/route.ts` (HEAD discovery only), and the simulate and job routes on an alias miss |
+| Not consumers | The Rust service, `app/api/diff*`, and the three cache-only Shapley read routes. The cron pushes diff shapes to the service over `PUT /diff/shape/:epoch` |
 | Failure | 404 propagated when epoch not found; other S3 errors forwarded verbatim |
 
 Snapshots for completed epochs are immutable; the aggressive CDN TTL (1 h fresh, 24 h stale-while-revalidate) reflects this. Epoch discovery avoids a hard-coded ceiling by probing S3 directly; see `lib/utils/epoch-discovery.ts` for the algorithm.
@@ -142,24 +143,8 @@ Direct on-chain reads use two RPC endpoints: a standard Solana RPC for mainnet a
 
 ---
 
-## 8. Canonical Shapley inputs (optional)
 
-When the Foundation ships frozen per-epoch CSV inputs, the app can consume them directly instead of deriving inputs from the snapshot blob.
-
-| Fact | Value |
-|---|---|
-| Env var | `DZ_CANONICAL_INPUTS_URL` |
-| URL pattern | e.g. `https://…/epoch-{N}/`, where `{N}` is replaced with the epoch number |
-| Files fetched | `private_links.csv`, `devices.csv`, `public_links.csv`, `demand.csv` |
-| Module | `lib/utils/canonical-inputs.ts` |
-| Consuming routes | `app/api/shapley/route.ts` (highest-priority input source when set) |
-| Failure | Returns `null`; route falls back to snapshot-derived inputs (labelled `inputSource: "canonical-snapshot"` or `"snapshot-heuristic"` in response) |
-
-When `DZ_CANONICAL_INPUTS_URL` is unset, all Shapley routes derive inputs from the Foundation S3 snapshot (source 3). For the full input-construction pipeline see [shapley-pipeline.md](shapley-pipeline.md).
-
----
-
-## 9. Health probing
+## 8. Health probing
 
 `/api/health` probes all configured upstreams in parallel and exposes a summary for the `/status` page and the sidebar network-pulse indicator.
 
@@ -197,4 +182,3 @@ Response hardening: full URLs, paths, and auth tokens stay inside the probe clos
 | DZ ledger RPC | `DZ_LEDGER_RPC_URL` | On-demand | `app/api/onchain/*` | 503 unconfigured (`topology`/`validators` only) / 502 |
 | Validator stake lookup | `SOLANA_RPC_URL` | 60 s hit / 5 min miss | `app/api/validators/stake/route.ts` | 400/404 on bad input; 502 on RPC failure; never 503 |
 | Measured epoch rate | `SOLANA_RPC_URL` | 1 h route; 6 h measurement | `app/api/epoch-rate/route.ts` | Always 200 (falls back to a real measurement) |
-| Canonical Shapley inputs | `DZ_CANONICAL_INPUTS_URL` | On-demand | `app/api/shapley/route.ts` | Falls back to snapshot inputs |

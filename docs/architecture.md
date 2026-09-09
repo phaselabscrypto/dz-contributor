@@ -64,7 +64,7 @@ All external feeds are reached **server-side** from the API routes; the browser 
 
 ### Pages (`app/**/page.tsx`)
 
-Sixteen routes, all under the sidebar shell in `app/layout.tsx`. Most pages are thin server components that render a `"use client"` page-client which mounts the SWR hooks.
+Fifteen routes, all under the sidebar shell in `app/layout.tsx`. Most pages are thin server components that render a `"use client"` page-client which mounts the SWR hooks.
 
 | Route | Source | Purpose |
 |---|---|---|
@@ -83,7 +83,6 @@ Sixteen routes, all under the sidebar shell in `app/layout.tsx`. Most pages are 
 | `/rewards` | `app/rewards/page.tsx` | Historical per-epoch DZ fee revenue, shown in SOL |
 | `/changelog` | `app/changelog/page.tsx` | Cross-epoch topology diff |
 | `/status` | `app/status/page.tsx` | Source-feed health table |
-| `/methodology` | `app/methodology/page.tsx` | Every formula, source, and method label documented inline |
 
 ### Components (`components/`)
 
@@ -110,11 +109,10 @@ Client data is fetched with SWR. The shared config (`lib/hooks/use-live.ts`) set
 |---|---|---|
 | `useLiveTopology` / `useLiveStats` / `useLiveStatus` | `/api/live/{topology,stats,status}` | 60 s |
 | `useEconomicHub` | `/api/live/economic-hub` | 5 min |
-| `useBaselineShapley` | `/api/shapley/baseline` | 5 min |
+| `useBaselineShapley` | `/api/shapley/baseline` | 5 min; a `404 not-cached` body is data, not an error |
 | `usePoolProjection` | `/api/economics/projection` | 5 min |
-| `useShapleyTracking` | `/api/shapley/tracking` | 30 min (5 min dedupe) |
+| `useShapleyTracking` | `/api/shapley/tracking` | 30 min (5 min dedupe); a `404 not-cached` body is data, not an error |
 | `useHealth` | `/api/health` | 30 s |
-| `useShapleyValues` (`lib/hooks/use-shapley.ts`) | `/api/shapley?epoch=N` | on-demand (5 min dedupe) |
 | `useEpochs` / `useSnapshot` (`lib/hooks/use-epochs.ts`, `use-snapshot.ts`) | `/api/epochs`, `/api/snapshot` | on-demand (5 min / 1 min dedupe) |
 | `useFees` / `usePrices` / `usePublishers` / `useLinks` | `/api/{fees,prices,publishers}` | per-hook |
 | `useEpochRate` (`lib/hooks/use-epoch-rate.ts`) | `/api/epoch-rate` | on-demand; `revalidateOnFocus: false`, 1 h dedupe; returns a fallback rate instead of a loading state |
@@ -124,10 +122,11 @@ Client data is fetched with SWR. The shared config (`lib/hooks/use-live.ts`) set
 
 ### API routes (`app/api/**/route.ts`)
 
-There are **32** `route.ts` files. They fall into four behavioral groups:
+There are **31** `route.ts` files. They fall into five behavioral groups:
 
 - **Proxy / aggregate**: fetch an upstream server-side, cache, and return JSON. Examples: `live/*`, `epochs`, `snapshot`, `fees`, `prices`, `publishers`, `economics/projection`, `epoch-rate`, `health`, `diff`, `diff/contributor/[code]`.
-- **Compute**: build a Shapley input and call the Rust service, or run a non-trivial on-chain lookup: `shapley`, `shapley/baseline`, `shapley/simulate`, `shapley/tracking`, `shapley/jobs` (+ `[id]`), `shapley/precompute`, `link-value/jobs` (+ `[id]`), `link-value/precompute`, `validators/stake`. Seven of these carry `RATE_LIMIT_HEAVY`; `validators/stake` carries `RATE_LIMIT_STANDARD` instead; `link-value/precompute` has no IP rate limit and relies on its `CRON_SECRET` check. Two more `RATE_LIMIT_HEAVY` routes, `diff` and `diff/contributor/[code]`, live in the proxy group above (see [Security posture](#security-posture-summary)).
+- **Compute**: talk to the Rust service. The cache-only readers `shapley`, `shapley/baseline`, and `shapley/tracking` probe a published epoch alias and never solve. The solvers `shapley/simulate`, `shapley/jobs` (+ `[id]`), and `link-value/jobs` (+ `[id]`) do. `diff` and `diff/contributor/[code]` proxy to the service's `/diff*` endpoints, which answer from the per-epoch index.
+- **Cron**: `link-value/precompute`, the only route that asks the service to compute, gated by `CRON_SECRET`.
 - **On-chain**: `onchain/{topology,validators}` pre-flight-check configuration and return `503` with a stable `{ ready: false, reason }` shape while the registry account layouts are unwritten; `onchain/{contributors,rewards,contributor-rewards}` read live from the DZ ledger and return a `502` on failure instead (see [`lib/onchain`](#libonchain)).
 - **Meta**: `methodology` (machine-readable formula/source manifest) and `vitals` (Web Vitals sink; always `204`, logs only outside production).
 
@@ -135,10 +134,12 @@ There are **32** `route.ts` files. They fall into four behavioral groups:
 
 The builders, solver clients, and caches that the routes compose:
 
-- **Input builders**: `canonical-input-builder.ts` (bit-comparable to the Foundation reference), `shapley-input-builder.ts` (heuristic fallback), `shapley-input-modifier.ts` (applies simulate edits). `snapshot-parser.ts` + `snapshot-diff.ts` parse and diff S3 snapshots.
-- **Solver clients**: `shapley-remote.ts` is the single source of truth for talking to the Rust service (compute, simulate, job start/poll/cancel, precompute sweep). `shapley-solver.ts` is the in-process TypeScript solver used only in local dev. `epoch-shapley.ts` wraps both behind the per-epoch LRU shared by `/api/shapley` and `/api/shapley/baseline`, and stamps the `local-ts-heuristic-DEV-ONLY` label when `SHAPLEY_SERVICE_URL` is unset.
+- **Snapshot access**: `epoch-discovery.ts` (HEAD-probe discovery of the latest epoch, 5 min cache), `epoch-snapshot.ts` (`fetchEpochSnapshot`: one validated download with a 120 s timeout and epoch-mismatch and envelope checks), `snapshot-parser.ts` (parses a snapshot into the UI model).
+- **Input builder**: `canonical-input-builder.ts`, bit-comparable to the Foundation reference and the only builder on the published-baseline path. `shapley-input-modifier.ts` applies simulate edits.
+- **Solver client**: `shapley-remote.ts` is the single source of truth for talking to the Rust service: compute, simulate, job start/poll/cancel, the by-tag link-estimate shortcut, sweep and baseline publication, diff-shape writes and the missing-shape probe, the baseline alias probe, and the two diff reads. `baseline-probe.ts` turns alias probes into the `EpochBaseline` and `not-cached` shapes the three read routes return; `tracking-series.ts` pivots N baselines into the tracking series.
+- **Cron ingest**: `precompute-ingest.ts` (`runPrecomputeIngest`, the whole fire under a 270 s work budget), `sweep-tag.ts` (`sweepTag(epoch)` and `baselineTag(epoch)`, the epoch tags that name aliases and markers), `diff-shape.ts` (`extractDiffShape`, the lean per-epoch record the changelog is served from), `diff-repair-schedule.ts` (which historical shape gaps a fire repairs), `diff-window.ts` (window validation mirrored from the Rust service), `cron-auth.ts` (timing-safe bearer check).
 - **Simulate input + progress**: `demand-overrides.ts` (per-metro demand override validation, DZ-parity regeneration), `link-edits.ts` (link-edit validation against the snapshot), `scenario-url.ts` (encodes/decodes the simulator's editable state into the URL). `sim-progress.ts` folds one job poll into phase/percent/coalitions state; `eta.ts` derives a rolling time-left estimate from the coalitions-solved slope; `run-history.ts` persists the browser's last five completed runs for the typical-runtime hint.
-- **Caching + safety**: `lru-cache.ts` (TTL + size-capped LRU used by the compute routes), `rate-limit.ts` (per-instance advisory IP limiter), `sweep-tag.ts` (S3 marker key per epoch), `cron-auth.ts` (constant-time check of the cron bearer secret).
+- **Caching + safety**: `lru-cache.ts` (TTL and size-capped LRU used by the snapshot, stake, and on-chain routes), `rate-limit.ts` (per-instance advisory IP limiter), `request-deadline.ts`.
 - **Feed helpers**: `live-topology-fetch.ts`, `economic-hub-fetch.ts`, `epoch-discovery.ts`, `epoch-rate.ts` (measured Solana epoch cadence for monthly/yearly projections), `fee-parser.ts`, `jupiter-price.ts`, `csv.ts`.
 - **Formatting + small validators**: `format.ts` (shared SOL/2Z/USD/duration/pubkey formatters), `pubkey.ts` (validates a user-supplied vote-account pubkey), `sort-state.ts` (validates a persisted table sort against a column allowlist), `demand.ts` (reward-delta and coverage-gap heuristics for suggested routes), `link-value.ts` (per-link topology metadata only; values come solely from the Rust solver), `reward-estimator.ts` (validator earnings projection math).
 
@@ -223,20 +224,21 @@ An operator whose `focusLinkCount` exceeds `MAX_BREAKDOWN_FOCUS_LINKS` (19, `lib
 
 ## Caching matrix
 
-Every compute/proxy route caches; the mechanism and bounds vary by route. Verified against each route file, except `/api/shapley`, whose LRU lives in `lib/utils/epoch-shapley.ts`:
+Every compute/proxy route caches; the mechanism and bounds vary by route. Verified against each route file:
 
 | Route / layer | Mechanism | TTL | Size cap |
 |---|---|---|---|
-| `/api/snapshot` | in-memory LRU (`lru-cache.ts`) + CDN headers | 5 min LRU; `max-age=3600, s-maxage=3600, stale-while-revalidate=86400` | 8 entries |
-| `/api/epochs` | CDN headers only | `max-age=300, s-maxage=300, stale-while-revalidate=600` | n/a |
-| `/api/shapley?epoch=N` | in-memory LRU (`lib/utils/epoch-shapley.ts`) | 30 min | 32 entries |
-| `/api/shapley/baseline` | module-level cache | 5 min | 1 (singleton) |
+| `/api/snapshot` | in-memory LRU (`lru-cache.ts`) + CDN headers | 5 min LRU; `max-age=3600, s-maxage=3600, stale-while-revalidate=86400` | 2 entries (each is a ~110 MB parse) |
+| `/api/epochs` | module cache (`epoch-discovery.ts`) + CDN headers | 5 min; `max-age=300, s-maxage=300, stale-while-revalidate=600` | 1 per `withMeta` value |
+| `/api/shapley?epoch=N` | CDN headers only (cache-only alias probe) | `max-age=300, s-maxage=3600, stale-while-revalidate=86400`; every non-200 `no-store` | n/a |
+| `/api/shapley/baseline` | CDN headers only (cache-only alias probe) | `max-age=60, s-maxage=300, stale-while-revalidate=600`; every non-200 `no-store` | n/a |
 | `/api/epoch-rate` | ISR (`revalidate = 3600`) + CDN headers, over a measurement cached in `lib/utils/epoch-rate.ts` | 1 h route; 6 h measurement | 1 (singleton measurement) |
 | `/api/validators/stake` | in-memory LRU, two tiers (`lru-cache.ts`) | 60 s hits; 5 min misses | 256 hit / 512 miss entries |
 | `/api/shapley/simulate` | module-level `Map` (per-epoch baseline) | 30 min | 10 entries |
-| `/api/shapley/tracking` | in-memory LRU (keyed by `count`) | 30 min | 4 entries |
-| `/api/diff` | in-memory LRU (keyed by `from→to`) | 30 min | 16 entries |
-| `/api/diff/contributor/[code]` | in-memory LRU (keyed by `code:from→to`) | 30 min | 48 entries |
+| `/api/shapley/tracking` | CDN headers only (N concurrent alias probes) | `max-age=60, s-maxage=300, stale-while-revalidate=600`; every non-200 `no-store` | n/a |
+| `/api/shapley/jobs`, `/api/link-value/jobs` (+ `[id]`) | none; results live in the service (Redis 24 h terminal state, S3 indefinitely by request hash) | n/a | n/a |
+| `/api/diff` | Rust service memory → S3 `diff/v1` → CDN | shapes immutable per epoch; `max-age=300, s-maxage=86400, stale-while-revalidate=604800`; `no-store` on every non-200 and whenever the service flags `x-diff-degraded: 1` | one ~28 KB shape per epoch |
+| `/api/diff/contributor/[code]` | same as `/api/diff` | same | same |
 | `/api/live/topology` / `stats` / `status` | ISR (`export const revalidate = 60`) + 60 s module cache (topology's lives in `lib/utils/live-topology-fetch.ts`, shared with the baseline route) | 60 s | n/a |
 | `/api/live/economic-hub` | module cache + ISR + CDN | 5 min (`max-age=300`) | 1 |
 | `/api/fees` | module cache + CDN | 10 min (`max-age=600, s-maxage=600, stale-while-revalidate=1800`) | 1 |
@@ -274,13 +276,12 @@ Every Shapley response carries a `method` field so the UI can be honest about wh
 | Label | Meaning | Source |
 |---|---|---|
 | `lp-per-city-stake-weighted-exact` | Canonical Rust solver (what the service stamps on every `/shapley`, `/simulate`, and async-job result) | `services/shapley-rs/src/routes.rs` |
-| `lp-multi-commodity-flow-rs` | Legacy decode default on the TS side, applied only if a service response lacked `method` (never the case with the current service) | `DEFAULT_METHOD`, `lib/utils/shapley-remote.ts` |
-| `local-ts-heuristic-DEV-ONLY` | In-process TS heuristic, dev only | Computed by `lib/utils/shapley-solver.ts`; label stamped in `lib/utils/epoch-shapley.ts` |
+| `lp-multi-commodity-flow-rs` | Default the TS client substitutes when a service response omits `method`; the service always stamps its own label | `DEFAULT_METHOD`, `lib/utils/shapley-remote.ts` |
 | `retag-shapley-rs` | Per-link value-add (faithful retag port of `network_linkestimate`) | `services/shapley-rs/src/routes.rs` |
 
-> **Drift resolved (PR #4):** UI checks no longer compare against a specific solver label: `reward-reconciliation.tsx` keys off the `local-ts-heuristic-DEV-ONLY` dev label and `live-baseline-shapley.tsx` matches the `lp-` prefix, so a service-side method rename cannot silently break them. The `/methodology` prose names the current label (`lp-per-city-stake-weighted-exact`) as an example only.
+`components/economics/live-baseline-shapley.tsx` shows the label. Its `methodLabel` helper matches the `lp-` prefix and prints "Canonical LP", so a service-side rename inside that family does not break the UI.
 
-**No-silent-fallback policy.** When `SHAPLEY_SERVICE_URL` is set, the canonical routes serve **only** Rust-solver results. If the remote call fails they return `502` rather than silently swapping in a different algorithm; masking that divergence in production would make it undetectable. This is enforced in `app/api/shapley/route.ts`, `app/api/shapley/baseline/route.ts`, and `app/api/shapley/tracking/route.ts` (which additionally reports per-epoch failures in `skippedEpochs[]`). One narrow, non-silent carve-out: `/api/shapley/baseline` answers `202 {status: "warming"}` when the latest epoch's solve was cut mid-flight by a timeout (the result isn't cached yet; the precompute cron heals it). This still involves no algorithm swap and is still reported to observability; every other failure remains a `502` (see docs/shapley-pipeline.md). The `local-ts-heuristic-DEV-ONLY` label is emitted only when `SHAPLEY_SERVICE_URL` is **unset** entirely (local dev); production never emits it, and stamping it loudly makes any misconfigured deployment immediately spottable. The whole system is documented for external auditors in `/methodology` (`app/methodology/page.tsx`, `app/api/methodology/route.ts`).
+**No-silent-fallback policy.** `app/api/shapley/route.ts`, `app/api/shapley/baseline/route.ts`, and `app/api/shapley/tracking/route.ts` are read-only proxies over the epoch aliases the cron publishes. They serve only Rust-solver results, and a probe failure is a `502` rather than a different algorithm, because masking that divergence in production would make it undetectable. An epoch the cron has not published is `404 {status:"not-cached"}`, which the widgets read as "no card". A request never triggers a solve, so nothing self-heals on a user request. With `SHAPLEY_SERVICE_URL` unset all three answer `503`. The formulas and sources are published for external auditors at `/api/methodology`.
 
 ## Security posture (summary)
 
@@ -292,26 +293,39 @@ See [operations.md](./operations.md) for the operational detail; the building bl
 
 | Preset | Limit | Used by |
 |---|---|---|
-| `RATE_LIMIT_HEAVY` | 10 req / min | nine routes: `shapley`, `shapley/baseline`, `shapley/simulate`, `shapley/tracking`, `shapley/jobs`, `shapley/precompute`, `link-value/jobs`, `diff`, `diff/contributor/[code]` |
-| `RATE_LIMIT_STANDARD` | 60 req / min | `validators/stake` |
+| `RATE_LIMIT_HEAVY` | 10 req / min | the three routes that start a solve: `shapley/simulate`, `shapley/jobs`, `link-value/jobs` |
+| `RATE_LIMIT_STANDARD` | 60 req / min | the cache-read proxies `shapley`, `shapley/baseline`, `shapley/tracking`, `diff`, `diff/contributor/[code]`, and `validators/stake` |
 | `RATE_LIMIT_LOOSE` | 120 req / min | (defined; not currently wired) |
 
 The limiter is advisory by design: when no trusted IP can be identified, the request proceeds rather than sharing one bucket across unknown callers, and the bucket map is bounded so a header-spoofing flood can't OOM the instance. It throttles pathological retries from a single client; it is not a global SLA.
 
 **Service-to-service auth.** The Rust service uses fail-closed bearer auth: the Next.js routes attach `SHAPLEY_API_TOKEN` as `Authorization: Bearer …` (never exposed to clients); see [shapley-service.md](./shapley-service.md).
 
-**Cron auth.** The precompute cron (`app/api/link-value/precompute/route.ts`) requires `CRON_SECRET` and verifies the `Authorization: Bearer` header with a timing-safe comparison (`crypto.timingSafeEqual`): an unset secret returns `503`, a mismatch `401`.
+**Cron auth.** The precompute cron (`app/api/link-value/precompute/route.ts`) requires `CRON_SECRET` and verifies the `Authorization: Bearer` header with a timing-safe comparison (`bearerMatches` in `lib/utils/cron-auth.ts`, built on `crypto.timingSafeEqual`). An unset secret returns `503`, a mismatch `401`. Its writes to the Rust service carry a second token, `SHAPLEY_INGEST_TOKEN`, as `X-Ingest-Token`; the service's publication routes require both.
 
 The `/api/health` aggregator (`app/api/health/route.ts`) is itself hardened: it returns only hostnames (never full URLs, paths, or tokens) and coarse error categories, so probing it can't leak upstream routing or credentials.
 
 ## Operations & cron
 
-Three Vercel cron jobs (`vercel.json`):
+Two Vercel cron jobs (`vercel.json`):
 
 | Path | Schedule | Purpose |
 |---|---|---|
 | `/api/health` | `*/15 * * * *` (every 15 min) | keep the source-health view warm |
-| `/api/link-value/precompute` | `0 */6 * * *` (every 6 h) | sweep the latest epoch's per-link estimates + warm the baseline cache |
-| `/api/shapley/precompute` | `30 */6 * * *` (every 6 h, offset 30 min) | warm the baseline for the latest epoch |
+| `/api/link-value/precompute` | `0 */6 * * *` (every 6 h) | one snapshot download for the latest epoch, feeding the link-value sweep, the baseline alias, and the diff shape; then repair historical diff-shape gaps |
 
-The precompute sweep checks the Rust service's "fully swept" S3 marker first (steady-state fires return in seconds without fetching the snapshot), then enqueues a single sweep job that a worker expands into per-operator link-estimate jobs. The rationale for moving these long solves onto a queue, rather than holding an HTTP socket through O(operators) round-trips, is recorded in [adr/0001-async-compute-queue.md](./adr/0001-async-compute-queue.md). Deployment, env-var setup, and observability are in [operations.md](./operations.md).
+`runPrecomputeIngest` in `lib/utils/precompute-ingest.ts` runs each fire. It resolves the latest epoch, then probes three things in the Rust service:
+
+| Probe | Answers |
+|---|---|
+| `GET /precompute/link-estimates/status?tag=` | is the epoch fully swept |
+| `GET /shapley/baseline?tag=` | is the baseline alias published |
+| `GET /diff/missing?latest=&depth=31` | which of the last 31 epochs lack a diff shape |
+
+A steady-state fire finds all three satisfied and returns `already-swept` in seconds. It downloads nothing.
+
+Otherwise the fire downloads the epoch snapshot once and builds the canonical Shapley input from it. That one download feeds three writes: `POST /precompute/link-estimates` enqueues a sweep job that a worker expands into per-operator link-estimate jobs, `POST /precompute/baseline` publishes the alias the three cache-only read routes probe, and `PUT /diff/shape/{epoch}` writes the record the changelog is served from.
+
+The fire holds a 270 s work budget and gives 90 s of it to historical repair, which takes up to two shape gaps per fire, newest first, rotating every six hours so no gap starves. Passing `?epoch=N` with the bearer token backfills one epoch by hand.
+
+Three ADRs cover the design. [adr/0001](./adr/0001-async-compute-queue.md) explains why long solves run as queued jobs instead of holding an HTTP socket through O(operators) round-trips. [adr/0003](./adr/0003-cron-side-snapshot-extraction.md) covers the cron-side extraction, and [adr/0004](./adr/0004-cache-only-baseline-reads.md) covers why readers never compute. Deployment, env-var setup, and runbooks are in [operations.md](./operations.md).

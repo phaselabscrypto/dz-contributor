@@ -19,14 +19,14 @@ solver.
 ```
 dz-contributor/
 ├── app/                    Next.js 16 App Router
-│   ├── api/                32 server routes (live proxies + on-chain + shapley + link-value + diff)
+│   ├── api/                31 server routes (live proxies + on-chain + shapley + link-value + diff + cron)
 │   ├── (pages)/            Home, Network, Contributors, Validators, Links,
 │   │                       Simulate, Link Value, Economics, Rewards,
-│   │                       Changelog, Status, Methodology
+│   │                       Changelog, Status
 │   └── layout.tsx          Sidebar shell + keyboard shortcuts + OG metadata
 ├── components/             UI primitives + page clients
 ├── lib/
-│   ├── hooks/              SWR hooks for live data + baseline shapley
+│   ├── hooks/              SWR hooks for live data, baselines, stake lookups
 │   ├── onchain/            Solana RPC + DZ ledger readers (3 live; Metro/Device/Link layouts unwritten)
 │   ├── types/              Wire types for snapshots, topology, etc.
 │   └── utils/              Shapley input builders + heuristics + CSV
@@ -57,7 +57,6 @@ dz-contributor/
 | `/rewards` | Historical SOL fee distribution per epoch. |
 | `/changelog` | Cross-epoch topology diff. |
 | `/status` | Source-feed health table. |
-| `/methodology` | Every formula and source documented inline. |
 
 ### API
 
@@ -76,15 +75,14 @@ All API routes return JSON. Cached server-side; SWR-cached client-side.
 | `GET /api/shapley?epoch=N` | Per-operator Shapley share for a historical snapshot. |
 | `POST /api/shapley/simulate` | Synchronous what-if recompute. `/simulate` does not call this; it uses the async job API below. |
 | `POST /api/shapley/jobs` + `GET/DELETE /api/shapley/jobs/[id]` | Async what-if simulation for `/simulate`: submit, poll, cancel. |
-| `GET /api/shapley/baseline` | Live-network Shapley anchor, served from the per-epoch cache. |
-| `GET /api/shapley/tracking?count=N` | Solver share trajectory across the last N snapshots. |
-| `GET /api/shapley/precompute` | Cron, every 6 hours. Warms the baseline cache for the latest epoch. Requires `CRON_SECRET`. |
+| `GET /api/shapley/baseline` | Latest epoch's published baseline. Cache-only; `404 not-cached` until the cron publishes it. |
+| `GET /api/shapley/tracking?count=N` | Solver share trajectory across the published baselines of the last N epochs. Cache-only. |
 | `POST /api/link-value/jobs` + `GET/DELETE /api/link-value/jobs/[id]` | Canonical per-link Shapley: async submit, poll, cancel. Precomputed per epoch, served from S3. |
-| `GET /api/link-value/precompute` | Cron, every 6 hours. Sweeps per-link estimates for the latest epoch. Requires `CRON_SECRET`. |
+| `GET /api/link-value/precompute` | The only cron that computes. Every 6 hours it downloads the latest epoch's snapshot once and publishes the link-value sweep, the baseline alias, and the diff shape from it, then repairs historical diff-shape gaps. Requires `CRON_SECRET` and `SHAPLEY_INGEST_TOKEN`. |
 | `GET /api/economics/projection` | Forward pool projection from historical growth. |
-| `GET /api/diff?from=&to=` | Network-wide topology diff between two epochs. |
+| `GET /api/diff?from=&to=` | Network-wide topology diff between two epochs, served from the Rust diff index. |
 | `GET /api/diff/contributor/[code]?from=&to=` | Per-operator changelog between two epochs. |
-| `GET /api/methodology` | Machine-readable formulas and sources. |
+| `GET /api/methodology` | Machine-readable formulas and sources. JSON only; there is no Methodology page. |
 | `GET /api/health` | Source-feed health aggregator. Vercel cron every 15 minutes. |
 | `POST /api/vitals` | Web vitals sink. No-op until a metrics backend is wired. |
 | `GET /api/onchain/{topology,validators}` | `503`. The Metro, Device, and Link account layouts are not written yet. |
@@ -104,15 +102,31 @@ All API routes return JSON. Cached server-side; SWR-cached client-side.
 
 The canonical path is the **Rust microservice** (`services/shapley-rs/`),
 which wraps Phase's fork of the Foundation's `network-shapley-rs` crate.
-Set `SHAPLEY_SERVICE_URL` to its URL after deploy. Every response
-carries the `method` it used: `lp-per-city-stake-weighted-exact` for the
-reward solve, `retag-shapley-rs` for per-link estimates.
+Set `SHAPLEY_SERVICE_URL` and `SHAPLEY_API_TOKEN` to reach it. Every
+response carries the `method` it used: `lp-per-city-stake-weighted-exact`
+for the reward solve, `retag-shapley-rs` for per-link estimates.
 
-There is **no silent fallback**: if the Rust service is unreachable the
-routes return `502` rather than substituting a heuristic. A TypeScript
-coalition-enumeration solver (`lib/utils/shapley-solver.ts`) remains in
-the tree for local dev/reference only. It does not serve production
-responses.
+**No silent fallback.** If the Rust service is unreachable the routes
+return `502`. There is no in-process solver.
+
+**Reads never compute.** `/api/shapley`, `/api/shapley/baseline`, and
+`/api/shapley/tracking` probe the epoch alias the cron published and
+answer `404 {"status":"not-cached"}` when there is none, which hides the
+widget. Only the cron asks the service to solve.
+
+### Cron, caching, and S3
+
+One cron does the epoch work: `/api/link-value/precompute`, every six
+hours. It probes the sweep marker, the baseline alias, and the missing
+diff shapes, and a satisfied epoch returns `already-swept` with no
+download. Otherwise it downloads the snapshot once and feeds the
+link-value sweep, the baseline alias, and the diff shape from it, then
+repairs historical shape gaps.
+
+The Rust service keeps everything in one S3-compatible bucket: solver
+results by input hash, epoch aliases and sweep markers under
+`shapley/v3/publication/v1/`, and diff shapes under `diff/v1/`. It never
+reads the public snapshot bucket.
 
 ### Forecasting (`/simulate`)
 
@@ -175,14 +189,14 @@ TS coalition-enumeration solver and public upstreams.
 You need two terminals:
 
 ```bash
-# Terminal 1 — Shapley solver (Rust)
+# Terminal 1: Shapley solver (Rust)
 cd services/shapley-rs
 cargo run
 # → listening on http://localhost:8080
 ```
 
 ```bash
-# Terminal 2 — Next.js frontend
+# Terminal 2: Next.js frontend
 SHAPLEY_SERVICE_URL=http://localhost:8080 npm run dev
 # → listening on http://localhost:3000
 ```
@@ -209,10 +223,11 @@ cargo test
 ### Environment
 
 Copy `.env.example` to `.env.local` for local dev. Production needs
-four variables:
+five variables:
 
 - `SHAPLEY_SERVICE_URL`
 - `SHAPLEY_API_TOKEN`
+- `SHAPLEY_INGEST_TOKEN`
 - `CRON_SECRET`
 - `DZ_LEDGER_RPC_URL`
 
@@ -231,12 +246,18 @@ The service is a single container. Build it with the provided
 `services/shapley-rs/Dockerfile` and run it on any host or
 orchestrator. It needs:
 
-- `REDIS_URL` for the async job queue (optional: without it the
-  synchronous endpoints still work and `/jobs/*` are disabled)
 - `SHAPLEY_API_TOKEN` to require `Authorization: Bearer` on compute
-  endpoints (strongly recommended for any internet-reachable deploy)
-- optional S3-compatible object storage for the durable result cache
-  (`S3_CACHE_BUCKET`, `S3_CACHE_ENDPOINT`, standard AWS env credentials)
+  endpoints. Without it, and without the dev opt-in, only `/health` is
+  served
+- `SHAPLEY_INGEST_TOKEN`, the second token the cron sends as
+  `X-Ingest-Token` on sweep, baseline-publish, and diff-shape writes
+- `REDIS_URL` for the job queue. The worker requires it, and without it
+  `/jobs/*` and `/precompute*` answer 503, so no baseline can be
+  published
+- S3-compatible object storage (`S3_CACHE_BUCKET`, `S3_CACHE_ENDPOINT`,
+  standard AWS env credentials) for solver results, epoch aliases, and
+  the diff index. Without it every baseline read is `404 not-cached` and
+  diff writes are 503
 
 ```bash
 cd services/shapley-rs
@@ -247,7 +268,9 @@ docker run -e REDIS_URL=... dz-shapley-service worker
 ```
 
 After deploy, point `SHAPLEY_SERVICE_URL` in the frontend's env at the
-service URL (and set the matching `SHAPLEY_API_TOKEN`).
+service URL, set the matching tokens, then warm the latest epoch with one
+authenticated call to `/api/link-value/precompute`. Runbooks are in
+`docs/operations.md`.
 
 
 ## Tests + CI
@@ -275,13 +298,6 @@ our own remaining work: those account types live on the serviceability
 program the contributor directory already reads, and the layout
 technique is proven there. Every other route, including the other
 on-chain readers, runs live.
-
-## Optional external inputs
-
-The Foundation's canonical per-epoch input files are optional. When
-`DZ_CANONICAL_INPUTS_URL` is set, the validation harness compares our
-input builder against them (`lib/utils/canonical-inputs.ts`). Production
-responses do not depend on them.
 
 ## License
 

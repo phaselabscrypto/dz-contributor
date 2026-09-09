@@ -8,8 +8,9 @@ Start here to evaluate or take over DZ Contributor Rewards. This page says what 
 |---|---|---|
 | Frontend | <https://dzcontributor.xyz> | `main` of this repository, deployed by Vercel's GitHub integration |
 | Shapley service | Reachable by the frontend only, over `SHAPLEY_SERVICE_URL` with a bearer token | `services/shapley-rs`, one container image, two processes (`--role=api`, `--role=worker`) |
-| Solver engine | Compiled into the service | Fork of `doublezerofoundation/network-shapley-rs`, tag `phase-2026.09`, upstream base v0.6.0 |
+| Solver engine | Compiled into the service | Fork of `doublezerofoundation/network-shapley-rs` at rev `bb5a24e0`, upstream base v0.6.0 |
 | Job queue and result cache | Redis with streams, plus an S3-compatible bucket | Configured by the env vars in `docs/operations.md` sections 2 and 4 |
+| Epoch data | One cron, `/api/link-value/precompute`, every six hours | Downloads each new epoch's snapshot once and publishes the baseline, the per-link values, and the diff shape from it |
 
 Deployment for any container platform is in `docs/operations.md`. The platform, sizing, and hostnames we use are not part of this repository.
 
@@ -17,16 +18,18 @@ Deployment for any container platform is in `docs/operations.md`. The platform, 
 
 Reward shares are an exact Shapley value per source city, aggregated with stake weights. Responses carry the method label `lp-per-city-stake-weighted-exact`. Per-link values use the retag method: each focus-owned link becomes a player, every other operator collapses to one `Others` player, and one exact solve runs over `2^(links+1)` coalitions. Those responses carry `retag-shapley-rs`.
 
-When the service is unreachable the API routes return 502. A TypeScript solver exists in `lib/utils/shapley-solver.ts` for local development and stamps a `DEV-ONLY` label; it serves no production response. Details: `docs/shapley-pipeline.md`.
+Nothing computes on a page load. The cron publishes each epoch's baseline under an epoch tag, and `/api/shapley`, `/api/shapley/baseline`, and `/api/shapley/tracking` read that alias or answer `404 {status:"not-cached"}`, which hides the widget. A service failure is a 502, never a different algorithm, and there is no in-process solver to fall back to. Details: `docs/shapley-pipeline.md` and `docs/adr/0004-cache-only-baseline-reads.md`.
+
+The changelog runs the same way. Each epoch's topology is stored as a 28 KB shape record that the cron extracts from the snapshot it already downloads, so a diff between two epochs reads two small records instead of two 110 MB files. Details: `docs/adr/0003-cron-side-snapshot-extraction.md`.
 
 ## Tests and checks
 
 | Where | What runs | What it compares |
 |---|---|---|
-| `.github/workflows/web.yml` | `pnpm lint`, `pnpm build` | The frontend compiles and passes ESLint |
-| `.github/workflows/shapley-rs.yml` | `cargo fmt`, `cargo clippy`, `cargo test`, container build | Service fixtures, HTTP contract tests, dedup and link-estimate cases in `services/shapley-rs/tests` |
+| `.github/workflows/web.yml` | `pnpm lint`, `tsc --noEmit`, eight regression scripts, `pnpm build` | The frontend compiles and passes ESLint; the cron ingest, diff window, diff shape, repair schedule, baseline probe, tracking route, epoch tag, and sort state all hold |
+| `.github/workflows/shapley-rs.yml` | `cargo fmt`, `cargo clippy`, `cargo test --release` against a Redis service container, container build | Service fixtures and HTTP contract tests, alias publication and single flight, the diff index's wire parity and conditional writes, in `services/shapley-rs/tests` |
 | Engine CI (fork repository) | `just ci` | Engine suites in `tests/`; two of them compare `compute` and `network_link_estimate` output with the Foundation's Python implementation and run only when Python with pandas and scipy is present |
-| `scripts/test-*.ts`, run with `pnpm test:<name>` | 14 `tsx` scripts | Input builders, demand overrides, link edits, scenario URLs, the baseline route, epoch rate, the simulate progress estimator, validator stake and estimate; three scripts decode live on-chain records and need `DZ_LEDGER_RPC_URL` |
+| `scripts/test-*.ts`, run with `pnpm test:<name>` | 23 `pnpm test:*` scripts | Input builders, the cron ingest, diff window and shape extraction, the repair schedule, the cache-only read routes and epoch tag, demand overrides, link edits, scenario URLs, epoch rate, the simulate progress estimator, validator stake and estimate, and the table sort state. Three decode live on-chain records and need `DZ_LEDGER_RPC_URL` |
 | `lib/onchain/README.md` | Manual decode checks | Three on-chain readers decoded against the Foundation CLI output for recorded epochs |
 
 The service keeps an epoch-149 input fixture for regression. That test is ignored by default and the fixture predates the current uptime-penalty model, so it is not a claim about on-chain results.
@@ -46,6 +49,7 @@ Details: `docs/shapley-pipeline.md` (Limits) and `docs/shapley-service.md` (Inpu
 ## Known gaps
 
 - The progress screen on `/simulate` cannot tell a queued job from a solve that is still starting; both read as starting.
+- `services/shapley-rs/tests/smoke.sh` step 8 calls `POST /diff/precompute`, a route the service does not serve. That step fails until the script is updated.
 - `GET /api/onchain/topology` and `GET /api/onchain/validators` return `503`. The Metro, Device, and Link account layouts are not written yet. This is our own remaining work, not an external dependency: those accounts sit on the DoubleZero serviceability program that `contributor-directory.ts` already reads, and its `AccountType::Contributor` offsets were verified against every live account. Decoding the other account types takes the same layout work. No program IDL is required. The `decoders.ts` and `idl-registry.ts` scaffolding was written on an earlier assumption that one was.
 - Open engineering notes are in `services/shapley-rs/TODO.md`.
 
@@ -65,4 +69,7 @@ Hosting platform, instance sizing, hostnames, secrets, and internal ticket refer
 | `docs/development.md` | Local setup, scripts, tests |
 | `docs/operations.md` | Deployment on any container platform, env reference, CI, rotation, queue tooling |
 | `docs/adr/0001-async-compute-queue.md` | Why long solves run as queued jobs, with amendments |
+| `docs/adr/0002-snapshot-diff-index.md` | Why the epoch diff is served from immutable per-epoch records |
+| `docs/adr/0003-cron-side-snapshot-extraction.md` | Why the cron extracts those records and the service needs no snapshot egress |
+| `docs/adr/0004-cache-only-baseline-reads.md` | Why browser-driven Shapley reads never compute |
 | `services/shapley-rs/README.md` | Service local development and testing |

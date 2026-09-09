@@ -1,40 +1,87 @@
 # dz-shapley-service
 
-Rust HTTP wrapper around the canonical
+Rust HTTP wrapper around the
 [`network-shapley-rs`](https://github.com/doublezerofoundation/network-shapley-rs)
-crate. Built so the Next.js frontend can call a single endpoint and get
-LP-correct Shapley values without bundling a Rust solver client-side.
+crate, built against Phase's rev-pinned fork. The Next.js frontend calls it for
+LP-correct Shapley values without bundling a solver client-side. The full
+reference is [`docs/shapley-service.md`](../../docs/shapley-service.md).
 
 ## Endpoints
 
+Every route except `/health` requires `Authorization: Bearer $SHAPLEY_API_TOKEN`
+when the token is set. The ones marked *ingest* also require
+`X-Ingest-Token: $SHAPLEY_INGEST_TOKEN`.
+
 ```
 GET  /health           -> { status, service, version }
-POST /shapley          -> ShapleyResponse        { method, operator_count, values }
-POST /link-estimate    -> LinkEstimateResponse   (faithful retag-Shapley; sync, S3-served when precomputed)
-POST /jobs/link-estimate -> 202 { job_id }       (async: progress + cancel via /jobs/:id; done-at-submit on S3 hit)
-POST /precompute/link-estimates -> { enqueued, cached, skipped }   (epoch sweep)
+
+# sync compute
+POST /shapley          -> ShapleyResponse   { method, operator_count, values }   (single-flighted per input hash)
+POST /simulate         -> SimulateResponse  { baseline, modified, stats }        (reuses untouched cities)
+POST /link-estimate    -> LinkEstimateResponse   (retag-Shapley; S3-served when precomputed; 422 above 12 focus links)
+
+# cache-only read: the only surface a page load reaches
+GET  /shapley/baseline?tag= -> BaselineAlias | 404 {status:"not-cached"}   (never computes, never enqueues)
+
+# async jobs (Redis)
+POST /jobs/simulate         -> 202 { job_id }        (done at submit on an S3 hit)
+POST /jobs/link-estimate    -> 202 { job_id }        (in-flight dedup; 422 above 19 focus links)
+POST /jobs/link-estimate/by-tag -> 202 { job_id } | 404   ({tag, operator_focus}: completes from the published alias)
+GET  /jobs/:id              -> { state, progress | result | error }
+DELETE /jobs/:id            -> 202 { state: "cancelling" }
+
+# publication, driven by the Next.js cron
+POST /precompute            -> 200 already-cached | 202 { job_id, input_hash }
+POST /precompute/baseline   -> 200 already-cached | 202 { job_id, input_hash, tag }   (ingest; publishes the epoch alias)
+POST /precompute/link-estimates -> 202 { job_id }                                      (ingest; one sweep job, fans out per operator)
+GET  /precompute/link-estimates/status?tag= -> { complete, tag }
+
+# diff index
+GET  /diff?from&to     -> NetworkDiffResponse       (x-diff-degraded: 1 when an intermediate was skipped)
+GET  /diff/contributor/:code?from&to -> ContributorDiffResponse   (no display name)
+PUT  /diff/shape/:epoch -> 201 created | 409 readable existing record   (ingest)
+GET  /diff/missing?latest=N&depth=D -> { missing }   (depth default 31, max 200)
 ```
+
+Request bodies are capped at 2 MB and every request at 120 s.
 
 ### Epoch precompute sweep
 
 Epoch inputs are immutable, so each `(epoch, operator)` link-estimate is
 computed once and persisted to S3 (`shapley/v3/link-estimate-{payload_hash}.bin`,
 keyed by the job payload hash). The Vercel cron `GET /api/link-value/precompute`
-(authed via `CRON_SECRET`) builds the epoch input and calls the sweep, which
-enqueues one job per operator:
+builds the epoch input and calls the sweep, which enqueues one sweep job that a
+worker expands into per-operator children:
 
 ```bash
 curl -fsS -X POST "$BASE/precompute/link-estimates" \
   -H "authorization: Bearer $SHAPLEY_API_TOKEN" \
+  -H "X-Ingest-Token: $SHAPLEY_INGEST_TOKEN" \
   -H 'content-type: application/json' \
-  --data-binary '{ "input": { ...ShapleyInputIn... }, "operators": ["Alpha", "Beta"] }'
-# -> { "enqueued": [{"operator":"Beta","job_id":"..."}], "cached": ["Alpha"],
-#      "skipped": [{"operator":"Gamma","reason":"22 links exceeds the 20-player exact cap (19 max)"}] }
+  --data-binary '{ "input": { ...ShapleyInputIn... }, "tag": "epoch-211:canonical-v1:..." }'
+# -> 202 { "job_id": "..." }
 ```
 
-Omit `operators` to derive them from the input's devices. The response is fully
-transparent: every operator lands in exactly one bucket. Operators above the
-19-link exact cap are reported in `skipped`, never silently dropped.
+Poll that `job_id` for the summary: `enqueued`, `cached`, `skipped`,
+`already_running`, `failed`, and `marker_written`. Every operator lands in
+exactly one bucket, and operators above the 19-link exact cap are reported in
+`skipped` rather than silently dropped.
+
+Omit `operators` to derive them from the input's devices. Only a derived set
+publishes the per-operator aliases and the completion marker; an explicit
+subset warms the cache and writes no marker, so a partial sweep can never make
+the cron skip the remainder.
+
+### Baseline and link-estimate aliases
+
+A result's S3 key is a hash of the full solver input, and building that input
+means downloading a 110 MB snapshot, so a fast read cannot derive it. The cron
+therefore publishes an alias per epoch under
+`shapley/v3/publication/v1/`, keyed on the epoch tag. `GET /shapley/baseline?tag=`
+reads that one object and answers `404 {status:"not-cached"}` on a miss, and
+`POST /jobs/link-estimate/by-tag` completes a link-value job the same way. Both
+are the reason a page load never triggers a solve. The alias is always written
+after the result object, so it never points at nothing.
 
 Wire-types live in `src/model.rs` and mirror the JSON our Next.js routes
 already produce (see `lib/types/shapley.ts`).
@@ -88,7 +135,7 @@ JOB=$(curl -fsS -X POST localhost:8099/jobs/simulate \
   -H 'content-type: application/json' --data @sim.json \
   | sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p')
 curl -fsS localhost:8099/jobs/$JOB            # poll: running (progress %) → done (result)
-curl -fsS -X DELETE localhost:8099/jobs/$JOB  # cancel — only bites a sampling job (>10 operators)
+curl -fsS -X DELETE localhost:8099/jobs/$JOB  # cancel: cooperative, lands at the next city or coalition boundary
 ```
 
 Inspect the queue with `redis-cli -p 6390 -a devpass keys 'shapley:whatif:*'`;
@@ -151,7 +198,7 @@ all demands sharing a `type` need the same `(start, traffic, multicast)`.
 
 ## Correctness pin
 
-The engine is pinned at fork tag `phase-2026.09` (`services/shapley-rs/Cargo.toml`),
+The engine is pinned at fork rev `bb5a24e034daf9ad6680e393df85eaf6f20d987e` (`services/shapley-rs/Cargo.toml`),
 based on upstream `network-shapley-rs` v0.6.0.
 
 ```bash

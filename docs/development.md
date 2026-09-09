@@ -29,7 +29,7 @@ pnpm install
 pnpm dev
 ```
 
-The app opens at `http://localhost:3000`. When the Shapley microservice is not running, the frontend falls back to the development-only TypeScript solver. Results produced on this path carry the method label `local-ts-heuristic-DEV-ONLY`, making it immediately visible in the UI that the production solver was not used. See [shapley-pipeline.md](./shapley-pipeline.md) for a description of the full pipeline.
+The app opens at `http://localhost:3000`. Without the Shapley microservice the Shapley, link-value, and diff routes answer `503` and their cards render nothing. There is no in-process solver. See [shapley-pipeline.md](./shapley-pipeline.md) for the full pipeline.
 
 ## Full stack (two terminals)
 
@@ -72,11 +72,11 @@ docker compose up -d          # starts Redis on host port 6390 with password "de
 Then run the API and worker roles on the host, each in its own terminal:
 
 ```sh
-# Terminal 1 — API role (port 8099 avoids a conflict with a plain `cargo run`)
+# Terminal 1: API role (port 8099 avoids a conflict with a plain `cargo run`)
 PORT=8099 REDIS_URL=redis://:devpass@127.0.0.1:6390 \
   SHAPLEY_ALLOW_UNAUTHENTICATED=1 cargo run -- api
 
-# Terminal 2 — worker role (required; without it jobs stay in state=running)
+# Terminal 2: worker role (required; without it jobs stay in state=running)
 PORT=8098 REDIS_URL=redis://:devpass@127.0.0.1:6390 cargo run -- worker
 ```
 
@@ -94,7 +94,7 @@ docker compose down
 
 ### Local S3 cache
 
-The result cache holds baselines, link-estimate results, and simulate results: it is the persistence behind shareable forecast URLs. It targets any S3-compatible endpoint through `S3_CACHE_ENDPOINT` (path-style addressing). `docker-compose.yml` includes a MinIO service that models this: the S3 API listens on host port 9000, the web console on 9001, with dev-only credentials (`devaccess` / `devsecret123`). Without it, the service runs with the S3 layer disabled (Redis-only).
+The bucket holds everything the site reads from the service on a page load: the published epoch baselines behind `GET /shapley/baseline?tag=`, the precomputed link estimates, the simulate results that make a shared forecast URL return instantly, and the diff shapes behind the changelog. It targets any S3-compatible endpoint through `S3_CACHE_ENDPOINT` (path-style addressing), so MinIO models production faithfully. Without `S3_CACHE_BUCKET` the service still solves, but every baseline read is `404 not-cached`, sweep status is always incomplete, `PUT /diff/shape` answers 503, and nothing survives a restart.
 
 ```sh
 cd services/shapley-rs
@@ -108,13 +108,13 @@ AWS_ACCESS_KEY_ID=devaccess AWS_SECRET_ACCESS_KEY=devsecret123 \
 Run both roles with the S3 env added (same variables for api and worker):
 
 ```sh
-# Terminal 1 — API role
+# Terminal 1: API role
 S3_CACHE_BUCKET=shapley-cache S3_CACHE_ENDPOINT=http://127.0.0.1:9000 \
 AWS_ACCESS_KEY_ID=devaccess AWS_SECRET_ACCESS_KEY=devsecret123 AWS_REGION=us-east-1 \
 PORT=8099 REDIS_URL=redis://:devpass@127.0.0.1:6390 \
   SHAPLEY_ALLOW_UNAUTHENTICATED=1 cargo run -- api
 
-# Terminal 2 — worker role, same S3 env
+# Terminal 2: worker role, same S3 env
 S3_CACHE_BUCKET=shapley-cache S3_CACHE_ENDPOINT=http://127.0.0.1:9000 \
 AWS_ACCESS_KEY_ID=devaccess AWS_SECRET_ACCESS_KEY=devsecret123 AWS_REGION=us-east-1 \
 PORT=8098 REDIS_URL=redis://:devpass@127.0.0.1:6390 cargo run -- worker
@@ -127,8 +127,8 @@ A corrupt cached object is treated as a miss, recomputed, and re-stored. Clear a
 ```
 .
 ├── app/                        # Next.js app router
-│   ├── api/                    # 32 API route handlers
-│   └── ...                     # page routes (contributors, simulate, economics, …)
+│   ├── api/                    # 31 API route handlers, including the link-value/precompute cron
+│   └── ...                     # 15 page routes (contributors, simulate, economics, …)
 ├── components/                 # React components, feature-grouped
 │   ├── contributors/
 │   ├── economics/
@@ -160,13 +160,13 @@ A corrupt cached object is treated as a miss, recomputed, and re-stored. Clear a
 │       │   └── lib.rs          # crate root, AppState
 │       ├── tests/              # integration + parity tests + smoke script
 │       ├── Dockerfile
-│       ├── docker-compose.yml  # dev-only Redis + MinIO
+│       ├── docker-compose.yml  # local Redis + MinIO
 │       └── rust-toolchain.toml
 ├── scripts/                    # dev/validation scripts (see table below)
 ├── types/                      # shared TypeScript type declarations
 ├── public/                     # static assets
 ├── .github/workflows/
-│   ├── web.yml                 # Node lint + build CI
+│   ├── web.yml                 # lint + typecheck + regression scripts + build
 │   └── shapley-rs.yml          # Rust fmt + clippy + test + Docker build CI
 ├── eslint.config.mjs
 ├── package.json
@@ -184,14 +184,24 @@ Scripts live in `scripts/`. Run those with `.ts` extensions through their `packa
 | `next build` | `pnpm build` | Production build; also the project's typecheck (see [Testing](#testing)) |
 | `next start` | `pnpm start` | Serves the production build made by `pnpm build` |
 | `eslint` | `pnpm lint` | Runs ESLint over the repo (`eslint.config.mjs`, see [Testing](#testing)) |
-| `scripts/validate-shapley.ts` | `pnpm validate` | Hits `/api/shapley?epoch=N` for a range of epochs and writes a `validation-report.md` comparing solver shares against on-chain payouts |
+| `scripts/validate-shapley.ts` | `pnpm validate` | Hits `/api/shapley?epoch=N` for a range of epochs and writes a `validation-report.md` comparing solver shares against on-chain payouts. An epoch the cron has not published answers 404 and is skipped |
 | `scripts/test-borsh-registry.ts` | `pnpm test:borsh` | Round-trip borsh encode/decode against the schemas in `lib/onchain/idl/schemas.ts`; regression pin for the borsh registry |
 | `scripts/test-canonical-parity.ts` | `pnpm test:canonical` | Diffs the TS canonical input builder against DZ's Python reference builder over the same snapshot; requires a local snapshot file |
 | `scripts/test-demand-overrides.ts` | `pnpm test:demand` | Demand-override invariants: normalize + apply-by-regeneration against a real snapshot (`lib/utils/demand-overrides.ts`) |
 | `scripts/test-coverage-gaps.ts` | `pnpm test:coverage-gaps` | Coverage-gap suggestion invariants for `findCoverageGaps` (`lib/utils/demand.ts`) |
 | `scripts/test-link-edits.ts` | `pnpm test:links` | Link-edit validation: normalize + snapshot-aware checks against a real snapshot (`lib/utils/link-edits.ts`) |
 | `scripts/test-scenario-url.ts` | `pnpm test:scenario-url` | Scenario-URL codec round-trips and garbage-in handling (`lib/utils/scenario-url.ts`) |
-| `scripts/test-baseline-route.ts` | `pnpm test:baseline` | Baseline-route contract: the warming classification behind `/api/shapley/baseline`'s 202-vs-502 split, plus a live HTTP check when a server is running |
+| `scripts/test-baseline-route.ts` | `pnpm test:baseline` | HTTP contract of a running `/api/shapley/baseline`: either 200 with the published shape or 404 `not-cached`, and never a compute |
+| `scripts/test-precompute-ingest.ts` | `pnpm test:precompute-ingest` | The cron fire against a stubbed service and snapshot: already-swept short-circuit, sweep plus baseline plus shape from one download, alias-only publish, shape failure, budget exhaustion, history repair |
+| `scripts/test-diff-repair-schedule.ts` | `pnpm test:diff-repair-schedule` | `scheduleDiffRepairs`: current epoch first, newest gap next, rotation by six-hour slot |
+| `scripts/test-diff-window.ts` | `pnpm test:diff-window` | Window-validation parity between `lib/utils/diff-window.ts` and the Rust `validate_window`: same bounds, same three messages |
+| `scripts/test-diff-shape-offline.ts` | `pnpm test:diff-shape-offline` | `extractDiffShape` contract: only the four serviceability sections, insertion order preserved, unknown contributor code |
+| `scripts/test-diff-shape.ts` | `pnpm test:diff-shape` | Checks or regenerates the epoch 204-211 shapes that `diff_parity.rs` pins; `-- --write` rewrites them; needs the snapshots |
+| `scripts/backfill-diff-shapes.ts` | `pnpm backfill:diff` | Fills the diff index's deep history, newest first, one epoch at a time; `--dry-run` reports gaps. Needs `SHAPLEY_SERVICE_URL`, `SHAPLEY_API_TOKEN`, `SHAPLEY_INGEST_TOKEN` |
+| `scripts/test-baseline-probe.ts` | `pnpm test:baseline-probe` | `/api/shapley/baseline` and `/api/shapley?epoch=N` against a stubbed service: hit, miss, upstream failure, a 404 without a `not-cached` body, probe timeout |
+| `scripts/test-baseline-tag.ts` | `pnpm test:baseline-tag` | `baselineTag(epoch)`: shape, determinism, epoch-distinctness, query-string round trip |
+| `scripts/test-tracking-route.ts` | `pnpm test:tracking-route` | `/api/shapley/tracking` and the pure `pivotTracking`: partial cache, too few hits, probe failure, count clamping |
+| `scripts/test-sort-state.ts` | `pnpm test:sort-state` | Table sort-state reducer: stored key versus effective key after fallback |
 | `scripts/decode-live-rewards.ts` | `pnpm test:onchain` | Fetches a live contributor-rewards record from the DZ ledger and decodes it through the TS reader; requires `DZ_LEDGER_RPC_URL` |
 | `scripts/verify-derive-and-decode.ts` | `pnpm test:derive` | Derives the epoch-117 contributor-rewards address from seeds and asserts the decoded header matches known-good values; requires `DZ_LEDGER_RPC_URL` |
 | `scripts/verify-contributor-directory.ts` | `pnpm test:directory` | Fetches all Contributor accounts from the DZ serviceability program and checks known (owner → code) pairs from the epoch-117 reference; requires `DZ_LEDGER_RPC_URL` |
@@ -209,8 +219,9 @@ Scripts live in `scripts/`. Run those with `.ts` extensions through their `packa
 
 | What | Command | Notes |
 |------|---------|-------|
-| Unit + integration tests | `cargo test` | Covers `upstream_simple`, `dedup_devices`, `link_estimate_http`, and `jobs` unit tests; CI runs with `--release` |
-| Three-operator structural test | `cargo test --test three_operator` | Currently `#[ignore]` pending fixture reshape; see `tests/three_operator.rs` |
+| Unit + integration tests | `TEST_REDIS_URL=redis://:devpass@127.0.0.1:6390/13 cargo test --locked` | Covers `upstream_simple`, `dedup_devices`, `link_estimate_http`, `link_estimate_alias`, `baseline_alias_http`, `shapley_single_flight`, `diff_parity`, `diff_persistence`, the in-crate unit tests, and `alias_publication`, which needs an empty Redis database on `127.0.0.1` or `localhost` at `TEST_REDIS_URL`. It panics when that is unset, refuses an occupied database, and cleans up after itself. The S3 tests use the in-process `MockS3` in `tests/support/mod.rs`, so no bucket is needed. CI runs with `--release` |
+| Three-operator structural test | `cargo test --test three_operator` | `#[ignore]`; see `tests/three_operator.rs` |
+| Gateway conditional-write acceptance | `cargo test --locked --test diff_persistence gateway_conditional_contract -- --ignored --nocapture` | Needs `TEST_S3_ENDPOINT` and a disposable `TEST_S3_BUCKET`. Run it before deploying against a new object gateway; see [operations.md](./operations.md#object-gateway-acceptance-test) |
 | Timing probe (link-estimate at production scale) | `cargo test --release --test linkest_timing -- --ignored --nocapture` | Requires `tests/fixtures/epoch149/input.json`; prints timing per operator |
 | Full epoch-149 reward-leaf parity | `cargo test --test parity_epoch149 -- --ignored --nocapture` | `#[ignore]`: heavy per-city LP solve; skips gracefully when fixture is absent. Generate the fixture first with `DZ_LEDGER_RPC_URL=... npx tsx scripts/gen-epoch149-parity-fixture.ts` |
 | E2E smoke against a running service | `cd services/shapley-rs && ./tests/smoke.sh [url]` | Defaults to `http://localhost:8080`; checks `/health`, `/shapley` (simple + three-operator fixtures), `/link-estimate`, and a latency budget; requires `curl`, `jq`, `python3` |
@@ -224,15 +235,15 @@ Scripts live in `scripts/`. Run those with `.ts` extensions through their `packa
 
 ### CI parity
 
-`.github/workflows/web.yml` runs `pnpm install --frozen-lockfile`, `pnpm lint`, and `pnpm build` (with `NODE_ENV=production`) on Node 20. Reproduce locally with the same three commands.
+`.github/workflows/web.yml` runs, on Node 20: `pnpm install --frozen-lockfile`, `pnpm lint`, `pnpm exec tsc --noEmit --incremental false`, eight regression scripts (`test:diff-window`, `test:diff-repair-schedule`, `test:precompute-ingest`, `test:diff-shape-offline`, `test:baseline-probe`, `test:tracking-route`, `test:baseline-tag`, `test:sort-state`), then `pnpm build` with `NODE_ENV=production`. Reproduce locally with the same commands. Node 20 matters: `instanceof` across dynamically imported `tsx` modules behaves differently on newer Node, so run the scripts under Node 20 before pushing.
 
-`.github/workflows/shapley-rs.yml` runs (from `services/shapley-rs/`): `cargo fmt --all -- --check` (advisory, non-blocking), `cargo clippy --all-targets -- -D warnings`, and `cargo test --release`. A separate `docker` job runs `docker build` as a smoke test after the tests pass. Reproduce locally:
+`.github/workflows/shapley-rs.yml` runs from `services/shapley-rs/`, with a `redis:7.4.1` service container and `TEST_REDIS_URL=redis://127.0.0.1:6379/13`: `cargo fmt --all -- --check` (advisory, non-blocking), `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked --release`. A separate `docker` job runs `docker build` as a smoke test after the tests pass. Reproduce locally:
 
 ```sh
 cd services/shapley-rs
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --release
+cargo clippy --locked --all-targets -- -D warnings
+TEST_REDIS_URL=redis://:devpass@127.0.0.1:6390/13 cargo test --locked --release
 ```
 
 ## Conventions
