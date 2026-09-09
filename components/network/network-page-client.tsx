@@ -6,8 +6,8 @@ import {
   useLiveTopology,
   useLiveStatus,
   useEconomicHub,
+  cachedBaseline,
   useBaselineShapley,
-  isBaselineWarming,
 } from "@/lib/hooks/use-live";
 import {
   ehNameToCode,
@@ -48,9 +48,7 @@ export default function NetworkPageClient() {
   const { data: status } = useLiveStatus();
   const { data: hub } = useEconomicHub();
   const { data: baseline } = useBaselineShapley();
-  // Warming (202) = not computed yet — treat exactly like "no data yet".
-  const baselineReady =
-    baseline && !isBaselineWarming(baseline) ? baseline : null;
+  const baselineReady = cachedBaseline(baseline);
 
   // Merge live link counts with all-time reward share + latest-epoch Shapley share
   const leaderboard = useMemo(() => {

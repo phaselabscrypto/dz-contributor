@@ -2,9 +2,9 @@
 
 import { useMemo } from "react";
 import {
+  cachedBaseline,
   useEconomicHub,
   useBaselineShapley,
-  isBaselineWarming,
 } from "@/lib/hooks/use-live";
 import { ehNameToCode } from "@/lib/constants/config";
 import { ArrowUpRight, ArrowDownRight, Minus, Info } from "lucide-react";
@@ -17,7 +17,7 @@ interface Props {
 /**
  * Three-way reward reconciliation:
  *   1) all-time earned share (economic-hub, payout-weighted)
- *   2) current Shapley share (live baseline against today's topology)
+ *   2) the latest published epoch's Shapley share
  *   3) delta + plain-English explanation
  *
  * Helps an operator answer "is my historical earning aligned with my
@@ -34,19 +34,14 @@ export function RewardReconciliation({ contributorCode }: Props) {
     );
   }, [hub, contributorCode]);
 
-  // Warming (202) means "not computed yet" — render as still-loading, never
-  // as a computed zero (the headline below claims "contributes no Shapley
-  // value" for livePct === 0, which would be false during warming).
-  const baselineReady =
-    baseline && !isBaselineWarming(baseline) ? baseline : null;
+  const ready = cachedBaseline(baseline);
 
   const allTimePct = ehEntry?.rewardPercentage ?? 0;
-  const livePct = baselineReady?.values?.[contributorCode]?.share
-    ? baselineReady.values[contributorCode].share * 100
+  const livePct = ready?.values?.[contributorCode]?.share
+    ? ready.values[contributorCode].share * 100
     : 0;
 
-  const baselineWarming = !!baseline && isBaselineWarming(baseline);
-  if (hubLoading || baselineLoading || baselineWarming) {
+  if (hubLoading || baselineLoading) {
     return (
       <div className="border border-border bg-surface p-6">
         <LoadingState label="Reconciling reward share" />
@@ -54,7 +49,7 @@ export function RewardReconciliation({ contributorCode }: Props) {
     );
   }
 
-  if (!hub || !baselineReady) {
+  if (!hub || !ready) {
     return null;
   }
 
@@ -73,7 +68,7 @@ export function RewardReconciliation({ contributorCode }: Props) {
 
   const headlineCopy = (() => {
     if (allTimePct === 0) {
-      return "New on the network — no historical payouts yet, but they're already contributing measurable Shapley value.";
+      return "They are new to the network and have no historical payouts yet, but already contribute measurable Shapley value.";
     }
     if (livePct === 0) {
       return "Currently contributes no Shapley value against the live network. Their historical earnings come from prior coalitions that no longer exist as-is.";
@@ -107,11 +102,7 @@ export function RewardReconciliation({ contributorCode }: Props) {
         <Cell
           label="Latest-epoch share"
           value={livePct > 0 ? `${livePct.toFixed(2)}%` : "—"}
-          sub={
-            baselineReady.method === "local-ts-heuristic-DEV-ONLY"
-              ? "TS heuristic (dev)"
-              : "Rust solver"
-          }
+          sub={`epoch ${ready.epoch}`}
         />
         <DeltaCell direction={direction} delta={delta} />
       </div>

@@ -11,6 +11,7 @@
 //! Run:  cargo test -p dz-shapley-service --test dedup_devices
 
 use axum::{Router, body::Body, http::Request, routing::post};
+use dz_shapley_service::diff_store::{DiffStore, NoPersistence};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -22,7 +23,10 @@ fn app() -> Router {
         epoch_cache: RwLock::new(None),
         s3_cache: None,
         api_token: None,
+        ingest_token: None,
         jobs: None,
+        diff_store: Arc::new(DiffStore::new(Arc::new(NoPersistence))),
+        baseline_inflight: Arc::default(),
     });
     Router::new()
         .route("/shapley", post(dz_shapley_service::routes::shapley))

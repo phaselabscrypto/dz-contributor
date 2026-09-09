@@ -71,7 +71,7 @@ export interface ValidatorEstimate {
  * A validator's take from the validator pool.
  *
  * Single source of the published formula
- * (`/methodology`, `/api/methodology`):
+ * (`/api/methodology`):
  *
  *   validator_pool = average_fee_per_epoch_SOL x VALIDATOR_SHARE
  *   operator_share = activated_stake / sum(eligible_stake)

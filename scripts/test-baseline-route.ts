@@ -1,16 +1,12 @@
 #!/usr/bin/env node
 /**
- * Baseline-route contract test.
+ * Baseline-route HTTP contract test (needs a running server).
  *
- * Part 1 (library, no server): asserts the RemoteSolveError →
- * ShapleyServiceError.warming classification that drives
- * /api/shapley/baseline's 202-vs-502 split (warming ⇔ client timeout,
- * upstream 504, or upstream 408 — everything else is a hard failure).
- *
- * Part 2 (HTTP, needs a running server): GET /api/shapley/baseline must be
- * either 200 with the ready shape (values present, shares sum ≈ 1) or 202
- * with the warming shape {status, message, epoch}; /api/shapley?epoch=latest
- * must 400. Skipped with a warning when BASE_URL is unreachable.
+ * `GET /api/shapley/baseline` must be either 200 with the published shape
+ * (epoch, tag, values, operatorCount; shares sum ≈ 1) or 404 with
+ * `{status:"not-cached", epoch, tag}`. It never computes, so neither answer
+ * takes longer than a proxy hop. `/api/shapley?epoch=latest` must 400, and
+ * `/api/shapley/tracking?count=4` must be 200 or 404 with the same discipline.
  *
  * Usage:
  *   npx tsx scripts/test-baseline-route.ts
@@ -18,9 +14,6 @@
  *
  * Exits non-zero on any failed assertion.
  */
-
-import { RemoteSolveError } from "../lib/utils/shapley-remote";
-import { ShapleyServiceError } from "../lib/utils/epoch-shapley";
 
 const BASE_URL = process.env.BASE_URL ?? "http://localhost:3000";
 
@@ -34,34 +27,6 @@ function check(name: string, ok: boolean, detail?: string) {
   }
 }
 
-// ── Part 1: warming classification (no server) ─────────────────────────
-console.log("classification:");
-{
-  const warming = (source: unknown) =>
-    new ShapleyServiceError("test", source).warming;
-
-  check("upstream 504 (router cut) → warming", warming(new RemoteSolveError("HTTP 504", 504)));
-  check("upstream 408 (service TimeoutLayer) → warming", warming(new RemoteSolveError("HTTP 408", 408)));
-  check("client timeout → warming", warming(new RemoteSolveError("timed out", undefined, true)));
-  check("upstream 500 → hard", !warming(new RemoteSolveError("HTTP 500", 500)));
-  check("upstream 502 → hard", !warming(new RemoteSolveError("HTTP 502", 502)));
-  check("upstream 503 → hard", !warming(new RemoteSolveError("HTTP 503", 503)));
-  check("upstream 422 → hard", !warming(new RemoteSolveError("HTTP 422", 422)));
-  check("upstream 401 → hard", !warming(new RemoteSolveError("HTTP 401", 401)));
-  check("network TypeError → hard", !warming(new TypeError("fetch failed")));
-  check("plain Error (snapshot fetch) → hard", !warming(new Error("Snapshot fetch for epoch 185 failed: HTTP 500")));
-  check(
-    "upstream status carried through for observability",
-    new ShapleyServiceError("test", new RemoteSolveError("m", 504)).status === 504,
-  );
-  check(
-    "RemoteSolveError is a named Error subclass",
-    new RemoteSolveError("m").name === "RemoteSolveError" &&
-      new RemoteSolveError("m") instanceof Error,
-  );
-}
-
-// ── Part 2: HTTP contract (against BASE_URL) ───────────────────────────
 async function httpAsserts(): Promise<void> {
   try {
     const health = await fetch(`${BASE_URL}/api/health`, {
@@ -70,7 +35,7 @@ async function httpAsserts(): Promise<void> {
     if (!health.ok) throw new Error(`health ${health.status}`);
   } catch {
     console.warn(
-      `\nno healthy dz-contributor server at ${BASE_URL} — skipping HTTP ` +
+      `no healthy dz-contributor server at ${BASE_URL} — skipping HTTP ` +
         "asserts (start one with `pnpm dev` and pass BASE_URL)",
     );
     return;
@@ -78,13 +43,14 @@ async function httpAsserts(): Promise<void> {
 
   console.log(`http (${BASE_URL}):`);
   const res = await fetch(`${BASE_URL}/api/shapley/baseline`, {
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(30_000),
   });
   if (res.status === 200) {
     const body = await res.json();
     check(
-      "200 ready shape (epoch/values/operatorCount)",
+      "200 published shape (epoch/tag/values/operatorCount)",
       typeof body.epoch === "number" &&
+        typeof body.tag === "string" &&
         body.values !== undefined &&
         typeof body.operatorCount === "number",
     );
@@ -93,13 +59,13 @@ async function httpAsserts(): Promise<void> {
     ).map((v) => v.share);
     const sum = shares.reduce((a, b) => a + b, 0);
     check("shares sum ≈ 1", Math.abs(sum - 1) < 0.001, `sum=${sum}`);
-  } else if (res.status === 202) {
+  } else if (res.status === 404) {
     const body = await res.json();
     check(
-      "202 warming shape ({status, message, epoch})",
-      body.status === "warming" &&
-        typeof body.message === "string" &&
-        typeof body.epoch === "number",
+      "404 not-cached shape ({status, epoch, tag})",
+      body.status === "not-cached" &&
+        typeof body.epoch === "number" &&
+        typeof body.tag === "string",
     );
   } else if (res.status === 502) {
     console.warn(
@@ -107,13 +73,38 @@ async function httpAsserts(): Promise<void> {
         "shape asserts skipped",
     );
   } else {
-    check(`baseline responds 200 or 202 (got ${res.status})`, false);
+    check(`baseline responds 200 or 404 (got ${res.status})`, false);
   }
 
   const latest = await fetch(`${BASE_URL}/api/shapley?epoch=latest`, {
     signal: AbortSignal.timeout(10_000),
   });
   check("/api/shapley?epoch=latest → 400", latest.status === 400);
+
+  const tracking = await fetch(`${BASE_URL}/api/shapley/tracking?count=4`, {
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (tracking.status === 200) {
+    const body = await tracking.json();
+    check(
+      "tracking 200 shape (>= 2 epochs, missingEpochs array)",
+      Array.isArray(body.epochs) &&
+        body.epochs.length >= 2 &&
+        Array.isArray(body.missingEpochs),
+    );
+  } else if (tracking.status === 404) {
+    const body = await tracking.json();
+    check(
+      "tracking 404 not-cached shape",
+      body.status === "not-cached" &&
+        Array.isArray(body.epochs) &&
+        Array.isArray(body.missingEpochs),
+    );
+  } else if (tracking.status === 502) {
+    console.warn("  tracking → 502, shape asserts skipped");
+  } else {
+    check(`tracking responds 200 or 404 (got ${tracking.status})`, false);
+  }
 }
 
 httpAsserts().then(() => {

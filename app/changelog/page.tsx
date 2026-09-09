@@ -11,6 +11,7 @@ import {
 } from "@/lib/constants/config";
 import { LoadingState, ErrorState, EmptyState } from "@/components/ui/states";
 import { rowsToCsv, downloadCsv } from "@/lib/utils/csv";
+import type { NetworkDiffResponse } from "@/lib/types/diff";
 import {
   ArrowRight,
   Plus,
@@ -26,58 +27,6 @@ const fetcher = async (url: string) => {
   return res.json();
 };
 
-interface DiffLink {
-  pubkey: string;
-  contributorCode: string;
-  sideACode: string;
-  sideZCode: string;
-  bandwidthGbps: number;
-  linkType: string;
-  /** Earliest intermediate epoch where the link was first observed in
-   *  its new state (added/removed). Server-side attribution; falls
-   *  back to `to` if no intermediates were walked. */
-  firstObservedEpoch?: number;
-}
-interface DiffChange {
-  pubkey: string;
-  contributorCode: string;
-  field: string;
-  before: unknown;
-  after: unknown;
-  firstObservedEpoch?: number;
-}
-interface DiffContributor {
-  code: string;
-  beforeLinkCount: number;
-  afterLinkCount: number;
-  beforeDeviceCount: number;
-  afterDeviceCount: number;
-  beforeMetroCount: number;
-  afterMetroCount: number;
-  linksAdded: number;
-  linksRemoved: number;
-  linksChanged: number;
-  bandwidthGbpsBefore: number;
-  bandwidthGbpsAfter: number;
-  bandwidthGbpsDelta: number;
-  firstSeen: boolean;
-  leftNetwork: boolean;
-}
-interface DiffResponse {
-  from: number;
-  to: number;
-  summary: {
-    linksAdded: number;
-    linksRemoved: number;
-    linksChanged: number;
-    contributorsAffected: number;
-  };
-  contributors: DiffContributor[];
-  added: DiffLink[];
-  removed: DiffLink[];
-  changed: DiffChange[];
-  fetchedAt: string;
-}
 
 export default function ChangelogPage() {
   const { data: epochsData, isLoading: epLoading } = useEpochs();
@@ -105,7 +54,7 @@ export default function ChangelogPage() {
     from !== null && to !== null && from !== to
       ? `/api/diff?from=${from}&to=${to}`
       : null;
-  const { data, isLoading, error, mutate } = useSWR<DiffResponse>(
+  const { data, isLoading, error, mutate } = useSWR<NetworkDiffResponse>(
     url,
     fetcher,
     { revalidateOnFocus: false, dedupingInterval: 5 * 60_000 },
@@ -115,7 +64,7 @@ export default function ChangelogPage() {
     <>
       <PageHeader
         title="Changelog"
-        description="What changed between any two snapshots — links added, removed, bandwidth changes, and per-contributor footprint deltas."
+        description="What changed between any two snapshots: links added, removed, bandwidth changes, and per-contributor footprint deltas."
       />
       <div className="flex-1 px-4 sm:px-6 py-4 sm:py-6 space-y-6">
         {/* Epoch selectors */}
@@ -202,7 +151,7 @@ function EpochSelect({
   );
 }
 
-function DiffView({ data }: { data: DiffResponse }) {
+function DiffView({ data }: { data: NetworkDiffResponse }) {
   const exportCsv = () => {
     const headers = [
       "Contributor",
@@ -368,7 +317,7 @@ function DiffView({ data }: { data: DiffResponse }) {
             contributor: l.contributorCode,
             text: `${l.sideACode} ↔ ${l.sideZCode}`,
             meta: `${l.bandwidthGbps}G · ${l.linkType}`,
-            epoch: l.firstObservedEpoch ?? data.to,
+            epoch: l.firstObservedEpoch,
           }))}
         />
       )}
@@ -385,7 +334,7 @@ function DiffView({ data }: { data: DiffResponse }) {
             contributor: l.contributorCode,
             text: `${l.sideACode} ↔ ${l.sideZCode}`,
             meta: `${l.bandwidthGbps}G · ${l.linkType}`,
-            epoch: l.firstObservedEpoch ?? data.to,
+            epoch: l.firstObservedEpoch,
           }))}
         />
       )}
@@ -402,7 +351,7 @@ function DiffView({ data }: { data: DiffResponse }) {
             contributor: c.contributorCode,
             text: c.field,
             meta: `${String(c.before)} → ${String(c.after)}`,
-            epoch: c.firstObservedEpoch ?? data.to,
+            epoch: c.firstObservedEpoch,
           }))}
         />
       )}

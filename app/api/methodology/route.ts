@@ -11,9 +11,8 @@ import { getEpochRate, toPublicEpochRate } from "@/lib/utils/epoch-rate";
  * GET /api/methodology
  *
  * Machine-readable manifest of every formula, constant, and data source
- * the site uses to compute the figures we display. Mirrors the prose in
- * /methodology so external auditors (DZ algorithm team in particular)
- * can spot-check our work programmatically.
+ * the site uses to compute the figures we display, so external auditors
+ * (DZ algorithm team in particular) can spot-check our work programmatically.
  *
  * Stable contract: never remove a key, only add. Bump `version` on any
  * formula change so consumers can diff.
@@ -147,7 +146,9 @@ export async function GET() {
         expression:
           "max sum_d demand_satisfied(d) - contiguity_penalty subject to per-link bandwidth, uptime, multicast",
         notes:
-          "Implemented in network-shapley-rs. The TS fallback uses bandwidth-aware greedy demand packing.",
+          "Implemented in network-shapley-rs. A request never triggers a solve: " +
+          "when the cron has not published the epoch, the route answers " +
+          "404 {\"status\":\"not-cached\"} and the widget is not shown.",
       },
       shapley_value: {
         description: "Marginal contribution of an operator across all coalitions.",

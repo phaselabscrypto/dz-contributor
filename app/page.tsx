@@ -8,7 +8,7 @@ export default function HomePage() {
           DoubleZero Contributor Rewards
         </p>
         <h1 className="font-display text-3xl sm:text-4xl tracking-tight text-foreground">
-          See exactly what your links earn — and what they would earn.
+          See what your links earn now, and what they would earn after a change.
         </h1>
         <p className="text-sm sm:text-base text-cream-60 leading-relaxed">
           For operators running links today and anyone weighing whether to
@@ -22,15 +22,15 @@ export default function HomePage() {
         <ModeCard
           href="/simulate"
           title="Forecast"
-          subtitle="Model your links — see the 2Z you'd earn"
+          subtitle="Model your links and see the 2Z you'd earn"
           body="Whether you run links today or you're thinking about joining: add or drop links, set demand, and run a Shapley what-if for before/after reward share and projected 2Z."
           primary
         />
         <ModeCard
           href="/link-value"
           title="Link Rewards"
-          subtitle="Per-link reward breakdown — existing operators only"
-          body="Pick an operator and see how much each of their existing links contributes to their reward this epoch. A faithful, read-only attribution — no hypotheticals."
+          subtitle="Per-link reward breakdown for existing operators"
+          body="Pick an operator and see how much each of their existing links contributes to their reward this epoch. An exact read-only attribution, with no hypotheticals."
         />
       </div>
 
@@ -53,17 +53,11 @@ export default function HomePage() {
         <ExploreCard
           href="/economics"
           title="Economics"
-          body="2Z distributed, debt, burn, per-contributor share — live from doublezero.xyz."
+          body="2Z distributed, debt, burn and per-contributor share, live from doublezero.xyz."
         />
       </div>
 
       <p className="mt-8 text-xs text-muted-foreground font-mono flex flex-wrap gap-x-4 gap-y-1">
-        <Link
-          href="/methodology"
-          className="underline decoration-dotted hover:text-foreground"
-        >
-          Methodology
-        </Link>
         <Link
           href="/status"
           className="underline decoration-dotted hover:text-foreground"

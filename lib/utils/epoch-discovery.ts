@@ -13,6 +13,8 @@
  * the result.
  */
 
+import { boundedSignal } from "@/lib/utils/request-deadline";
+
 import { getSnapshotUrl } from "@/lib/constants/config";
 
 export interface EpochMeta {
@@ -33,19 +35,27 @@ let cache: { data: EpochAvailability; ts: number; withMeta: boolean } | null =
 const CACHE_TTL = 5 * 60 * 1000;
 
 /**
+ * Route-level deadline for a cold `getEpochAvailability` call. Sits under the
+ * 30 s `maxDuration` of the routes that call it (`/api/shapley/baseline`,
+ * `/api/shapley/tracking`, `/api/epochs`), leaving headroom for the response
+ * to actually get written.
+ */
+export const READ_ROUTE_DISCOVERY_TIMEOUT_MS = 20_000;
+
+/**
  * Find the highest epoch number that exists in the snapshot bucket.
  * Exponential probe to find an upper bound, then binary search between
  * the last-known-good epoch and the probe miss. Avoids a hard-coded
  * ceiling that needs to be bumped every few months.
  */
-async function discoverLatest(): Promise<number> {
+async function discoverLatest(signal?: AbortSignal): Promise<number> {
   let lastOk = 48;
   let probe = 100;
   // Cap exponential growth at 10_000 to bound the number of HEADs.
   while (probe <= 10_000) {
     const res = await fetch(getSnapshotUrl(probe), {
       method: "HEAD",
-      signal: AbortSignal.timeout(5_000),
+      signal: boundedSignal({ signal }, 5_000),
     });
     if (res.ok) {
       lastOk = probe;
@@ -62,7 +72,7 @@ async function discoverLatest(): Promise<number> {
     const mid = Math.floor((low + high) / 2);
     const res = await fetch(getSnapshotUrl(mid), {
       method: "HEAD",
-      signal: AbortSignal.timeout(5_000),
+      signal: boundedSignal({ signal }, 5_000),
     });
     if (res.ok) {
       latest = mid;
@@ -74,11 +84,11 @@ async function discoverLatest(): Promise<number> {
   return latest;
 }
 
-async function headMeta(epoch: number): Promise<EpochMeta> {
+async function headMeta(epoch: number, signal?: AbortSignal): Promise<EpochMeta> {
   try {
     const res = await fetch(getSnapshotUrl(epoch), {
       method: "HEAD",
-      signal: AbortSignal.timeout(5_000),
+      signal: boundedSignal({ signal }, 5_000),
     });
     if (!res.ok) return { epoch };
     const cl = res.headers.get("content-length");
@@ -89,6 +99,7 @@ async function headMeta(epoch: number): Promise<EpochMeta> {
       lastModified: lm ?? undefined,
     };
   } catch {
+    signal?.throwIfAborted();
     return { epoch };
   }
 }
@@ -100,7 +111,9 @@ async function headMeta(epoch: number): Promise<EpochMeta> {
  */
 export async function getEpochAvailability(
   withMeta = false,
+  options: { signal?: AbortSignal } = {},
 ): Promise<EpochAvailability> {
+  options.signal?.throwIfAborted();
   if (
     cache &&
     Date.now() - cache.ts < CACHE_TTL &&
@@ -109,7 +122,7 @@ export async function getEpochAvailability(
     return cache.data;
   }
 
-  const latest = await discoverLatest();
+  const latest = await discoverLatest(options.signal);
   const epochs: number[] = [];
   for (let e = latest; e >= Math.max(48, latest - 30); e--) {
     epochs.push(e);
@@ -117,7 +130,7 @@ export async function getEpochAvailability(
 
   let meta: EpochMeta[] | undefined;
   if (withMeta) {
-    meta = await Promise.all(epochs.map(headMeta));
+    meta = await Promise.all(epochs.map(epoch => headMeta(epoch, options.signal)));
   }
 
   const data: EpochAvailability = {
@@ -126,6 +139,7 @@ export async function getEpochAvailability(
     available: epochs,
     ...(meta ? { meta } : {}),
   };
+  options.signal?.throwIfAborted();
   cache = { data, ts: Date.now(), withMeta };
   return data;
 }

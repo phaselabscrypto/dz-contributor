@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  getSnapshotUrl,
-  MIN_DZ_EPOCH,
-  SHAPLEY_SERVICE_URL,
-} from "@/lib/constants/config";
-import type { RawSnapshot } from "@/lib/types/snapshot";
+import { MIN_DZ_EPOCH, SHAPLEY_SERVICE_URL } from "@/lib/constants/config";
 import { buildCanonicalShapleyInput } from "@/lib/utils/canonical-input-builder";
-import { JobStartError, startLinkEstimateJob } from "@/lib/utils/shapley-remote";
+import {
+  EpochSnapshotError,
+  fetchEpochSnapshot,
+  snapshotFailure,
+} from "@/lib/utils/epoch-snapshot";
+import {
+  JobStartError,
+  startLinkEstimateJob,
+  startLinkEstimateJobByTag,
+} from "@/lib/utils/shapley-remote";
+import { sweepTag } from "@/lib/utils/sweep-tag";
 import { enforceRateLimit, RATE_LIMIT_HEAVY } from "@/lib/utils/rate-limit";
 import { reportError } from "@/lib/observability";
 
@@ -60,22 +65,37 @@ export async function POST(request: NextRequest) {
 
   if (!SHAPLEY_SERVICE_URL) {
     return NextResponse.json(
-      { error: "SHAPLEY_SERVICE_URL not configured — canonical link values unavailable." },
+      { error: "SHAPLEY_SERVICE_URL not configured. Canonical link values unavailable." },
       { status: 503 },
     );
   }
 
   try {
-    const snapRes = await fetch(getSnapshotUrl(epoch), {
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!snapRes.ok) {
-      return NextResponse.json(
-        { error: `Epoch ${epoch} not found` },
-        { status: snapRes.status === 404 ? 404 : 500 },
+    // Fast path: the epoch sweep already computed this operator's estimate and
+    // recorded which payload hash answers (tag, operator). Two S3 reads inside
+    // the cluster, instead of a 113 MB snapshot download whose only purpose was
+    // to rebuild the 145 KB input that names an object we already hold.
+    //
+    // The tag carries a fingerprint of the offchain parameters, so a parameter
+    // change misses here and falls through to a rebuild rather than serving a
+    // pre-change value.
+    const aliasJobId = await startLinkEstimateJobByTag(
+      sweepTag(epoch),
+      contributorCode,
+    );
+    if (aliasJobId) {
+      console.log(
+        `[link-value/jobs] epoch=${epoch} contributor=${contributorCode} served_from=alias`,
       );
+      return NextResponse.json({ jobId: aliasJobId }, { status: 202 });
     }
-    const raw: RawSnapshot = await snapRes.json();
+
+    // No alias: a cold epoch, an operator over the sweep's link cap, or a
+    // parameter change since the sweep. Rebuild from the snapshot.
+    console.log(
+      `[link-value/jobs] epoch=${epoch} contributor=${contributorCode} served_from=snapshot`,
+    );
+    const raw = await fetchEpochSnapshot(epoch, { timeoutMs: 30_000 });
     // Same canonical input (and therefore same cache keys) as every other
     // link-value path. A snapshot that can't build canonically is a loud 422.
     const built = buildCanonicalShapleyInput(raw);
@@ -91,6 +111,16 @@ export async function POST(request: NextRequest) {
     const jobId = await startLinkEstimateJob(built.input, contributorCode);
     return NextResponse.json({ jobId }, { status: 202 });
   } catch (err) {
+    if (err instanceof EpochSnapshotError) {
+      const failure = snapshotFailure(err);
+      if (failure.status !== 404) {
+        reportError(err, {
+          source: "api/link-value/jobs",
+          extras: { epoch, contributorCode, phase: "snapshot" },
+        });
+      }
+      return NextResponse.json({ error: failure.message }, { status: failure.status });
+    }
     reportError(err, {
       source: "api/link-value/jobs",
       extras: { epoch, contributorCode },
