@@ -18,9 +18,9 @@ Deployment for any container platform is in `docs/operations.md`. The platform, 
 
 Reward shares are an exact Shapley value per source city, aggregated with stake weights. Responses carry the method label `lp-per-city-stake-weighted-exact`. Per-link values use the retag method: each focus-owned link becomes a player, every other operator collapses to one `Others` player, and one exact solve runs over `2^(links+1)` coalitions. Those responses carry `retag-shapley-rs`.
 
-Nothing computes on a page load. The cron publishes each epoch's baseline under an epoch tag, and `/api/shapley`, `/api/shapley/baseline`, and `/api/shapley/tracking` read that alias or answer `404 {status:"not-cached"}`, which hides the widget. A service failure is a 502, never a different algorithm, and there is no in-process solver to fall back to. Details: `docs/shapley-pipeline.md` and `docs/adr/0004-cache-only-baseline-reads.md`.
+Nothing computes on a page load. The cron publishes each epoch's baseline under an epoch tag, and `/api/shapley`, `/api/shapley/baseline`, and `/api/shapley/tracking` read that alias or answer `404 {status:"not-cached"}`, which hides the widget. A service failure is a 502, never a different algorithm, and there is no in-process solver to fall back to. Details: `docs/shapley-pipeline.md`.
 
-The changelog runs the same way. Each epoch's topology is stored as a 28 KB shape record that the cron extracts from the snapshot it already downloads, so a diff between two epochs reads two small records instead of two 110 MB files. Details: `docs/adr/0003-cron-side-snapshot-extraction.md`.
+The changelog runs the same way. Each epoch's topology is stored as a 28 KB shape record that the cron extracts from the snapshot it already downloads, so a diff between two epochs reads two small records instead of two 110 MB files. Details: `docs/shapley-service.md`.
 
 ## Tests and checks
 
@@ -68,8 +68,4 @@ Hosting platform, instance sizing, hostnames, secrets, and internal ticket refer
 | `docs/shapley-service.md` | Service roles, auth, endpoints, job lifecycle, keyspace, cache |
 | `docs/development.md` | Local setup, scripts, tests |
 | `docs/operations.md` | Deployment on any container platform, env reference, CI, rotation, queue tooling |
-| `docs/adr/0001-async-compute-queue.md` | Why long solves run as queued jobs, with amendments |
-| `docs/adr/0002-snapshot-diff-index.md` | Why the epoch diff is served from immutable per-epoch records |
-| `docs/adr/0003-cron-side-snapshot-extraction.md` | Why the cron extracts those records and the service needs no snapshot egress |
-| `docs/adr/0004-cache-only-baseline-reads.md` | Why browser-driven Shapley reads never compute |
 | `services/shapley-rs/README.md` | Service local development and testing |

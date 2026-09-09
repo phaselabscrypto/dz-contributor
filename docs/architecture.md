@@ -13,7 +13,6 @@ This document is the index into the system. For depth, follow the cross-links:
 | [shapley-service.md](./shapley-service.md) | Rust microservice: endpoints, queue, cache, auth |
 | [development.md](./development.md) | Local setup, env vars, running without the Rust service |
 | [operations.md](./operations.md) | Deployment, cron, rate limits, observability |
-| [adr/0001-async-compute-queue.md](./adr/0001-async-compute-queue.md) | Why the long solves run as queued jobs |
 
 ## System diagram
 
@@ -328,4 +327,4 @@ Otherwise the fire downloads the epoch snapshot once and builds the canonical Sh
 
 The fire holds a 270 s work budget and gives 90 s of it to historical repair, which takes up to two shape gaps per fire, newest first, rotating every six hours so no gap starves. Passing `?epoch=N` with the bearer token backfills one epoch by hand.
 
-Three ADRs cover the design. [adr/0001](./adr/0001-async-compute-queue.md) explains why long solves run as queued jobs instead of holding an HTTP socket through O(operators) round-trips. [adr/0003](./adr/0003-cron-side-snapshot-extraction.md) covers the cron-side extraction, and [adr/0004](./adr/0004-cache-only-baseline-reads.md) covers why readers never compute. Deployment, env-var setup, and runbooks are in [operations.md](./operations.md).
+Long solves run as queued jobs rather than holding an HTTP socket through O(operators) round-trips. The cron extracts each diff shape from the snapshot it already downloads, which is why the service needs no egress to the public bucket. Deployment, env-var setup, and runbooks are in [operations.md](./operations.md).

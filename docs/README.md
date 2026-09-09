@@ -13,10 +13,6 @@ Architecture and operations documentation for DZ Contributor Rewards: a Next.js 
 | [shapley-service.md](./shapley-service.md) | Rust microservice internals: binary roles, fail-closed auth and the ingest token, endpoints and input limits, the async job lifecycle on Redis Streams, the keyspace contract, the S3 result cache and alias publication, the snapshot diff index, and the concurrency model. |
 | [development.md](./development.md) | Local setup (frontend-only and full-stack), the scripts inventory, the test matrix, and repo conventions. |
 | [operations.md](./operations.md) | Deployment (Vercel + platform-generic container), the full environment-variable reference for both sides, CI workflows, rate limiting, security headers, and queue admin tooling. |
-| [adr/0001-async-compute-queue.md](./adr/0001-async-compute-queue.md) | Why long Shapley solves run as queued jobs on Redis Streams with an always-warm worker pool, and the delivery, cancel, and idempotency contract that decision committed to. |
-| [adr/0002-snapshot-diff-index.md](./adr/0002-snapshot-diff-index.md) | Why the epoch diff is served from immutable per-epoch records rather than snapshot downloads or a database. Its ingest half is superseded by ADR 0003. |
-| [adr/0003-cron-side-snapshot-extraction.md](./adr/0003-cron-side-snapshot-extraction.md) | Why the cron extracts each epoch's diff shape from the snapshot it already downloads, so the service needs no egress to the public bucket. |
-| [adr/0004-cache-only-baseline-reads.md](./adr/0004-cache-only-baseline-reads.md) | Why browser-driven Shapley reads never compute, and why baselines are addressed by an epoch tag. |
 | [../services/shapley-rs/README.md](../services/shapley-rs/README.md) | Service local dev and testing: endpoints, the epoch precompute sweep, running the async job API and the S3 cache locally, and deploying the container. |
 
 ## Conventions

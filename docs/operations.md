@@ -95,7 +95,7 @@ docker run --env-file .env -p 8080:8080 <registry>/dz-shapley-service:<tag> api
 docker run --env-file .env <registry>/dz-shapley-service:<tag> worker
 ```
 
-Run one or more API processes behind a load balancer and one or more worker processes consuming from the shared Redis stream. The job queue design and horizontal scaling rationale are documented in [adr/0001-async-compute-queue.md](adr/0001-async-compute-queue.md).
+Run one or more API processes behind a load balancer and one or more worker processes consuming from the shared Redis stream. Scale compute by adding workers; the queue is the only thing they share. [shapley-service.md](shapley-service.md) describes the job lifecycle.
 
 ### Redis and the result cache
 
@@ -103,7 +103,7 @@ Provision a Redis instance with Streams support (Redis 5.0 or later). Set a pass
 
 An S3-compatible bucket is required in production. Set `S3_CACHE_BUCKET` to turn it on, `S3_CACHE_ENDPOINT` too when the bucket is not AWS S3 so the client switches to path-style addressing, and `AWS_REGION` plus the standard credential pair. The bucket holds three things the site depends on: solver results keyed by input hash, the epoch baseline aliases and sweep markers under `shapley/v3/publication/v1/` that every user-facing Shapley read probes, and the diff shapes under `diff/v1/` behind the changelog. Without it, every baseline read is `404 not-cached`, sweep status is always incomplete, `PUT /diff/shape` answers `503`, and nothing survives a restart.
 
-Neither role reads the public snapshot bucket. The cron downloads each epoch's snapshot and pushes the derived input, alias, and diff shape to the service, so the processes need egress only to Redis and the object store. [ADR 0003](adr/0003-cron-side-snapshot-extraction.md) records why.
+Neither role reads the public snapshot bucket. The cron downloads each epoch's snapshot and pushes the derived input, alias, and diff shape to the service, so the processes need egress only to Redis and the object store.
 
 ### REDIS_URL behavior
 
