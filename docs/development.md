@@ -268,4 +268,4 @@ For production deployment and the full environment-variable reference, see [oper
 
 For data-source details, see [data-sources.md](./data-sources.md).
 
-For the async job queue and worker internals, see [shapley-service.md](./shapley-service.md).
+For the async job queue design, see [adr/0001-async-compute-queue.md](./adr/0001-async-compute-queue.md).

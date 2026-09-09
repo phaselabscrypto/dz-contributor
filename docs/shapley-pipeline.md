@@ -56,7 +56,7 @@ The governing rule is **no silent fallback**. A canonical route never swaps algo
 | Timeout, network failure, or an unnamed status | `502` with a generic body |
 | `SHAPLEY_SERVICE_URL` unset | `503` |
 
-A miss is reported to observability as a `baseline-not-cached` event rather than an error, because it is the normal state of a fresh epoch. Sustained misses on the latest epoch mean the cron or the worker is broken. Nothing self-heals on a user request, because no reader computes.
+A miss is reported to observability as a `baseline-not-cached` event rather than an error, because it is the normal state of a fresh epoch. Sustained misses on the latest epoch mean the cron or the worker is broken. Nothing self-heals on a user request, because no reader computes. [ADR 0004](./adr/0004-cache-only-baseline-reads.md) records the decision.
 
 Only the cron asks the service to compute. It posts `{input, tag}` to `POST {service}/precompute/baseline` with the compute and ingest tokens, and the worker solves or loads the baseline, persists it, then writes the epoch alias the readers probe.
 
@@ -170,4 +170,6 @@ The pipeline is pinned at two layers: the Rust engine wrapper and the TS input b
 - [shapley-service.md](./shapley-service.md): the Rust service, queue, and workers
 - [development.md](./development.md): local setup
 - [operations.md](./operations.md): deployment and runbooks
+- [adr/0001-async-compute-queue.md](./adr/0001-async-compute-queue.md): the async compute queue decision
+- [adr/0004-cache-only-baseline-reads.md](./adr/0004-cache-only-baseline-reads.md): why reads never compute and baselines are keyed by epoch tag
 - Upstream engine fork: [github.com/phaselabscrypto/network-shapley-rs](https://github.com/phaselabscrypto/network-shapley-rs)

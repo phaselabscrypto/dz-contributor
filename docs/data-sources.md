@@ -139,7 +139,7 @@ Direct on-chain reads use two RPC endpoints: a standard Solana RPC for mainnet a
 | Failure (unconfigured) | `topology` and `validators` pre-flight-check configuration and return 503 with a stable `{ ready: false, reason: "…" }` shape; `contributors`, `rewards`, and `contributor-rewards` attempt the read directly and surface the failure as a 502 |
 | Failure (configured, RPC error) | 502 (`/api/epoch-rate` instead falls back to a fixed measurement and always answers 200) |
 
-`DZ_LEDGER_RPC_URL` has no built-in default because baking an endpoint value into source would expose a paid API key in the deployed JS bundle. Set it in `.env.local` for development; see `.env.example` for the recommended public endpoint. `DZ_REGISTRY_PROGRAM_ID` remains unset because the registry reader that would use it is unimplemented. The serviceability program that owns Metro, Device, Link, and Contributor accounts is known: `contributor-directory.ts` hardcodes `ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv` and decodes contributor accounts from it by verified byte offsets. `DZ_REWARDS_PROGRAM_ID` is already known and set in `.env.example`.
+`DZ_LEDGER_RPC_URL` has no built-in default because baking an endpoint value into source would expose a paid API key in the deployed JS bundle. Set it in `.env.local` for development; see `.env.example` for the recommended public endpoint. `DZ_REGISTRY_PROGRAM_ID` stays unset; the serviceability program that owns the Metro, Device, Link and Contributor accounts is hardcoded in `lib/onchain/contributor-directory.ts`.
 
 ---
 

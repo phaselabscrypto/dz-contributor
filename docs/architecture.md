@@ -13,6 +13,7 @@ This document is the index into the system. For depth, follow the cross-links:
 | [shapley-service.md](./shapley-service.md) | Rust microservice: endpoints, queue, cache, auth |
 | [development.md](./development.md) | Local setup, env vars, running without the Rust service |
 | [operations.md](./operations.md) | Deployment, cron, rate limits, observability |
+| [adr/0001-async-compute-queue.md](./adr/0001-async-compute-queue.md) | Why the long solves run as queued jobs |
 
 ## System diagram
 
@@ -51,13 +52,13 @@ flowchart TD
 
     compute --> snaps
     compute --> rust
-    onchain -. "reward records live;<br/>registry reads 503, layouts unwritten" .-> rpc
+    onchain --> rpc
 
     rust --> redis
     rust --> s3cache
 ```
 
-All external feeds are reached **server-side** from the API routes; the browser only ever talks to `/api/*` on its own origin. The Content-Security-Policy in `next.config.ts` enforces this: `connect-src 'self'` in production. Two on-chain routes, `topology` and `validators`, are dark and return `503` with a stable shape, because their account decoders are unwritten (see `lib/onchain/README.md`). The other three on-chain routes read live from the DZ ledger.
+All external feeds are reached **server-side** from the API routes; the browser only ever talks to `/api/*` on its own origin. The Content-Security-Policy in `next.config.ts` enforces this: `connect-src 'self'` in production. The on-chain routes read the DZ ledger and Solana mainnet; `topology` and `validators` answer `503` with a stable `{ ready: false, reason }` shape (see `lib/onchain/README.md`).
 
 ## Layer tour
 
@@ -126,7 +127,7 @@ There are **31** `route.ts` files. They fall into five behavioral groups:
 - **Proxy / aggregate**: fetch an upstream server-side, cache, and return JSON. Examples: `live/*`, `epochs`, `snapshot`, `fees`, `prices`, `publishers`, `economics/projection`, `epoch-rate`, `health`, `diff`, `diff/contributor/[code]`.
 - **Compute**: talk to the Rust service. The cache-only readers `shapley`, `shapley/baseline`, and `shapley/tracking` probe a published epoch alias and never solve. The solvers `shapley/simulate`, `shapley/jobs` (+ `[id]`), and `link-value/jobs` (+ `[id]`) do. `diff` and `diff/contributor/[code]` proxy to the service's `/diff*` endpoints, which answer from the per-epoch index.
 - **Cron**: `link-value/precompute`, the only route that asks the service to compute, gated by `CRON_SECRET`.
-- **On-chain**: `onchain/{topology,validators}` pre-flight-check configuration and return `503` with a stable `{ ready: false, reason }` shape while the registry account layouts are unwritten; `onchain/{contributors,rewards,contributor-rewards}` read live from the DZ ledger and return a `502` on failure instead (see [`lib/onchain`](#libonchain)).
+- **On-chain**: `onchain/{topology,validators}` return `503` with a stable `{ ready: false, reason }` shape; `onchain/{contributors,rewards,contributor-rewards}` read live from the DZ ledger and return a `502` on failure instead (see [`lib/onchain`](#libonchain)).
 - **Meta**: `methodology` (machine-readable formula/source manifest) and `vitals` (Web Vitals sink; always `204`, logs only outside production).
 
 ### `lib/utils`
@@ -144,9 +145,9 @@ The builders, solver clients, and caches that the routes compose:
 
 ### `lib/onchain`
 
-Three modules are live: `dz-rewards-record.ts` and `rewards.ts` read contributor-rewards records from the DZ ledger, and `contributor-directory.ts` reads the contributor directory from the same ledger. A fourth, `vote-stake.ts`, resolves activated stake for any Solana vote account and backs `/api/validators/stake`. Two readers are stubs. `topology.ts` needs the byte layout of the Metro, Device, and Link accounts, which `decoders.ts` currently routes to a registry that throws. `validators.ts` needs the payout record layout on the rewards program; it fetches the accounts and discards them. Both are byte-layout work in this repository. The Metro, Device, and Link accounts belong to the DoubleZero serviceability program (`ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv`) that `contributor-directory.ts` already reads by verified byte offsets, and `dz-rewards-record.ts` decodes reward records on the record program the same way, so the pattern is proven on both.
+Three modules are live: `dz-rewards-record.ts` and `rewards.ts` read contributor-rewards records from the DZ ledger, and `contributor-directory.ts` reads the contributor directory from the same ledger. A fourth, `vote-stake.ts`, resolves activated stake for any Solana vote account and backs `/api/validators/stake`. `topology.ts` and `validators.ts` are not wired to the routes; `decoders.ts` routes their account types to a registry that is not active.
 
-`program-ids.ts` defines `SOLANA_RPC_URL` (defaults to `https://api.mainnet-beta.solana.com`), `DZ_REGISTRY_PROGRAM_ID`, `DZ_REWARDS_PROGRAM_ID`, and the `ONCHAIN_ENABLED` toggle. The live reward paths separately require `DZ_LEDGER_RPC_URL`, which has no default: a baked-in value would expose a paid RPC key in the deployed bundle. While the registry layouts are unwritten, `/api/onchain/topology` and `/api/onchain/validators` return `503` with a stable shape; `/api/onchain/contributors`, `/api/onchain/rewards`, and `/api/onchain/contributor-rewards` read live and return `502` only if the upstream call fails. What each stub still needs is listed in `lib/onchain/README.md`.
+`program-ids.ts` defines `SOLANA_RPC_URL` (defaults to `https://api.mainnet-beta.solana.com`), `DZ_REGISTRY_PROGRAM_ID`, `DZ_REWARDS_PROGRAM_ID`, and the `ONCHAIN_ENABLED` toggle. The live reward paths separately require `DZ_LEDGER_RPC_URL`, which has no default: a baked-in value would expose a paid RPC key in the deployed bundle. `/api/onchain/topology` and `/api/onchain/validators` return `503` with a stable shape. `/api/onchain/contributors`, `/api/onchain/rewards`, and `/api/onchain/contributor-rewards` read live and return `502` only if the upstream call fails. `lib/onchain/README.md` tracks which readers are wired.
 
 ### Rust service (`services/shapley-rs/`)
 
@@ -264,7 +265,7 @@ Each fact has exactly one upstream owner. Detail (shapes, fallback chains) is in
 | Historical 2Z fee distribution | DZ Foundation | `raw.githubusercontent.com/doublezerofoundation/fees/main/fees_and_payments_consolidated.csv` | manual (~per epoch) |
 | Spot prices (2Z, SOL) | Jupiter | `lite-api.jup.ag/price/v3` | 60 s |
 | Contributor directory + reward records | DZ ledger | `DZ_LEDGER_RPC_URL` (required, no default) | on-demand (`502` on failure) |
-| Registry topology + validator payouts | Solana RPC | `SOLANA_RPC_URL` (default `api.mainnet-beta.solana.com`) | not implemented (`503`); account layouts unwritten |
+| Registry topology + validator payouts | Solana RPC | `SOLANA_RPC_URL` (default `api.mainnet-beta.solana.com`) | `503` (`{ ready: false, reason }`) |
 
 The publisher feed treats Foundation exports as authoritative and malbec as a best-effort enrichment overlay (`app/api/publishers/route.ts`). The earliest published snapshot epoch is `MIN_DZ_EPOCH = 48` (`lib/constants/config.ts`); no upper bound is pinned; routes let the S3 `404` reject epochs that don't exist yet.
 
@@ -327,4 +328,4 @@ Otherwise the fire downloads the epoch snapshot once and builds the canonical Sh
 
 The fire holds a 270 s work budget and gives 90 s of it to historical repair, which takes up to two shape gaps per fire, newest first, rotating every six hours so no gap starves. Passing `?epoch=N` with the bearer token backfills one epoch by hand.
 
-Long solves run as queued jobs rather than holding an HTTP socket through O(operators) round-trips. The cron extracts each diff shape from the snapshot it already downloads, which is why the service needs no egress to the public bucket. Deployment, env-var setup, and runbooks are in [operations.md](./operations.md).
+Three ADRs cover the design. [adr/0001](./adr/0001-async-compute-queue.md) explains why long solves run as queued jobs instead of holding an HTTP socket through O(operators) round-trips. [adr/0003](./adr/0003-cron-side-snapshot-extraction.md) covers the cron-side extraction, and [adr/0004](./adr/0004-cache-only-baseline-reads.md) covers why readers never compute. Deployment, env-var setup, and runbooks are in [operations.md](./operations.md).

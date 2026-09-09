@@ -18,9 +18,9 @@ Deployment for any container platform is in `docs/operations.md`. The platform, 
 
 Reward shares are an exact Shapley value per source city, aggregated with stake weights. Responses carry the method label `lp-per-city-stake-weighted-exact`. Per-link values use the retag method: each focus-owned link becomes a player, every other operator collapses to one `Others` player, and one exact solve runs over `2^(links+1)` coalitions. Those responses carry `retag-shapley-rs`.
 
-Nothing computes on a page load. The cron publishes each epoch's baseline under an epoch tag, and `/api/shapley`, `/api/shapley/baseline`, and `/api/shapley/tracking` read that alias or answer `404 {status:"not-cached"}`, which hides the widget. A service failure is a 502, never a different algorithm, and there is no in-process solver to fall back to. Details: `docs/shapley-pipeline.md`.
+Nothing computes on a page load. The cron publishes each epoch's baseline under an epoch tag, and `/api/shapley`, `/api/shapley/baseline`, and `/api/shapley/tracking` read that alias or answer `404 {status:"not-cached"}`, which hides the widget. A service failure is a 502, never a different algorithm, and there is no in-process solver to fall back to. Details: `docs/shapley-pipeline.md` and `docs/adr/0004-cache-only-baseline-reads.md`.
 
-The changelog runs the same way. Each epoch's topology is stored as a 28 KB shape record that the cron extracts from the snapshot it already downloads, so a diff between two epochs reads two small records instead of two 110 MB files. Details: `docs/shapley-service.md`.
+The changelog runs the same way. Each epoch's topology is stored as a 28 KB shape record that the cron extracts from the snapshot it already downloads, so a diff between two epochs reads two small records instead of two 110 MB files. Details: `docs/adr/0003-cron-side-snapshot-extraction.md`.
 
 ## Tests and checks
 
@@ -50,7 +50,6 @@ Details: `docs/shapley-pipeline.md` (Limits) and `docs/shapley-service.md` (Inpu
 
 - The progress screen on `/simulate` cannot tell a queued job from a solve that is still starting; both read as starting.
 - `services/shapley-rs/tests/smoke.sh` step 8 calls `POST /diff/precompute`, a route the service does not serve. That step fails until the script is updated.
-- `GET /api/onchain/topology` and `GET /api/onchain/validators` return `503`. Four account layouts are unwritten: Metro, Device, and Link on the serviceability program, and the payout record on the rewards program. That is byte-layout work in this repository, and nothing external blocks it. `contributor-directory.ts` reads `AccountType::Contributor` from the same serviceability program with offsets verified against every live account, and `dz-rewards-record.ts` decodes reward records on the record program the same way, so the pattern is proven on both. Everything else on-chain is live.
 - Open engineering notes are in `services/shapley-rs/TODO.md`.
 
 ## Not included, on purpose
@@ -68,4 +67,8 @@ Hosting platform, instance sizing, hostnames, secrets, and internal ticket refer
 | `docs/shapley-service.md` | Service roles, auth, endpoints, job lifecycle, keyspace, cache |
 | `docs/development.md` | Local setup, scripts, tests |
 | `docs/operations.md` | Deployment on any container platform, env reference, CI, rotation, queue tooling |
+| `docs/adr/0001-async-compute-queue.md` | Why long solves run as queued jobs, with amendments |
+| `docs/adr/0002-snapshot-diff-index.md` | Why the epoch diff is served from immutable per-epoch records |
+| `docs/adr/0003-cron-side-snapshot-extraction.md` | Why the cron extracts those records and the service needs no snapshot egress |
+| `docs/adr/0004-cache-only-baseline-reads.md` | Why browser-driven Shapley reads never compute |
 | `services/shapley-rs/README.md` | Service local development and testing |

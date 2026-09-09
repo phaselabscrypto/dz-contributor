@@ -27,7 +27,7 @@ dz-contributor/
 ├── components/             UI primitives + page clients
 ├── lib/
 │   ├── hooks/              SWR hooks for live data, baselines, stake lookups
-│   ├── onchain/            Solana RPC + DZ ledger readers (3 live; Metro/Device/Link layouts unwritten)
+│   ├── onchain/            Solana RPC + DZ ledger readers
 │   ├── types/              Wire types for snapshots, topology, etc.
 │   └── utils/              Shapley input builders + heuristics + CSV
 └── services/
@@ -85,7 +85,7 @@ All API routes return JSON. Cached server-side; SWR-cached client-side.
 | `GET /api/methodology` | Machine-readable formulas and sources. JSON only; there is no Methodology page. |
 | `GET /api/health` | Source-feed health aggregator. Vercel cron every 15 minutes. |
 | `POST /api/vitals` | Web vitals sink. No-op until a metrics backend is wired. |
-| `GET /api/onchain/{topology,validators}` | `503`. The Metro, Device, and Link account layouts are not written yet. |
+| `GET /api/onchain/{topology,validators}` | `503` with a stable `{ ready: false, reason }` shape. |
 | `GET /api/onchain/{contributors,rewards,contributor-rewards}` | Live reads from the DZ ledger. `502` on an upstream failure. |
 
 ## Architecture
@@ -96,7 +96,7 @@ All API routes return JSON. Cached server-side; SWR-cached client-side.
 - **dz/economic-hub**: `doublezero.xyz/api/economic-hub` for distributed reward percentages
 - **DZ Foundation S3**: historical per-epoch snapshots
 - **Jupiter**: spot prices for 2Z and SOL
-- **Solana RPC**: live reads for vote-account stake (`/api/validators/stake`) and epoch timing (`/api/epoch-rate`) on mainnet, plus reward records and the contributor directory on the DZ ledger. On-chain topology and validator payouts are not implemented.
+- **Solana RPC**: live reads for vote-account stake (`/api/validators/stake`) and epoch timing (`/api/epoch-rate`) on mainnet, plus reward records and the contributor directory on the DZ ledger.
 
 ### Shapley solver
 
@@ -160,17 +160,13 @@ Solana sidechain.
 `vote-stake.ts` reads Solana mainnet directly and backs
 `/api/validators/stake`, outside the `/api/onchain/*` namespace.
 
-The registry decoders (`decoders.ts`, `topology.ts`, `validators.ts`)
-are stubs, so `GET /api/onchain/topology` and `GET
-/api/onchain/validators` return `503`. Each one needs the byte layout
-of its account type written and verified against a live account: Metro,
-Device, and Link on the serviceability program, and the payout record
-on the rewards program. That is work in this repository and nothing
-external blocks it. `contributor-directory.ts` reads
-`AccountType::Contributor` from the same serviceability program
+`GET /api/onchain/topology` and `GET /api/onchain/validators` answer
+`503` with a stable `{ ready: false, reason }` shape.
+`contributor-directory.ts` reads `AccountType::Contributor` from the
+DoubleZero serviceability program
 (`ser2VaTMAcYTaauMrTSfSrxBaUDq7BLNs2xfUugTAGv`) by verified byte
-offsets, and `dz-rewards-record.ts` does the same for reward records,
-so the pattern is already proven on both programs. `GET
+offsets, and `dz-rewards-record.ts` reads reward records on the record
+program the same way. `GET
 /api/onchain/{contributors,rewards,contributor-rewards}` read live data
 today and return `502` on an upstream failure.
 
@@ -291,15 +287,6 @@ handling. The engine itself (the `network-shapley-rs` fork) is
 parity-tested against the Foundation's Python reference (`network_shapley`
 and `network_linkestimate`). The smoke harness at `tests/smoke.sh`
 re-validates the deployed service end-to-end.
-
-## Not yet implemented
-
-`/api/onchain/topology` and `/api/onchain/validators` return `503`. The
-Metro, Device, and Link account layouts are not written yet. This is
-our own remaining work: those account types live on the serviceability
-program the contributor directory already reads, and the layout
-technique is proven there. Every other route, including the other
-on-chain readers, runs live.
 
 ## License
 

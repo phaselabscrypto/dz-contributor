@@ -32,7 +32,7 @@ One binary, `dz-shapley-service`, serves two roles selected by the first CLI arg
 
 Both roles share the same `AppState` (in-memory epoch cache, S3 cache handle, API token, job store) and the same graceful-shutdown handler. SIGTERM or Ctrl-C stops the server; an in-flight worker solve winds down within the platform's shutdown grace period, and any interrupted entry is recovered by the worker's `XAUTOCLAIM` sweep under at-least-once delivery.
 
-The split exists so heavy compute runs on workers rather than on API replicas.
+The split is described in [ADR 0001](adr/0001-async-compute-queue.md): heavy compute must run on workers, not on API replicas.
 
 ---
 
@@ -278,7 +278,7 @@ Ordinary synchronous cache writes stay best-effort: spawned, log-only. Without S
 
 ## Snapshot diff index
 
-The changelog and the "recent change digest" card are served from this index, not from snapshot downloads. `src/diff.rs` holds the shape type and the pure diff computations, `src/diff_store.rs` persists them, and `src/diff_routes.rs` serves the requests. The records are immutable per epoch, which is why they are plain objects rather than rows in a database.
+The changelog and the "recent change digest" card are served from this index, not from snapshot downloads. `src/diff.rs` holds the shape type and the pure diff computations, `src/diff_store.rs` persists them, and `src/diff_routes.rs` serves the requests. [ADR 0002](adr/0002-snapshot-diff-index.md) records why the index is immutable per-epoch records rather than a database, and [ADR 0003](adr/0003-cron-side-snapshot-extraction.md) why the cron extracts them.
 
 A **shape** is the lean projection of one epoch's snapshot: `{epoch, links, contributors}`, camelCase on the wire. A `LinkRef` carries `pubkey`, `contributorCode`, `sideACode`, `sideZCode`, `bandwidthGbps`, and `linkType`; a `ContributorRef` carries `code`, `linkCount`, `deviceCount`, and `metroCount`. About 28 KB per epoch against a 110 MB snapshot. The field names are a shared contract with `lib/types/diff.ts`.
 
@@ -353,3 +353,7 @@ HTTP status codes follow standard conventions: 400 for validation failures, 422 
 - [shapley-pipeline.md](shapley-pipeline.md): algorithm semantics (per-city LP, stake-weighted aggregation)
 - [development.md](development.md): local setup, running the service
 - [operations.md](operations.md): environment variable reference, deployment topology
+- [ADR 0001](adr/0001-async-compute-queue.md): rationale for the async compute queue
+- [ADR 0002](adr/0002-snapshot-diff-index.md): why the diff index is immutable per-epoch records
+- [ADR 0003](adr/0003-cron-side-snapshot-extraction.md): why the cron extracts shapes and the service has no snapshot egress
+- [ADR 0004](adr/0004-cache-only-baseline-reads.md): why reads never compute and baselines are keyed by epoch tag

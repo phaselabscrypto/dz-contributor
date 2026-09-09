@@ -1,10 +1,8 @@
 # On-chain reader status
 
-This directory contains DZ ledger and Solana mainnet readers. **Not
-all files are live**: the sections below say which paths are verified
-against on-chain data and which are stubs. Every stub is waiting on
-byte-layout work in this repository. Nothing here is blocked on an
-external dependency.
+This directory contains the DZ ledger and Solana mainnet readers. The
+sections below say which paths are verified against on-chain data and
+which are not wired to a route yet.
 
 ## ✅ Live (verified end-to-end)
 
@@ -20,15 +18,12 @@ into production API routes and the site UI depends on them.
 These modules use `@solana/web3.js Connection` directly, require
 `DZ_LEDGER_RPC_URL` to be set, and show clear errors when it's not.
 
-## Not implemented (stubs)
+## Not wired
 
-These modules exist so call sites can be wired against a stable
-function signature before the decoders are written. Every call throws
-`OnchainNotConfigured` or returns `{ epochs: [], source: "stub" }`.
-
-Each one needs the byte layout of its account type, verified against a
-live account. The live modules above were built exactly that way, and
-the same approach applies here.
+These modules hold a stable function signature so call sites can be
+written against them. Each one needs the byte layout of its account
+type, verified against a live account, the way the live modules above
+were built.
 
 | Module | What it would read | What it needs |
 |---|---|---|
@@ -66,10 +61,9 @@ same way and matches the Foundation CLI byte for byte.
 Metro, Device, and Link are account types on that same program. Reading
 them is the work above, repeated for three more layouts.
 
-## Why stubs rather than no code at all
+## Why keep the signatures
 
 1. **Call-site stability.** Consumers that want on-chain reads can wire
    against the function signatures today.
-2. **Discoverability.** Grep for `OnchainNotConfigured` to see what is
-   unimplemented against what is live. A stub is loud. Missing
-   scaffolding is silent.
+2. **Discoverability.** Grep for `OnchainNotConfigured` to find every
+   call site that is not yet wired.

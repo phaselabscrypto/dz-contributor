@@ -95,7 +95,7 @@ docker run --env-file .env -p 8080:8080 <registry>/dz-shapley-service:<tag> api
 docker run --env-file .env <registry>/dz-shapley-service:<tag> worker
 ```
 
-Run one or more API processes behind a load balancer and one or more worker processes consuming from the shared Redis stream. Scale compute by adding workers; the queue is the only thing they share. [shapley-service.md](shapley-service.md) describes the job lifecycle.
+Run one or more API processes behind a load balancer and one or more worker processes consuming from the shared Redis stream. The job queue design and horizontal scaling rationale are documented in [adr/0001-async-compute-queue.md](adr/0001-async-compute-queue.md).
 
 ### Redis and the result cache
 
@@ -103,7 +103,7 @@ Provision a Redis instance with Streams support (Redis 5.0 or later). Set a pass
 
 An S3-compatible bucket is required in production. Set `S3_CACHE_BUCKET` to turn it on, `S3_CACHE_ENDPOINT` too when the bucket is not AWS S3 so the client switches to path-style addressing, and `AWS_REGION` plus the standard credential pair. The bucket holds three things the site depends on: solver results keyed by input hash, the epoch baseline aliases and sweep markers under `shapley/v3/publication/v1/` that every user-facing Shapley read probes, and the diff shapes under `diff/v1/` behind the changelog. Without it, every baseline read is `404 not-cached`, sweep status is always incomplete, `PUT /diff/shape` answers `503`, and nothing survives a restart.
 
-Neither role reads the public snapshot bucket. The cron downloads each epoch's snapshot and pushes the derived input, alias, and diff shape to the service, so the processes need egress only to Redis and the object store.
+Neither role reads the public snapshot bucket. The cron downloads each epoch's snapshot and pushes the derived input, alias, and diff shape to the service, so the processes need egress only to Redis and the object store. [ADR 0003](adr/0003-cron-side-snapshot-extraction.md) records why.
 
 ### REDIS_URL behavior
 
@@ -181,7 +181,7 @@ Consumed by the Next.js server-side code. Set via `vercel env add <NAME> product
 | `DZ_IBRL_PRIORITY` | `20.0` | Objective weight of unicast demands in the canonical Shapley input (`CANONICAL_SHAPLEY_PARAMS`, `lib/constants/config.ts`). Part of the epoch tag fingerprint in `lib/utils/sweep-tag.ts`, so changing it makes every published alias and sweep marker miss until the cron republishes. | DoubleZero's current default. |
 | `DZ_PUBLIC_LATENCY_MULTIPLIER` | `1.25` | Scale applied to public-internet link latency in the canonical input. Also part of the epoch tag fingerprint. | DoubleZero's current default. |
 | `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Solana mainnet RPC endpoint used by on-chain routes (`lib/onchain/program-ids.ts`). The public default is rate-limited; a dedicated provider is recommended for production. | Uses the public Solana mainnet RPC. |
-| `DZ_REGISTRY_PROGRAM_ID` | `""` | DZ master registry program (Metro/Device/Link/Contributor accounts). Unset; the registry reader is unimplemented. The serviceability program id is known and hardcoded in `lib/onchain/contributor-directory.ts`. Setting this implicitly turns on `ONCHAIN_ENABLED` (`lib/onchain/program-ids.ts`). | On-chain routes return 503. |
+| `DZ_REGISTRY_PROGRAM_ID` | `""` | Program the registry reader in `lib/onchain/topology.ts` would query. Leave it unset. The serviceabilitmented. The serviceability program id is known and hardcoded in `lib/onchain/contributor-directory.ts`. Setting this implicitly turns on `ONCHAIN_ENABLED` (`lib/onchain/program-ids.ts`). | On-chain routes return 503. |
 | `DZ_REWARDS_PROGRAM_ID` | `""` | DZ revenue-distribution program on Solana mainnet. Known address: `dzrevZC94tBLwuHw1dyynZxaXTWyp7yocsinyEVPtt4`. | On-chain rewards routes are unavailable. |
 | `ONCHAIN_ENABLED` | Unset (effectively disabled) | Master switch for `/api/onchain/*` routes. Derived in `lib/onchain/program-ids.ts` as `Boolean(DZ_REGISTRY_PROGRAM_ID) \|\| process.env.ONCHAIN_ENABLED === "1"`. Only the literal string `"1"` turns it on; setting `DZ_REGISTRY_PROGRAM_ID` turns it on implicitly. | On-chain routes return 503 with a stable error shape. |
 | `DZ_ACCOUNT_HAS_DISCRIMINATOR` | `"1"` | Whether on-chain accounts carry an 8-byte Anchor discriminator prefix before the borsh payload (`lib/onchain/borsh-registry.ts`). Set to `"0"` for raw borsh structs. | Assumes the discriminator is present and strips 8 bytes before decode. |
