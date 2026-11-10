@@ -27,7 +27,10 @@ RUN cargo build --release
 # the binary now dynamically links libstdc++ (HiGHS C++) and needs the builder's
 # glibc (GLIBC_2.39) + libstdc++ (CXXABI_1.3.15, gcc-14). bookworm (glibc 2.36,
 # no libstdc++) can't run it. trixie supplies both; libstdc++6/libgcc-s1 added.
-FROM debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 AS runtime
+# Pinned to Debian 13.7 (was 13.5): picks up the trixie security updates to
+# libc6, libssl3t64, liblzma5, libpcre2, libsqlite3, gzip and util-linux.
+# Refresh this digest periodically; the base layer gets no updates otherwise.
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libstdc++6 libgcc-s1 \
     && rm -rf /var/lib/apt/lists/* \

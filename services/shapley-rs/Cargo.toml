@@ -37,7 +37,12 @@ rayon = "1"
 
 # S3 cache persistence
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1"
+# No default features: the default `rustls` feature is the SDK's legacy
+# hyper-0.14 + rustls-0.21 client (RUSTSEC-2026-0098/0099/0104/0346/0349/0382,
+# h2 0.3 RUSTSEC-2026-0258), and `sigv4a` (multi-region access points, unused)
+# pulls crypto-bigint 0.5 (RUSTSEC-2026-0387). `default-https-client` is the
+# current rustls client the service already used.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["http-1x", "default-https-client", "rt-tokio"] }
 
 # Serialization for cache
 bincode = "1"
